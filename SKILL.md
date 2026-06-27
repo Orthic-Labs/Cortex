@@ -31,7 +31,9 @@ blueprint "<task>"   # also writes a task-scoped runs/<ts>-<task>/TASK-BRIEF.md
 blueprint doctor     # validate graph integrity, list missing refs
 ```
 
-For a quick task orientation, Phase 1 alone is often enough — read `TASK-BRIEF.md` and stop. Run Phase 2 when the goal is full understanding, an audit, or onboarding.
+The bare `blueprint` command runs **Phase 1 only** — it exits after writing the map, so an agent that just runs the command naturally stops there. That is the right stopping point ONLY for a quick task-scoped brief (read `TASK-BRIEF.md` and go).
+
+**If the intent is to UNDERSTAND / inherit / audit / onboard the repo, Phase 1 is not the deliverable — continue to Phase 2.** Do not report the repo as "mapped" or "understood" after Phase 1 alone; that only produced the deterministic skeleton, with claims still UNVERIFIED. Either run Phase 2 now, or explicitly tell the user you stopped at the cheap Phase-1 map and offer Phase 2.
 
 ## Phase 2 — verify + synthesize (parallel agents)
 
