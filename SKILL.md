@@ -17,6 +17,7 @@ Machine, for agents:
 - `queue.json` — the grounded Phase-2 worklist: each claim paired with the code files its own doc references, plus the largest implementation files as `anchors`.
 - `verdicts.json` — per-claim verification (Phase 2).
 - `understanding.json` — the synthesized understanding layer across 5 dimensions (Phase 2).
+- `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
 
 Human, ONE file:
 - `START-HERE.md` — stats, graph, key docs, and after Phase 2 a folded summary (verified facts, top risks, maturity). The only file a person opens.
@@ -37,11 +38,11 @@ The bare `blueprint` command runs **Phase 1 only** — it exits after writing th
 
 ## Phase 2 — verify + synthesize (parallel agents)
 
-Drive this with a Workflow so verification and synthesis pipeline together. Read `queue.json` and `map.json` first; pass file paths to agents, never whole-file dumps.
+Drive this as a pipeline (Claude: the Workflow tool; Codex/other: an equivalent batch loop) so verification and synthesis flow together. Read `queue.json` and `map.json` first; pass file paths/excerpts, never whole-file dumps.
 
-**Models (hard):** verification = **haiku** (bounded check, one claim-batch each). Synthesis = **sonnet** (judgment). Never spawn an opus agent. The machine-minimal directive is auto-prepended to every spawn — write only the structured task body.
+**Models (hard) — cheap-model FIRST per the workspace rule.** Verification is read-only, mechanical claim-checking → it MUST go to the free/cheap API models via the **`/coder` api-worker batch** by default (CLAUDE.md / AGENTS.md "offload read-only work to cheap models"; this mirrors how `/audit` runs its lenses). Native **haiku** agents are the FALLBACK — only for a claim whose evidence can't be safely redacted into a worker prompt. Synthesis (2b) is judgment → **sonnet** (or an api-worker if it can be redacted). Never spawn an opus agent. Whichever path, pass file paths/excerpts, never whole-file dumps; the machine-minimal directive is auto-prepended to every native spawn — write only the structured task body.
 
-**2a. Verification (haiku, batched).** Take the claims worth checking — `status` in `implemented|stale|contradict|decision|canonical`, or any claim with `candidateFiles` — and split into ~6–10 batches. Each agent reads only the claim text and its `candidateFiles`, returns one verdict per claim. **Read the FULL files here — never `skel` a file you're verifying; confirming a claim needs the actual body.** Schema:
+**2a. Verification (api-worker batch first; haiku fallback).** Take the claims worth checking — `status` in `implemented|stale|contradict|decision|canonical`, or any claim with `candidateFiles` — and split into ~6–10 batches. Build a `py -3.11 D:/Claude/tools/skills/coder/scripts/api-worker.py --batch` manifest (one item per claim-batch: the claim text + its `candidateFiles` excerpts) and read the verdict JSON back; drop to a native haiku agent only for batches the worker can't handle. Each item reads only the claim text and its `candidateFiles`, returns one verdict per claim. **Read the FULL files here — never `skel` a file you're verifying; confirming a claim needs the actual body.** Schema:
 
 ```json
 [{"claimId":"...","source":"path","line":12,"verdict":"verified|contradicted|stale|unverifiable","evidence":"path:line","note":"<=160 chars"}]
@@ -49,7 +50,7 @@ Drive this with a Workflow so verification and synthesis pipeline together. Read
 
 Merge to `verdicts.json`. A `contradicted` verdict is the highest-value output — it means a doc claim the next agent would have trusted is false. For high-stakes claims (`decision`/`canonical`/`contradict`, or any "DONE / shipped / verified-on-prod" assertion), use **≥2 verifiers** and take the worst verdict if they disagree — single-verifier judgments on nuanced completion claims are noisy (observed in testing: two verifiers split verified-vs-stale on the same claim).
 
-**2b. Synthesis (sonnet, 5 agents in one fan-out).** One agent per dimension, each grounded in `anchors` + `map.json` + `verdicts.json`. **Feed each agent `skel`'d anchors (run `skel <anchor>` — tree-sitter skeletons, ~78% fewer tokens) instead of raw files: synthesis needs structure, not every body. Agents pull the full body only for a specific span they must read closely.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. Merge into `understanding.json`:
+**2b. Synthesis (judgment-tier, 5 items in one fan-out).** Use a judgment-tier model — Claude **sonnet**, or an api-worker batch where the anchors redact safely; **never opus**. One item per dimension, each grounded in `anchors` + `map.json` + `verdicts.json`. **Feed each agent `skel`'d anchors (run `skel <anchor>` — tree-sitter skeletons, ~78% fewer tokens) instead of raw files: synthesis needs structure, not every body. Agents pull the full body only for a specific span they must read closely.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. Merge into `understanding.json`:
 
 - `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `crossCutting[]`. Trace one real request/command end to end.
 - `interfaces` — `publicApi[]`, `moduleInterfaces[]`, `dataContracts[]`, `configKeys[]`, `extensionPoints[]`, `fragileContracts[]`.
@@ -59,11 +60,69 @@ Merge to `verdicts.json`. A `contradicted` verdict is the highest-value output �
 
 ## Phase 3 — fold into the one human doc (main session)
 
-Append to `START-HERE.md`: a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. Then open it:
+Append to `START-HERE.md`: a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The Phase-4 RECONCILE block (below) goes at the **very top**, above everything else — it is the one thing the user must act on. Then open it:
 
 ```bash
 node D:/Claude/tools/lib/open-for-review.mjs "<repo>/.agent/START-HERE.md"
 ```
+
+## Phase 4 — doc-reconcile (the whole point: catch when agents didn't do what was expected)
+
+Phase 2 already flags every `contradicted`/`stale` verdict — a doc claim the code disproves. **A doc
+that says "planned" or "implemented" while the code doesn't reflect it is the highest-value signal
+blueprint produces: it usually means an agent did NOT do what the plan expected.** Phase 4 turns each
+such divergence into a decision the user must make. Run it whenever Phase 2 produced any
+`contradicted`/`stale` verdict (it is cheap — it reasons over `verdicts.json` + a doc search, no new
+code analysis).
+
+**Authority order (state it; it resolves every divergence):**
+`executable proof > current code > canonical docs > historical docs`. Running code beats a doc; a
+recent decision doc beats an old plan; nothing beats a passing test/command.
+
+**Per divergence (each `contradicted`/`stale` claim):**
+
+1. **Search for a superseding doc.** Grep the repo + canonical-doc set for the topic; compare dates
+   (filename date, frontmatter, `git log`). Is there a NEWER doc with a decision/plan that explains
+   why the code differs? If yes → classify `SUPERSEDED-BY <newer-doc>` and the proposed reconciliation
+   is "mark the old doc superseded by the new one."
+2. **Classify code vs the documented plan** — is the code a *clear improvement* over the plan?
+   - **`CODE-IS-BETTER`** — the code is a clear improvement; the doc is stale-but-code-won. Surface it:
+     the plan was superseded in practice and the doc should catch up.
+   - **`CODE-FELL-SHORT`** — the code does NOT meet the plan (missing, partial, or worse). Surface it
+     LOUDLY: **this is an agent not doing what was expected** — the exact thing blueprint exists to catch.
+     Do not let it read as a stale doc; it is a delivery gap.
+   - **`SUPERSEDED-BY x`** — a newer doc already changed the plan (from step 1); the old doc just needs marking.
+
+3. **Emit `reconcile.json`** (machine) — one entry per divergence:
+   ```json
+   {"claimId":"...","doc":"path","line":42,"claim":"<what the doc says>",
+    "codeReality":"<what the code actually does> [path:line]",
+    "verdict":"CODE-IS-BETTER|CODE-FELL-SHORT|SUPERSEDED-BY",
+    "supersededBy":"path|null","proposedReconciliation":"<one line>","decision":null}
+   ```
+
+### The RECONCILE block — the ONE hard blocker, never buried
+
+The user's reconciliation decision is the **only hard blocker** in blueprint, and it must be
+**impossible to miss** — a loud banner at the TOP of `START-HERE.md`, never a paragraph in a sea of
+prose. Render it exactly like this, above the Verified-Facts/Contradictions sections:
+
+```markdown
+> ## ⚠️ RECONCILE — <N> DECISIONS NEEDED (blocker)
+> The code and the docs disagree on <N> things. You decide how to reconcile each. Nothing else here matters until these are settled.
+>
+> | # | The doc says | The code actually does | Verdict | Proposed fix | Your call |
+> |---|---|---|---|---|---|
+> | 1 | "wake KWS ported to Rust app" — `roadmap.md:88` | not ported; still TODO — `wake_word.rs:12` | **CODE-FELL-SHORT** (agent didn't do it) | keep doc as TODO, OR file the gap | ☐ |
+> | 2 | "uses Higgsfield Soul refs" — `pipeline.md:40` | replaced by NB2 multi-ref — `render-char-refs.mjs:8` | **CODE-IS-BETTER** | update doc to NB2 | ☐ |
+> | 3 | "$69/$99 pricing" — `business-plan.md:5` | n/a (no code) — newer `hr_pricing_2026_06_28.md` | **SUPERSEDED-BY** newer doc | mark `business-plan.md` superseded | ☐ |
+```
+
+**Blueprint does NOT auto-patch.** It PROPOSES the reconciliation (including "mark <old> superseded by
+<new>") and applies a doc edit ONLY on the user's per-item decision — the user owns how docs get
+reconciled. Application **code** is never touched (Phase 4 keeps the read-only-code contract; it only
+ever edits *docs*, and only after the user decides). After decisions, apply the chosen doc edits with
+`apply_patch`/Edit, then re-open `START-HERE.md`.
 
 ## Tuning
 
@@ -75,5 +134,6 @@ Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. ra
 - Never modify application code. Blueprint only reads code and writes under `.agent/`.
 - Every architecture claim is `file:line`-backed.
 - Redact secret values — report location + presence only.
-- Verification on haiku, synthesis on sonnet, never opus. Pass paths, not file dumps.
+- Verification via cheap `/coder` api-workers FIRST (native haiku only as fallback); synthesis on sonnet; never opus. Pass paths/excerpts, not file dumps.
 - Captures CURRENT state. Fix punch-lists are `/audit`; new designs are `architect`.
+- **Phase 4 reconciles DOCS, never code.** A code↔doc divergence is surfaced as a user decision in the loud RECONCILE block (the only hard blocker); blueprint proposes the doc edit (incl. "superseded by") and applies it ONLY on the user's call. `CODE-FELL-SHORT` (an agent didn't do what the plan expected) must be surfaced loudly, not softened into "stale doc."
