@@ -616,7 +616,9 @@ function brief(root, outDir, options) {
         !/^(expected:|assert!?|\/\/)/i.test(claim.text),
     )
     .slice(0, config.budgets.maxGotchas);
-  const runDir = join(outDir, "runs", `${timestamp()}-${slug(task)}`);
+  // One dir per task (no timestamp): reruns of the same task overwrite the four fixed output files
+  // instead of accumulating. runs/ is gitignored working state, not a history log.
+  const runDir = join(outDir, "runs", slug(task) || "task");
   const sources = diverseClaims.map((claim) => ({
     id: claim.id,
     source: claim.source,
@@ -654,10 +656,6 @@ function brief(root, outDir, options) {
     process.exitCode = 2;
   }
   return { runDir, readFirst, sources, rebuilt, missingExpected };
-}
-
-function timestamp() {
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
 }
 
 function taskBrief({ task, rebuilt, readFirst, truths, gotchas, sources, evidence, map }) {
