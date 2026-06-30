@@ -22,6 +22,9 @@ Machine, for agents:
 Human, ONE file:
 - `START-HERE.md` — stats, graph, key docs, and after Phase 2 a folded summary (verified facts, top risks, maturity). The only file a person opens.
 
+Portable, for any agent (OKF):
+- `okf/` — the understanding layer as an **Open Knowledge Format** bundle (one markdown concept per component/interface/risk; required `type` frontmatter; concepts linked as a graph; auto `index.md`), prose **compressed** structure-safely (refs/code/links preserved). **MANDATORY Phase-2 close — not optional, not agent discretion:** run `py -3.11 D:/Claude/tools/lib/skill_emit.py blueprint <repo>` — it transforms `understanding.json` → OKF concepts (one per dimension; YAML `type` frontmatter) → emits the bundle AND ingests it into the memory engine, recallable immediately. The bare `okf.py emit` is the low-level primitive; skills call `skill_emit`, never okf.py directly. Portable into CodeRight and any OKF-aware agent; the JSON stays the structured source and `START-HERE.md` stays the uncompressed human doc. Pattern + before/after: `tools/lib/OKF-OUTPUT.md`.
+
 ## Phase 1 — deterministic map (always run first)
 
 From the repo root:
@@ -50,7 +53,7 @@ Drive this as a pipeline (Claude: the Workflow tool; Codex/other: an equivalent 
 
 Merge to `verdicts.json`. A `contradicted` verdict is the highest-value output — it means a doc claim the next agent would have trusted is false. For high-stakes claims (`decision`/`canonical`/`contradict`, or any "DONE / shipped / verified-on-prod" assertion), use **≥2 verifiers** and take the worst verdict if they disagree — single-verifier judgments on nuanced completion claims are noisy (observed in testing: two verifiers split verified-vs-stale on the same claim).
 
-**2b. Synthesis (judgment-tier, 5 items in one fan-out).** Use a judgment-tier model — Claude **sonnet**, or an api-worker batch where the anchors redact safely; **never opus**. One item per dimension, each grounded in `anchors` + `map.json` + `verdicts.json`. **Feed each agent `skel`'d anchors (run `skel <anchor>` — tree-sitter skeletons, ~78% fewer tokens) instead of raw files: synthesis needs structure, not every body. Agents pull the full body only for a specific span they must read closely.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. Merge into `understanding.json`:
+**2b. Synthesis (judgment-tier, 5 items in one fan-out).** Use a judgment-tier model — Claude **sonnet**, or an api-worker batch where the anchors redact safely; **never opus**. One item per dimension, each grounded in `anchors` + `map.json` + `verdicts.json`. **Feed each agent `prep-context`'d anchors — `py -3.11 D:/Claude/tools/lib/prep-context.py <tmp> <anchors...>` routes code→`skel` (~78% fewer tokens) and prose→`compress` (structure-safe) and returns a manifest; hand agents the prepared copies, not raw files. Synthesis needs structure, not every body; agents pull the full body only for a specific span they must read closely. SURVEY/SYNTHESIS reads only — verification (2a) reads FULL. Stack map: `tools/lib/COMPACTION.md`.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. Merge into `understanding.json`:
 
 - `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `crossCutting[]`. Trace one real request/command end to end.
 - `interfaces` — `publicApi[]`, `moduleInterfaces[]`, `dataContracts[]`, `configKeys[]`, `extensionPoints[]`, `fragileContracts[]`.
