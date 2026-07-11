@@ -6,8 +6,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  applyBudgetApproval,
   loadTasks,
+  makeBlueprintStaticProvider,
   makeFallbackProvider,
+  normalizeGitNexusContext,
   qualifyProvider,
   schemaHash,
   selectProvider,
@@ -19,6 +22,24 @@ const BLUEPRINT = path.resolve(HERE, "..");
 const TASKS = path.join(BLUEPRINT, "evals/graph-tasks.jsonl");
 const REPOS = path.join(BLUEPRINT, "evals/fixture-repos");
 const SCHEMA = path.resolve(BLUEPRINT, "../../lib/context-contracts.schema.json");
+
+test("GitNexus context is normalized into exact Blueprint evidence", () => {
+  const normalized = normalizeGitNexusContext({
+    status: "found",
+    symbol: { uid: "Method:src/service.ts:OrderService.placeOrder#1", name: "placeOrder", kind: "Method", filePath: "src/service.ts", startLine: 5, endLine: 8 },
+    incoming: { calls: [{ uid: "Function:src/routes.ts:registerOrderRoute", name: "registerOrderRoute", filePath: "src/routes.ts" }] },
+    outgoing: { calls: [{ uid: "Method:src/store.ts:OrderStore.save#1", name: "save", filePath: "src/store.ts" }] },
+  }, REPOS + "/typescript-commerce");
+
+  assert.deepEqual(normalized.evidence[0], {
+    path: "src/service.ts",
+    startLine: 6,
+    endLine: 9,
+    contentHash: createHash("sha256").update(fs.readFileSync(path.join(REPOS, "typescript-commerce/src/service.ts"))).digest("hex"),
+  });
+  assert.ok(normalized.edges.some((edge) => edge.source.name === "registerOrderRoute" && edge.target.name === "placeOrder"));
+  assert.ok(normalized.edges.some((edge) => edge.source.name === "placeOrder" && edge.target.name === "save"));
+});
 
 
 test("locked task rows point to real bounded evidence", () => {
@@ -67,6 +88,17 @@ test("fallback measures lexical semantic retrieval instead of reporting blanket 
   assert.ok(report.tasks[0].primaryRank >= 1 && report.tasks[0].primaryRank <= 10);
   assert.equal(report.semantic.tasks, 1);
   assert.equal(report.semantic.macroRecallAt10, 1);
+});
+
+test("blueprint-static earns mandatory structural evidence without external provider state", async () => {
+  const tasks = loadTasks(TASKS).filter((item) => item.qualificationClass === "mandatory_structural");
+  const report = await qualifyProvider(makeBlueprintStaticProvider({ schemaPath: SCHEMA }), tasks, REPOS);
+
+  assert.equal(report.status, "passed");
+  assert.equal(report.gates.correctness, true);
+  assert.ok(report.tasks.every((item) => item.state === "passed"));
+  assert.ok(report.tasks.find((item) => item.id === "ts-config-resource").evidence.some((item) => item.path === "resources/orders.json"));
+  assert.ok(report.tasks.find((item) => item.id === "ts-test-coverage").evidence.some((item) => item.path === "test/service.test.ts"));
 });
 
 
@@ -215,6 +247,12 @@ test("selection is blocked unless one provider passes every mandatory gate and b
     { outcome: "budget_approval_pending", selectedProvider: null },
   );
   assert.deepEqual(selectProvider([failed, passing]), { outcome: "selected", selectedProvider: "provider-a" });
+});
+
+test("budget approval can be applied to provider reports", () => {
+  const report = { id: "blueprint-static", budgetApproval: "pending" };
+  assert.deepEqual(applyBudgetApproval([report], "approved"), [{ id: "blueprint-static", budgetApproval: "approved" }]);
+  assert.deepEqual(applyBudgetApproval([report], "pending"), [report]);
 });
 
 

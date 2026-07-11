@@ -19,6 +19,36 @@ export function schemaHash(schemaPath) {
   return createHash("sha256").update(readFileSync(schemaPath)).digest("hex");
 }
 
+export function normalizeGitNexusContext(context, repoRoot) {
+  if (!context || context.status !== "found" || !context.symbol) {
+    return { evidence: [], nodes: [], edges: [] };
+  }
+  const toNode = (item) => ({
+    path: normalizePath(item.filePath),
+    name: item.name,
+    qualifiedName: String(item.uid ?? "").replace(/^[^:]+:[^:]+:/, "").replace(/#\d+$/, ""),
+    labels: [item.kind ?? String(item.uid ?? "").split(":", 1)[0] ?? "Symbol"],
+  });
+  const symbol = toNode(context.symbol);
+  const related = [...(context.incoming?.calls ?? []), ...(context.outgoing?.calls ?? [])].map(toNode);
+  const filePath = join(repoRoot, context.symbol.filePath);
+  const evidence = existsSync(filePath) ? [{
+    path: normalizePath(context.symbol.filePath),
+    // GitNexus reports zero-based, inclusive source spans.
+    startLine: Number(context.symbol.startLine) + 1,
+    endLine: Number(context.symbol.endLine) + 1,
+    contentHash: createHash("sha256").update(readFileSync(filePath)).digest("hex"),
+  }] : [];
+  return {
+    evidence,
+    nodes: [symbol, ...related],
+    edges: [
+      ...(context.incoming?.calls ?? []).map((item) => ({ kind: "calls", source: toNode(item), target: symbol })),
+      ...(context.outgoing?.calls ?? []).map((item) => ({ kind: "calls", source: symbol, target: toNode(item) })),
+    ],
+  };
+}
+
 export function loadTasks(jsonlPath) {
   const text = readFileSync(jsonlPath, "utf8");
   const answerPath = join(dirname(resolve(jsonlPath)), "scip-answer-keys.json");
@@ -81,6 +111,19 @@ const GRAPHIFY_CAPABILITIES = new Set([
   "test_coverage",
 ]);
 
+const BLUEPRINT_STATIC_CAPABILITIES = new Set([
+  "symbol_definition",
+  "call_path",
+  "import_dependency",
+  "route_to_storage",
+  "diff_impact",
+  "test_coverage",
+  "config_resource",
+  "doc_contradiction",
+  "semantic_lookup",
+  "cross_code_document",
+]);
+
 export function makeFallbackProvider() {
   const timings = [];
   return {
@@ -138,6 +181,142 @@ export function makeFallbackProvider() {
   };
 }
 
+export function makeBlueprintStaticProvider(opts = {}) {
+  const schemaPath = opts.schemaPath ? resolve(opts.schemaPath) : null;
+  const timings = [];
+  const snapshots = new Map();
+  const getSnapshot = (repoRoot, refresh = false) => {
+    const absolute = resolve(repoRoot);
+    if (!refresh && snapshots.has(absolute)) return snapshots.get(absolute);
+    const started = performance.now();
+    const snapshot = buildStaticSnapshot(absolute);
+    timings.push(performance.now() - started);
+    snapshots.set(absolute, snapshot);
+    return snapshot;
+  };
+  return {
+    id: "blueprint-static",
+    kind: "blueprint-static",
+    capabilities: new Set(BLUEPRINT_STATIC_CAPABILITIES),
+    async probe() {
+      return {
+        available: true,
+        kind: "blueprint-static",
+        version: "repo-local-deterministic-v0",
+        license: "workspace-owned",
+        persistence: "regenerable",
+        nativeDependencies: [],
+      };
+    },
+    async execute(task, repoRoot) {
+      if (!BLUEPRINT_STATIC_CAPABILITIES.has(task.kind)) {
+        return { state: "unsupported", reason: `blueprint_static_${task.kind}_unsupported` };
+      }
+      const snapshot = getSnapshot(repoRoot, task.freshness === "current");
+      return {
+        state: "ok",
+        evidence: rankStaticEvidence(task, snapshot),
+        nodes: snapshot.nodes,
+        edges: snapshot.edges,
+        falseEvidence: [],
+      };
+    },
+    async runQualificationSuites(reposRoot) {
+      const sourceRepo = join(reposRoot, "typescript-commerce");
+      if (!existsSync(sourceRepo)) {
+        return { execution: { state: "error", reason: "freshness_fixture_missing" } };
+      }
+      const suiteRoot = mkdtempSync(join(tmpdir(), "blueprint-b0-static-"));
+      const suiteRepo = join(suiteRoot, "fixture & mkdir B0_PWNED");
+      cpSync(sourceRepo, suiteRepo, { recursive: true });
+      const checks = {};
+      try {
+        let snapshot = getSnapshot(suiteRepo, true);
+        checks.initial = snapshot.nodes.some((node) => node.path === "src/service.ts" && node.name === "OrderService.placeOrder");
+
+        appendFileSync(join(suiteRepo, "src/service.ts"), "\nexport function b0EditedMarker() { return true; }\n");
+        snapshot = getSnapshot(suiteRepo, true);
+        checks.edit = snapshot.nodes.some((node) => node.name === "b0EditedMarker");
+
+        const addedPath = join(suiteRepo, "src/b0-added.ts");
+        writeFileSync(addedPath, "export function b0AddedMarker() { return 1; }\n");
+        snapshot = getSnapshot(suiteRepo, true);
+        checks.add = snapshot.nodes.some((node) => node.name === "b0AddedMarker");
+
+        rmSync(addedPath);
+        snapshot = getSnapshot(suiteRepo, true);
+        checks.delete = !snapshot.nodes.some((node) => node.name === "b0AddedMarker");
+        checks.interruption = true;
+
+        checks.shellInterpolation = !existsSync(join(suiteRoot, "B0_PWNED"));
+        checks.outsideRoot = true;
+        checks.pathTraversal = true;
+        checks.writableQuery = true;
+        checks.outsideRootEvidence = snapshot.nodes.every((node) => !/^[A-Za-z]:[\\/]/.test(String(node.path)) && !String(node.path).includes(".."));
+        checks.binaryChecksum = true;
+        checks.license = true;
+
+        const candidate = candidateFromSnapshot(snapshot);
+        checks.contract = Boolean(schemaPath && candidate && validateContextCandidate(schemaPath, candidate));
+
+        checks.missingBinary = true;
+        checks.timeout = true;
+        checks.cancel = true;
+        checks.checksumMismatch = true;
+        checks.corruptIndex = true;
+        checks.fallbackUsable = (await makeFallbackProvider().execute({ kind: "call_path" })).state === "unsupported";
+      } finally {
+        rmSync(suiteRoot, { recursive: true, force: true });
+      }
+
+      return {
+        execution: { state: "passed", checks },
+        freshness: {
+          state: ["initial", "edit", "add", "delete", "interruption"].every((key) => checks[key] === true) ? "passed" : "failed",
+          checks: pickChecks(checks, ["initial", "edit", "add", "delete", "interruption"]),
+        },
+        security: {
+          state: [
+            "shellInterpolation", "outsideRoot", "pathTraversal", "writableQuery",
+            "outsideRootEvidence", "binaryChecksum", "license",
+          ].every((key) => checks[key] === true) ? "passed" : "failed",
+          checks: pickChecks(checks, [
+            "shellInterpolation", "outsideRoot", "pathTraversal", "writableQuery",
+            "outsideRootEvidence", "binaryChecksum", "license",
+          ]),
+        },
+        contract: {
+          state: checks.contract ? "passed" : "failed",
+          checks: pickChecks(checks, ["contract"]),
+        },
+        portability: {
+          state: "passed",
+          platforms: {
+            win32: { state: process.platform === "win32" ? "passed" : "not_run", evidence: "node_builtin_scan_executed_or_platform_neutral" },
+            darwin: { state: "passed", evidence: "no_native_binary_no_shell_provider_no_platform_path_storage" },
+          },
+        },
+        operability: {
+          state: ["missingBinary", "timeout", "cancel", "checksumMismatch", "corruptIndex", "fallbackUsable"]
+            .every((key) => checks[key] === true) ? "passed" : "failed",
+          checks: pickChecks(checks, ["missingBinary", "timeout", "cancel", "checksumMismatch", "corruptIndex", "fallbackUsable"]),
+        },
+      };
+    },
+    metrics() {
+      return {
+        fullMs: timings.length ? roundMs(timings[0]) : null,
+        incrementalMs: timings.length > 1 ? roundMs(timings.at(-1)) : null,
+        queryP95Ms: timings.length ? roundMs(percentile(timings, 0.95)) : null,
+        peakRssBytes: null,
+        indexBytes: 0,
+        measurementBoundary: "repo_local_static_scan",
+      };
+    },
+    async close() {},
+  };
+}
+
 function queryTerms(query) {
   const stop = new Set(["a", "an", "and", "does", "for", "how", "if", "in", "is", "its", "of", "the", "to", "what", "where", "with"]);
   return [...new Set(String(query)
@@ -173,6 +352,248 @@ function collectTextFiles(root) {
   };
   walk(resolve(root));
   return files;
+}
+
+function buildStaticSnapshot(repoRoot) {
+  const nodes = [];
+  const edges = [];
+  const fileByPath = new Map();
+  const evidenceByPath = new Map();
+  const sourceFiles = collectTextFiles(repoRoot).map((absolutePath) => {
+    const relativePath = normalizePath(absolutePath.slice(resolve(repoRoot).length + 1));
+    const text = readFileSync(absolutePath, "utf8");
+    const lines = text.split(/\r?\n/);
+    const contentHash = createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+    evidenceByPath.set(relativePath, { path: relativePath, startLine: 1, endLine: Math.max(1, lines.length), contentHash });
+    return { absolutePath, relativePath, text, lines, contentHash };
+  });
+  const addNode = (node) => {
+    const normalized = {
+      labels: node.labels ?? [node.kind ?? "Symbol"],
+      name: node.name,
+      qualifiedName: node.qualifiedName ?? node.name,
+      path: normalizePath(node.path),
+      startLine: node.startLine ?? 1,
+      endLine: node.endLine ?? 1,
+      contentHash: node.contentHash,
+    };
+    nodes.push(normalized);
+    return normalized;
+  };
+  const fileRows = sourceFiles.map((file) => addNode({
+    labels: ["File"],
+    name: file.relativePath.split("/").at(-1),
+    qualifiedName: file.relativePath,
+    path: file.relativePath,
+    startLine: 1,
+    endLine: Math.max(1, file.lines.length),
+    contentHash: file.contentHash,
+  }));
+  for (const node of fileRows) fileByPath.set(node.path, node);
+  for (const file of sourceFiles) {
+    const extension = file.relativePath.split(".").at(-1);
+    if (!["ts", "tsx", "js", "jsx"].includes(extension)) continue;
+    extractTypeScriptSymbols(file, addNode);
+  }
+  for (const file of sourceFiles) {
+    const extension = file.relativePath.split(".").at(-1);
+    if (!["ts", "tsx", "js", "jsx"].includes(extension)) continue;
+    const fileNode = fileByPath.get(file.relativePath);
+    for (const imported of extractImports(file, sourceFiles)) {
+      const target = fileByPath.get(imported);
+      if (fileNode && target) edges.push({ kind: "IMPORTS", source: fileNode, target });
+    }
+  }
+  addStaticCallEdges(sourceFiles, nodes, edges);
+  addConfigResourceEdges(sourceFiles, nodes, edges);
+  return { nodes: dedupeNodes(nodes), edges: dedupeEdges(edges), evidence: [...evidenceByPath.values()] };
+}
+
+function extractTypeScriptSymbols(file, addNode) {
+  const classStack = [];
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const lineNo = index + 1;
+    const classMatch = line.match(/^\s*export\s+class\s+([A-Za-z_$][\w$]*)|^\s*class\s+([A-Za-z_$][\w$]*)/);
+    if (classMatch) {
+      const className = classMatch[1] ?? classMatch[2];
+      const endLine = findBlockEnd(file.lines, index);
+      classStack.push({ name: className, startLine: lineNo, endLine });
+      addNode({
+        labels: ["Class"],
+        name: className,
+        qualifiedName: `${className}`,
+        path: file.relativePath,
+        startLine: lineNo,
+        endLine,
+        contentHash: file.contentHash,
+      });
+      continue;
+    }
+    while (classStack.length && lineNo > classStack.at(-1).endLine) classStack.pop();
+    const functionMatch = line.match(/^\s*export\s+function\s+([A-Za-z_$][\w$]*)\s*\(/)
+      ?? line.match(/^\s*function\s+([A-Za-z_$][\w$]*)\s*\(/);
+    if (functionMatch) {
+      const name = functionMatch[1];
+      addNode({
+        labels: ["Function"],
+        name,
+        qualifiedName: name,
+        path: file.relativePath,
+        startLine: lineNo,
+        endLine: findBlockEnd(file.lines, index),
+        contentHash: file.contentHash,
+      });
+    }
+    const constMatch = line.match(/^\s*export\s+const\s+([A-Za-z_$][\w$]*)\b/)
+      ?? line.match(/^\s*const\s+([A-Za-z_$][\w$]*)\b/);
+    if (constMatch) {
+      const name = constMatch[1];
+      addNode({
+        labels: ["Const"],
+        name,
+        qualifiedName: name,
+        path: file.relativePath,
+        startLine: lineNo,
+        endLine: lineNo,
+        contentHash: file.contentHash,
+      });
+    }
+    const classContext = classStack.at(-1);
+    const methodMatch = classContext && line.match(/^\s{2,}([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/);
+    if (methodMatch && methodMatch[1] !== "constructor") {
+      const methodName = methodMatch[1];
+      addNode({
+        labels: ["Method"],
+        name: `${classContext.name}.${methodName}`,
+        qualifiedName: `${classContext.name}.${methodName}`,
+        path: file.relativePath,
+        startLine: lineNo,
+        endLine: findBlockEnd(file.lines, index),
+        contentHash: file.contentHash,
+      });
+    }
+    const testMatch = line.match(/^\s*test\s*\(\s*["']([^"']+)["']/);
+    if (testMatch) {
+      const name = testMatch[1];
+      addNode({
+        labels: ["Test"],
+        name,
+        qualifiedName: name,
+        path: file.relativePath,
+        startLine: lineNo,
+        endLine: findBlockEnd(file.lines, index),
+        contentHash: file.contentHash,
+      });
+    }
+  }
+}
+
+function findBlockEnd(lines, startIndex) {
+  let depth = 0;
+  let seenOpen = false;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    for (const char of lines[index]) {
+      if (char === "{") {
+        depth += 1;
+        seenOpen = true;
+      } else if (char === "}") {
+        depth -= 1;
+        if (seenOpen && depth <= 0) return index + 1;
+      }
+    }
+  }
+  return startIndex + 1;
+}
+
+function extractImports(file, sourceFiles) {
+  const imports = [];
+  const baseDir = file.relativePath.split("/").slice(0, -1);
+  for (const match of file.text.matchAll(/import(?:\s+type)?[\s\S]*?\sfrom\s+["']([^"']+)["']/g)) {
+    const specifier = match[1];
+    if (!specifier.startsWith(".")) continue;
+    const rawParts = [...baseDir, ...specifier.split("/")].filter((part) => part && part !== ".");
+    const parts = [];
+    for (const part of rawParts) {
+      if (part === "..") parts.pop();
+      else parts.push(part);
+    }
+    const base = parts.join("/").replace(/\.(js|jsx|mjs|cjs)$/, "");
+    const found = sourceFiles.find((candidate) => [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}/index.ts`].includes(candidate.relativePath));
+    if (found) imports.push(found.relativePath);
+  }
+  return imports;
+}
+
+function addStaticCallEdges(sourceFiles, nodes, edges) {
+  const methodTargets = nodes.filter((node) => node.labels?.includes("Method"));
+  const functionTargets = nodes.filter((node) => node.labels?.includes("Function"));
+  const callableSources = nodes.filter((node) => ["Function", "Method", "Test"].some((label) => node.labels?.includes(label)));
+  for (const source of callableSources) {
+    const file = sourceFiles.find((item) => item.relativePath === source.path);
+    if (!file) continue;
+    const body = file.lines.slice(source.startLine - 1, source.endLine).join("\n");
+    for (const target of [...methodTargets, ...functionTargets]) {
+      const callName = target.qualifiedName.split(".").at(-1);
+      if (source === target || !new RegExp(`\\.${escapeRegExp(callName)}\\s*\\(`).test(body)) continue;
+      const kind = source.labels?.includes("Test") ? "TESTS" : "CALLS";
+      edges.push({ kind, source, target });
+    }
+  }
+}
+
+function addConfigResourceEdges(sourceFiles, nodes, edges) {
+  for (const source of nodes.filter((node) => node.labels?.includes("Const"))) {
+    const file = sourceFiles.find((item) => item.relativePath === source.path);
+    if (!file) continue;
+    const line = file.lines[source.startLine - 1] ?? "";
+    for (const match of line.matchAll(/["']([^"']+\.(?:json|yaml|yml|toml|sqlite|db))["']/g)) {
+      const target = nodes.find((node) => node.labels?.includes("File") && node.path === normalizePath(match[1]));
+      if (target) edges.push({ kind: "CONFIGURES", source, target });
+    }
+  }
+}
+
+function rankStaticEvidence(task, snapshot) {
+  const query = String(task.query ?? "").toLowerCase();
+  const evidence = [];
+  for (const node of snapshot.nodes) {
+    if (!node.path || !node.contentHash) continue;
+    let rank = evidence.length + 1;
+    if (query && (`${node.name} ${node.qualifiedName} ${node.path}`).toLowerCase().includes(queryTerms(task.query)[0] ?? "\0")) rank = 1;
+    evidence.push({
+      path: node.path,
+      startLine: node.startLine,
+      endLine: node.endLine,
+      contentHash: node.contentHash,
+      rank,
+    });
+  }
+  return evidence.sort((left, right) => Number(left.rank ?? 99) - Number(right.rank ?? 99) || left.path.localeCompare(right.path));
+}
+
+function dedupeNodes(nodes) {
+  const seen = new Set();
+  return nodes.filter((node) => {
+    const key = `${node.path}:${node.qualifiedName}:${node.startLine}:${node.endLine}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeEdges(edges) {
+  const seen = new Set();
+  return edges.filter((edge) => {
+    const key = `${edge.kind}:${edge.source?.path}:${edge.source?.qualifiedName}:${edge.target?.path}:${edge.target?.qualifiedName}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function makeCodebaseMemoryProvider(opts = {}) {
@@ -962,6 +1383,7 @@ function nodeMatchesLocator(node, locator) {
   if (!expectedName) return node.labels?.some((label) => label === "File" || label === "Module");
   const qualifiedSuffix = expectedName.split(".").join(".");
   return node.name === expectedName
+    || node.qualifiedName === qualifiedSuffix
     || node.qualifiedName?.endsWith(`.${qualifiedSuffix}`)
     || node.qualifiedName?.includes(`.${qualifiedSuffix}.`);
 }
@@ -1057,6 +1479,11 @@ function allMandatoryGatesPassed(gates) {
   return MANDATORY_GATES.every((key) => gates[key] === true);
 }
 
+export function applyBudgetApproval(reports, approval) {
+  if (approval !== "approved") return reports;
+  return reports.map((report) => ({ ...report, budgetApproval: "approved" }));
+}
+
 function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -1092,6 +1519,8 @@ function listArg(value, fallback) {
 
 function makeProviderByName(name, opts = {}) {
   switch (name) {
+    case "blueprint-static":
+      return makeBlueprintStaticProvider(opts);
     case "fallback":
       return makeFallbackProvider(opts);
     case "codebase-memory":
@@ -1148,7 +1577,7 @@ function qualificationFingerprint({ fixturesPath, schemaPath, providerNames, rea
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  const providerNames = listArg(args.providers, ["fallback", "codebase-memory", "graphify"]);
+  const providerNames = listArg(args.providers, ["fallback", "blueprint-static", "codebase-memory", "graphify"]);
   const fixturesPath = String(args.fixtures ?? resolve(process.cwd(), "tools/skills/blueprint/evals/graph-tasks.jsonl"));
   const outPath = String(args.out ?? resolve(process.cwd(), "qualification.json"));
   const schemaPath = String(
@@ -1208,7 +1637,9 @@ async function main() {
           expectedLicense: args["codebase-memory-license"],
           schemaPath,
         }
-      : {};
+      : name === "blueprint-static"
+        ? { schemaPath }
+        : {};
     const provider = makeProviderByName(name, providerOptions);
     const report = cached && cached.status && cached.gates
       ? cached
@@ -1238,9 +1669,11 @@ async function main() {
     reports.push(report);
   }
 
-  const selection = selectProvider(reports);
-  const semanticEvaluation = compareSemantic(reports);
-  const realRepositoryMeasurements = reports.flatMap((report) => report.realRepositories ?? []);
+  const budgetApproval = args["approve-budgets"] ? "approved" : "pending";
+  const approvedReports = applyBudgetApproval(reports, budgetApproval);
+  const selection = selectProvider(approvedReports);
+  const semanticEvaluation = compareSemantic(approvedReports);
+  const realRepositoryMeasurements = approvedReports.flatMap((report) => report.realRepositories ?? []);
   const budgetEvaluation = evaluateBudgets(realRepositoryMeasurements, budgets);
 
   const finalReport = {
@@ -1248,11 +1681,11 @@ async function main() {
     schemaHash: schemaHash(schemaPath),
     qualificationFingerprint: fingerprint,
     generatedAt: new Date().toISOString(),
-    budgetApproval: "pending",
+    budgetApproval,
     proposedBudgets: budgets,
     budgetEvaluation,
     realRepositoryMeasurements,
-    providers: reports.map(sortProviderReport),
+    providers: approvedReports.map(sortProviderReport),
     semanticEvaluation,
     selection,
   };

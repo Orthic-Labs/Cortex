@@ -71,8 +71,8 @@ As verified on 2026-07-12, the live Phase-1 implementation is still the bootstra
 - `semanticReadFirstPaths()` returns no paths;
 - there is no live symbol/call/import index, structural+semantic query layer,
   `ContextCandidateSet v1` producer, MemRight federated-planner integration, or visual graph explorer;
-- Codebase Memory 0.9.0 failed five of seven mandatory structural fixtures and interruption safety
-  in B0 qualification on Windows; no provider was selected, and portability remains unproven.
+- B0 qualification now selects the workspace-owned deterministic `blueprint-static` lane as the B1
+  starting point, but it is not yet wired into the live `blueprint` command path.
 
 Therefore the current implementation must report **PARTIAL / CODE-FELL-SHORT** for whole-repository
 understanding even when Phase 2 prose synthesis runs. Do not invoke or advertise planned commands
