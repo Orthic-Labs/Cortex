@@ -72,7 +72,7 @@ truth map and the first Blueprint-owned code graph:
 - `blueprint build` also writes `.agent/graph/manifest.json`, immutable generation files,
   `.agent/flows.json`, and a Code Graph section in `START-HERE.md`;
 - live graph commands include `build`, `status`, `schema`, `search`, `neighbors`, `path`,
-  `resolve`, `architecture`, `flows`, and `candidates`;
+  `impact`, `resolve`, `architecture`, `flows`, and `candidates`;
 - `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
   planner boundary;
 - product-flow inventory is capped and reports `truncated=true` when capped.

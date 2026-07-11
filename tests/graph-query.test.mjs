@@ -47,6 +47,10 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     assert.ok(architecture.summary.symbols >= 5);
     assert.ok(architecture.entryPoints.some((node) => node.id.includes("registerOrderRoute")));
 
+    const impact = run(["graph", "impact", "--node", "symbol:src/store.ts::OrderStore.save", "--out", ".agent"], repo);
+    assert.ok(impact.impacted.some((node) => node.id === "symbol:src/service.ts::OrderService.placeOrder"));
+    assert.ok(impact.impacted.some((node) => node.id.includes("placeOrder stores a new order")));
+
     const candidates = run(["graph", "candidates", "--query", "placeOrder", "--out", ".agent", "--limit", "2"], repo);
     assert.equal(candidates.provider, "blueprint-static");
     assert.equal(candidates.candidates[0].sourceKind, "repo_code");

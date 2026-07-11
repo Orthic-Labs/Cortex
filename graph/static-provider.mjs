@@ -192,6 +192,21 @@ export function graphArchitecture(generation) {
   };
 }
 
+export function graphImpact(generation, options = {}) {
+  const nodeId = String(options.nodeId ?? "");
+  const depth = Math.max(1, Number(options.depth ?? 3));
+  const neighborhood = graphNeighbors(generation, { nodeId, direction: "in", depth });
+  return {
+    schemaVersion: 1,
+    provider: generation.provider.id,
+    target: generation.nodes.find((node) => node.id === nodeId) ?? { id: nodeId },
+    direction: "upstream",
+    impacted: neighborhood.nodes.filter((node) => node.id !== nodeId),
+    edges: neighborhood.edges,
+    truncated: neighborhood.truncated,
+  };
+}
+
 export function graphFlowInventory(generation, options = {}) {
   const maxFlows = Number(options.maxFlows ?? 200);
   const outgoing = new Set(generation.edges.map((edge) => edge.source));

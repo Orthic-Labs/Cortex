@@ -16,6 +16,7 @@ import {
   createContextCandidateSet,
   graphArchitecture,
   graphFlowInventory,
+  graphImpact,
   graphNeighbors,
   graphPath,
   graphStatus,
@@ -85,7 +86,7 @@ function usage() {
   ${command} build [--out .agent] [--limit N] [--check]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
   ${command} doctor [--out .agent]
-  ${command} graph build|status|schema|search|neighbors|path|resolve|architecture|flows|candidates [--out .agent]
+  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|candidates [--out .agent]
 `);
 }
 
@@ -1009,6 +1010,14 @@ function runGraphCommand(root, outDir, subcommand, args) {
   if (subcommand === "architecture") {
     const generation = readFreshGraph(root, outDir);
     console.log(JSON.stringify(graphArchitecture(generation), null, 2));
+    return 0;
+  }
+  if (subcommand === "impact") {
+    const generation = readFreshGraph(root, outDir);
+    console.log(JSON.stringify(graphImpact(generation, {
+      nodeId: String(args.node ?? args._[0] ?? ""),
+      depth: Number(args.depth ?? 3),
+    }), null, 2));
     return 0;
   }
   if (subcommand === "flows") {
