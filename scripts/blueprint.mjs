@@ -11,6 +11,17 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildGraphGeneration,
+  createContextCandidateSet,
+  graphArchitecture,
+  graphFlowInventory,
+  graphNeighbors,
+  graphPath,
+  graphStatus,
+  queryGraph,
+  resolveGraphNode,
+} from "../graph/static-provider.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
@@ -74,6 +85,7 @@ function usage() {
   ${command} build [--out .agent] [--limit N] [--check]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
   ${command} doctor [--out .agent]
+  ${command} graph build|status|schema|search|neighbors|path|resolve|architecture|flows|candidates [--out .agent]
 `);
 }
 
@@ -339,8 +351,11 @@ function build(root, outDir, options = {}) {
   writeJson(join(root, outDir, "stale.json"), stale);
   writeJson(join(root, outDir, "index.json"), index);
   writeJson(join(root, outDir, "queue.json"), queue);
-  writeText(join(root, outDir, "START-HERE.md"), startHere(map, stale));
-  return { map, stale, index, queue };
+  const graphGeneration = buildGraphGeneration(root, { outDir });
+  const flows = graphFlowInventory(graphGeneration);
+  writeJson(join(root, outDir, "flows.json"), flows);
+  writeText(join(root, outDir, "START-HERE.md"), startHere(map, stale, graphGeneration, flows));
+  return { map, stale, index, queue, graphGeneration, flows };
 }
 
 // Deterministic Phase-2 worklist: pair each doc claim with the implementation
@@ -384,7 +399,7 @@ function writeText(path, text) {
   writeFileSync(path, text.endsWith("\n") ? text : `${text}\n`);
 }
 
-function startHere(map, stale) {
+function startHere(map, stale, graphGeneration = null, flows = null) {
   const missing = stale.missingReferences.slice(0, 8);
   const command = scriptCommand();
   const topDocs = map.nodes
@@ -410,6 +425,14 @@ Generated: ${map.generatedAt}
 \`\`\`mermaid
 ${mermaid(map)}
 \`\`\`
+
+## Code Graph
+
+${graphGeneration ? `- Provider: \`${graphGeneration.provider.id}\`
+- Nodes: ${graphGeneration.nodes.length}
+- Edges: ${graphGeneration.edges.length}
+- Generation: \`${graphGeneration.manifest.generationId}\`
+- Product flows: ${flows?.flows?.length ?? 0}` : "- Not generated."}
 
 ## Key Docs
 
@@ -453,7 +476,8 @@ function isFresh(root, outDir, config, limit = 0) {
   if (!existsSync(mapPath) || !existsSync(indexPath) || !existsSync(configPath)) return false;
   const index = readJson(indexPath, null);
   if (!index?.sourceSignature) return false;
-  return index.sourceSignature === sourceSignature(root, config, limit);
+  if (index.sourceSignature !== sourceSignature(root, config, limit)) return false;
+  return graphStatus(root, outDir).state === "fresh";
 }
 
 function ensureFresh(root, outDir, options) {
@@ -920,6 +944,94 @@ function doctor(root, outDir) {
   return 0;
 }
 
+function runGraphCommand(root, outDir, subcommand, args) {
+  if (subcommand === "build") {
+    const generation = buildGraphGeneration(root, { outDir });
+    console.log(`graph built ${outDir}/graph/manifest.json provider=${generation.provider.id} nodes=${generation.nodes.length} edges=${generation.edges.length}`);
+    return 0;
+  }
+  if (subcommand === "status") {
+    const status = graphStatus(root, outDir);
+    if (status.state === "missing") {
+      console.log(`graph missing ${outDir}/graph/manifest.json`);
+      return 2;
+    }
+    const provider = status.manifest?.provider?.id ?? "unknown";
+    console.log(`graph ${status.state} provider=${provider} generation=${status.manifest?.generationId ?? "none"}`);
+    return status.state === "fresh" ? 0 : 2;
+  }
+  if (subcommand === "search") {
+    const generation = readFreshGraph(root, outDir);
+    const query = String(args.query ?? args._.join(" ")).trim();
+    const results = queryGraph(generation, { query, limit: Number(args.limit ?? 20) });
+    console.log(JSON.stringify({ schemaVersion: 1, provider: generation.provider.id, query, results }, null, 2));
+    return 0;
+  }
+  if (subcommand === "candidates") {
+    const generation = readFreshGraph(root, outDir);
+    const query = String(args.query ?? args.task ?? args._.join(" ")).trim();
+    console.log(JSON.stringify(createContextCandidateSet(generation, {
+      task: String(args.task ?? query),
+      query,
+      maxCandidates: Number(args.limit ?? 40),
+    }), null, 2));
+    return 0;
+  }
+  if (subcommand === "schema") {
+    console.log(JSON.stringify({ schemaVersion: 1, provider: "blueprint-static", artifacts: ["manifest", "nodes", "edges", "graph", "ContextCandidateSet"] }, null, 2));
+    return 0;
+  }
+  if (subcommand === "resolve") {
+    const generation = readFreshGraph(root, outDir);
+    const result = resolveGraphNode(generation, String(args.node ?? args._[0] ?? ""));
+    if (!result) throw new Error(`graph node not found: ${args.node ?? args._[0] ?? ""}`);
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  if (subcommand === "neighbors") {
+    const generation = readFreshGraph(root, outDir);
+    console.log(JSON.stringify(graphNeighbors(generation, {
+      nodeId: String(args.node ?? args._[0] ?? ""),
+      direction: args.direction ?? "both",
+      depth: Number(args.depth ?? 1),
+    }), null, 2));
+    return 0;
+  }
+  if (subcommand === "path") {
+    const generation = readFreshGraph(root, outDir);
+    console.log(JSON.stringify(graphPath(generation, {
+      from: args.from,
+      to: args.to,
+      maxDepth: Number(args["max-depth"] ?? 5),
+    }), null, 2));
+    return 0;
+  }
+  if (subcommand === "architecture") {
+    const generation = readFreshGraph(root, outDir);
+    console.log(JSON.stringify(graphArchitecture(generation), null, 2));
+    return 0;
+  }
+  if (subcommand === "flows") {
+    const generation = readFreshGraph(root, outDir);
+    const inventory = graphFlowInventory(generation);
+    writeJson(join(root, outDir, "flows.json"), inventory);
+    console.log(JSON.stringify(inventory, null, 2));
+    return 0;
+  }
+  usage();
+  return 1;
+}
+
+function readFreshGraph(root, outDir) {
+  let status = graphStatus(root, outDir);
+  if (status.state !== "fresh") {
+    buildGraphGeneration(root, { outDir });
+    status = graphStatus(root, outDir);
+  }
+  const generationPath = join(root, outDir, "graph", "generations", status.manifest.generationId.replace("sha256:", ""), "graph.json");
+  return readJson(generationPath, null);
+}
+
 function runBriefAndPrint(root, outDir, args) {
   const result = brief(root, outDir, args);
   console.log(`brief ${result.runDir}/TASK-BRIEF.md readFirst=${result.readFirst.length} sources=${result.sources.length} rebuilt=${result.rebuilt}`);
@@ -945,7 +1057,7 @@ function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -961,6 +1073,11 @@ function main() {
   const args = parseArgs(rest);
   const root = process.cwd();
   const outDir = normalizePath(args.out ?? DEFAULT_OUT);
+  if (command === "graph") {
+    const [subcommand, ...graphRest] = rest;
+    const graphArgs = parseArgs(graphRest);
+    return runGraphCommand(root, outDir, subcommand, graphArgs);
+  }
   if (command === "build") {
     const result = build(root, outDir, args);
     if (args.check) {
