@@ -651,7 +651,7 @@ function brief(root, outDir, options) {
     }
   }
   const codeFirst = [...codeRefs.keys()].slice(0, Math.max(0, maxReadFirst - docsFirst.length));
-  const semanticCodeFirst = semanticReadFirstPaths(root, config, taskTerms, Number(options.limit ?? 0));
+  const semanticCodeFirst = semanticReadFirstPaths(root, outDir, config, taskTerms, Number(options.limit ?? 0));
   const readFirstItems = codeFirst.length
     ? [...docsFirst, ...codeFirst, ...semanticCodeFirst]
     : [...selectedDocs.keys()].slice(0, maxReadFirst);
@@ -683,7 +683,7 @@ function brief(root, outDir, options) {
   }));
   let evidence = codeEvidence(
     root,
-    evidenceCandidatePaths(root, config, taskTerms, readFirst, Number(options.limit ?? 0)),
+    evidenceCandidatePaths(root, outDir, config, taskTerms, readFirst, Number(options.limit ?? 0)),
     taskTerms,
     config.budgets.maxCodeEvidence ?? 12,
   );
@@ -757,8 +757,8 @@ function documentMatchesTask(doc, taskTerms) {
   return scoreText(taskTerms, `${doc.path} ${doc.title} ${doc.searchText ?? ""}`) > 0;
 }
 
-function evidenceCandidatePaths(root, config, taskTerms, readFirst, limit = 0) {
-  const candidates = new Set([...readFirst.filter(isImplementationPath), ...semanticReadFirstPaths(root, config, taskTerms, limit)]);
+function evidenceCandidatePaths(root, outDir, config, taskTerms, readFirst, limit = 0) {
+  const candidates = new Set([...readFirst.filter(isImplementationPath), ...semanticReadFirstPaths(root, outDir, config, taskTerms, limit)]);
   for (const path of repoFiles(root, config, limit)) {
     if (!isImplementationPath(path) || candidates.size >= 80) continue;
     const full = join(root, path);
@@ -773,8 +773,19 @@ function evidenceCandidatePaths(root, config, taskTerms, readFirst, limit = 0) {
 
 // Generic: no repo-specific runtime path list. Evidence selection is driven by
 // task-term scoring over the actual tracked files, not a hardcoded layout.
-function semanticReadFirstPaths() {
-  return [];
+function semanticReadFirstPaths(root, outDir, config, taskTerms, limit = 0) {
+  void config;
+  void limit;
+  try {
+    const generation = readFreshGraph(root, outDir);
+    const query = [...taskTerms].join(" ");
+    return [...new Set(queryGraph(generation, { query, limit: 12 })
+      .flatMap((result) => result.evidence ?? [])
+      .map((item) => item.path)
+      .filter(isImplementationPath))];
+  } catch {
+    return [];
+  }
 }
 
 function codeEvidence(root, readFirst, taskTerms, maxItems) {

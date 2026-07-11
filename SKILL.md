@@ -75,12 +75,14 @@ truth map and the first Blueprint-owned code graph:
   `impact`, `resolve`, `architecture`, `flows`, and `candidates`;
 - `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
   planner boundary;
+- task briefs use graph retrieval as a bounded read-first source before falling back to lexical
+  evidence search;
 - product-flow inventory is capped and reports `truncated=true` when capped.
 
-The implementation is still **PARTIAL** for final whole-repository understanding until B4+ consumers
-use the graph by default in task briefs/synthesis and until larger language/parser coverage is
+The implementation is still **PARTIAL** for final whole-repository understanding until larger
+language/parser coverage, doc-code contradiction joins, and optional visual explorer work are
 hardened. Do not advertise an interactive visual explorer or raw graph ingestion into MemRight as
-live. Their implementation plan-of-record is
+live. The implementation plan-of-record is
 `D:/Claude/docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`; the qualification
 evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
 

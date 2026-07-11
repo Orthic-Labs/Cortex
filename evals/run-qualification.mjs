@@ -337,7 +337,7 @@ function countOccurrences(text, term) {
 }
 
 function collectTextFiles(root) {
-  const ignored = new Set([".agent", ".blueprint", ".git", ".codebase-memory", "node_modules", "target", "dist", "build"]);
+  const ignored = new Set([".agent", ".agent-test-graph", ".blueprint", ".git", ".codebase-memory", "node_modules", "target", "dist", "build"]);
   const files = [];
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
