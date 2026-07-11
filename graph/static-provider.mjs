@@ -71,7 +71,7 @@ export function createContextCandidateSet(generation, options = {}) {
     schemaVersion: 1,
     traceId: options.traceId ?? randomUUID(),
     task: String(options.task ?? options.query ?? "Blueprint graph retrieval"),
-    mode: options.mode ?? "retrieve",
+    mode: options.mode ?? "survey",
     provider: generation.provider.id,
     freshness: {
       revision: generation.manifest.generationId,
