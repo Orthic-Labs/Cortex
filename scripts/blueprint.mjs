@@ -10,6 +10,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
+const CONTEXT_BUDGET_LOG = resolve(SCRIPT_DIR, "../../../.cache/metrics/context-budget.jsonl");
 
 const DEFAULT_OUT = ".agent";
 const SCHEMA_VERSION = 1;
@@ -487,6 +492,27 @@ function scoreText(taskTerms, text) {
   return score;
 }
 
+function plannedContextBudget(task, root) {
+  try {
+    const command = process.platform === "win32" ? "py" : "python3";
+    const args = process.platform === "win32" ? ["-3.11"] : [];
+    args.push(
+      CONTEXT_BUDGET_SCRIPT,
+      "plan",
+      "--surface", "blueprint",
+      "--session", createHash("sha256").update(root).digest("hex"),
+      "--query", task,
+      "--record", CONTEXT_BUDGET_LOG,
+    );
+    if (process.env.MEMRIGHT_TRANSCRIPT_PATH) {
+      args.push("--transcript", process.env.MEMRIGHT_TRANSCRIPT_PATH);
+    }
+    return JSON.parse(execFileSync(command, args, { encoding: "utf8", windowsHide: true }));
+  } catch {
+    return null;
+  }
+}
+
 function orderedTermScore(taskTerms, text) {
   const terms = [...taskTerms];
   if (terms.length < 2) return 0;
@@ -517,6 +543,7 @@ function brief(root, outDir, options) {
   const task = options.task;
   if (!task) throw new Error("brief requires --task");
   const { rebuilt, config } = ensureFresh(root, outDir, options);
+  const contextBudget = plannedContextBudget(task, root);
   const map = readJson(join(root, outDir, "map.json"), null);
   const taskTerms = taskKeywords(task);
   const docById = new Map(map.nodes.filter((node) => node.kind === "doc").map((doc) => [doc.id, doc]));
@@ -564,7 +591,9 @@ function brief(root, outDir, options) {
       if (score > 0) selectedDocs.set(doc.path, doc);
     }
   }
-  const maxReadFirst = config.budgets.maxReadFirstFiles;
+  const maxReadFirst = contextBudget
+    ? Math.max(2, Math.min(config.budgets.maxReadFirstFiles, Math.floor(contextBudget.blueprint_chars / 200)))
+    : config.budgets.maxReadFirstFiles;
   const docReadLimit = Math.max(1, Math.min(2, Math.ceil(maxReadFirst * 0.35)));
   const canonicalDocPaths = (config.canonicalDocs ?? [])
     .map((path) => docById.get(`doc.${slug(path)}`) ?? [...docById.values()].find((doc) => doc.path === path))
@@ -640,6 +669,7 @@ function brief(root, outDir, options) {
   writeJson(join(root, runDir, "context.json"), {
     task,
     rebuilt,
+    contextBudget,
     readFirst,
     claimIds: sources.map((source) => source.id),
     evidenceIds: evidence.map((item) => item.id),
