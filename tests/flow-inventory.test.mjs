@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { graphFlowInventory } from "../graph/static-provider.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -28,4 +29,21 @@ test("graph flows emits deterministic entry-to-terminal inventory", () => {
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("flow inventory is capped on branching graphs", () => {
+  const nodes = [{ id: "symbol:entry", kind: "symbol", labels: ["Function"], evidence: [{ path: "a.ts", startLine: 1, endLine: 1, contentHash: "x" }] }];
+  const edges = [];
+  for (let index = 0; index < 200; index += 1) {
+    const mid = { id: `symbol:mid${index}`, kind: "symbol", labels: ["Function"], evidence: [{ path: "a.ts", startLine: 1, endLine: 1, contentHash: "x" }] };
+    const leaf = { id: `symbol:leaf${index}`, kind: "symbol", labels: ["Function"], evidence: [{ path: "a.ts", startLine: 1, endLine: 1, contentHash: "x" }] };
+    nodes.push(mid, leaf);
+    edges.push({ id: `e1-${index}`, kind: "CALLS", source: "symbol:entry", target: mid.id, evidence: [] });
+    edges.push({ id: `e2-${index}`, kind: "CALLS", source: mid.id, target: leaf.id, evidence: [] });
+  }
+
+  const inventory = graphFlowInventory({ provider: { id: "blueprint-static" }, nodes, edges }, { maxFlows: 25 });
+
+  assert.equal(inventory.flows.length, 25);
+  assert.equal(inventory.truncated, true);
 });

@@ -64,24 +64,25 @@ durable recall/other layers and emits the final `ContextPacket v1`; verified `Kn
 may enter the durable output path. Raw graph nodes, embeddings, edges, and visual layouts never
 enter MemRight. Blueprint never owns the final cross-layer token budget.
 
-As verified on 2026-07-12, the live Phase-1 implementation is still the bootstrap substrate:
+As verified on 2026-07-12, the live Phase-1 implementation now writes both the original document
+truth map and the first Blueprint-owned code graph:
 
-- node kinds are `repo|doc|claim|code_ref`;
-- edge kinds are `contains|mentions-code`;
-- `semanticReadFirstPaths()` returns no paths;
-- there is no live symbol/call/import index, structural+semantic query layer,
-  `ContextCandidateSet v1` producer, MemRight federated-planner integration, or visual graph explorer;
-- B0 qualification now selects the workspace-owned deterministic `blueprint-static` lane as the B1
-  starting point, but it is not yet wired into the live `blueprint` command path.
+- bootstrap node kinds remain `repo|doc|claim|code_ref`;
+- bootstrap edge kinds remain `contains|mentions-code`;
+- `blueprint build` also writes `.agent/graph/manifest.json`, immutable generation files,
+  `.agent/flows.json`, and a Code Graph section in `START-HERE.md`;
+- live graph commands include `build`, `status`, `schema`, `search`, `neighbors`, `path`,
+  `resolve`, `architecture`, `flows`, and `candidates`;
+- `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
+  planner boundary;
+- product-flow inventory is capped and reports `truncated=true` when capped.
 
-Therefore the current implementation must report **PARTIAL / CODE-FELL-SHORT** for whole-repository
-understanding even when Phase 2 prose synthesis runs. Do not invoke or advertise planned commands
-such as `blueprint serve`, or planned graph/query artifacts, as live. Their implementation
-plan-of-record is
+The implementation is still **PARTIAL** for final whole-repository understanding until B4+ consumers
+use the graph by default in task briefs/synthesis and until larger language/parser coverage is
+hardened. Do not advertise an interactive visual explorer or raw graph ingestion into MemRight as
+live. Their implementation plan-of-record is
 `D:/Claude/docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`; the qualification
-evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.json`. Update this
-status section only after the corresponding B0–B7 code, migration, and acceptance gates actually
-pass.
+evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
 
 ## Phase 1 — deterministic map (always run first)
 

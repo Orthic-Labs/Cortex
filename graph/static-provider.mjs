@@ -192,13 +192,15 @@ export function graphArchitecture(generation) {
   };
 }
 
-export function graphFlowInventory(generation) {
+export function graphFlowInventory(generation, options = {}) {
+  const maxFlows = Number(options.maxFlows ?? 200);
   const outgoing = new Set(generation.edges.map((edge) => edge.source));
   const incoming = new Set(generation.edges.map((edge) => edge.target));
   const entryPoints = generation.nodes.filter((node) => node.kind === "symbol" && outgoing.has(node.id) && !incoming.has(node.id));
   const flows = [];
+  let truncated = false;
   for (const entry of entryPoints) {
-    const terminalPaths = terminalPathsFrom(generation, entry.id);
+    const terminalPaths = terminalPathsFrom(generation, entry.id, maxFlows - flows.length);
     if (!terminalPaths.length) {
       flows.push({ entry, status: "broken", path: [entry], missingHop: "no terminal reachable", evidence: entry.evidence });
       continue;
@@ -212,20 +214,26 @@ export function graphFlowInventory(generation) {
         path,
         evidence: path.flatMap((node) => node.evidence ?? []),
       });
+      if (flows.length >= maxFlows) {
+        truncated = true;
+        break;
+      }
     }
+    if (truncated) break;
   }
   return {
     schemaVersion: 1,
     provider: generation.provider.id,
     generatedAt: new Date().toISOString(),
     flows,
+    truncated,
   };
 }
 
-function terminalPathsFrom(generation, entryId) {
+function terminalPathsFrom(generation, entryId, limit = 200) {
   const paths = [];
   const queue = [[entryId]];
-  while (queue.length) {
+  while (queue.length && paths.length < limit) {
     const ids = queue.shift();
     const current = ids.at(-1);
     const outgoing = generation.edges.filter((edge) => edge.source === current);
