@@ -26,6 +26,9 @@ test("locked task rows point to real bounded evidence", () => {
 
   assert.equal(tasks.length, 12);
   assert.equal(tasks.filter((item) => item.split === "heldout").length, 3);
+  assert.equal(tasks.filter((item) => item.qualificationClass === "mandatory_structural").length, 7);
+  assert.ok(tasks.filter((item) => item.qualificationClass === "mandatory_structural" && item.kind !== "symbol_definition")
+    .every((item) => item.expectedEdges.length > 0));
   assert.deepEqual(new Set(tasks.filter((item) => item.kind === "semantic_lookup").map((item) => item.repo)), new Set([
     "typescript-commerce", "rust-audio", "python-context",
   ]));
@@ -35,6 +38,8 @@ test("locked task rows point to real bounded evidence", () => {
     for (const evidence of task.expectedEvidence) {
       const file = path.join(REPOS, task.repo, evidence.path);
       assert.ok(fs.existsSync(file), `${task.id}: missing ${file}`);
+      const expectedHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+      assert.equal(evidence.contentHash, expectedHash, `${task.id}: stale hash for ${evidence.path}`);
       const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
       assert.ok(evidence.startLine >= 1 && evidence.endLine >= evidence.startLine);
       assert.ok(evidence.endLine <= lines.length, `${task.id}: invalid span ${evidence.path}:${evidence.endLine}`);
@@ -54,6 +59,17 @@ test("fallback reports unsupported graph capabilities instead of empty success",
 });
 
 
+test("fallback measures lexical semantic retrieval instead of reporting blanket unsupported", async () => {
+  const task = loadTasks(TASKS).find((item) => item.id === "semantic-python-context");
+  const report = await qualifyProvider(makeFallbackProvider(), [task], REPOS);
+
+  assert.equal(report.tasks[0].state, "passed");
+  assert.ok(report.tasks[0].primaryRank >= 1 && report.tasks[0].primaryRank <= 10);
+  assert.equal(report.semantic.tasks, 1);
+  assert.equal(report.semantic.macroRecallAt10, 1);
+});
+
+
 test("provider cannot pass by reading the answer key instead of returning evidence", async () => {
   const task = loadTasks(TASKS).find((item) => item.kind === "symbol_definition");
   let calls = 0;
@@ -70,20 +86,134 @@ test("provider cannot pass by reading the answer key instead of returning eviden
 
   assert.equal(calls, 1);
   assert.equal(report.tasks[0].state, "failed");
-  assert.ok(report.tasks[0].missingEvidence.includes("src/service.ts"));
+  assert.ok(report.tasks[0].missingEvidence.some((item) => item.path === "src/service.ts"));
 });
 
 
-test("selection is blocked unless one provider passes every mandatory gate", () => {
+test("provider must return exact span and current hash evidence", async () => {
+  const task = loadTasks(TASKS).find((item) => item.kind === "symbol_definition");
+  const wrongSpan = {
+    id: "wrong-span",
+    kind: "codebase-memory",
+    capabilities: new Set(["symbol_definition"]),
+    async probe() { return { available: true }; },
+    async execute() {
+      return {
+        state: "ok",
+        evidence: [{
+          path: "src/service.ts",
+          startLine: 1,
+          endLine: 1,
+          contentHash: task.expectedEvidence[0].contentHash,
+        }],
+        nodes: [{
+          path: "src/service.ts",
+          name: "placeOrder",
+          qualifiedName: "fixture.OrderService.placeOrder",
+          labels: ["Method"],
+        }],
+        edges: [],
+      };
+    },
+    async close() {},
+  };
+
+  const report = await qualifyProvider(wrongSpan, [task], REPOS);
+
+  assert.equal(report.tasks[0].state, "failed");
+  assert.match(report.tasks[0].reason, /evidence_mismatch/);
+});
+
+
+test("probe metadata cannot self-certify executable gates", async () => {
+  const task = loadTasks(TASKS).find((item) => item.kind === "symbol_definition");
+  const provider = {
+    id: "metadata-only",
+    kind: "codebase-memory",
+    capabilities: new Set(["symbol_definition"]),
+    async probe() {
+      return {
+        available: true,
+        securityVerified: true,
+        freshnessVerified: true,
+        operabilityVerified: true,
+        portability: ["win32", "darwin"],
+      };
+    },
+    async execute() {
+      return {
+        state: "ok",
+        evidence: task.expectedEvidence,
+        nodes: [{
+          path: "src/service.ts",
+          name: "placeOrder",
+          qualifiedName: "fixture.OrderService.placeOrder",
+          labels: ["Method"],
+        }],
+        edges: [],
+      };
+    },
+    async close() {},
+  };
+
+  const report = await qualifyProvider(provider, [task], REPOS);
+
+  assert.equal(report.gates.freshness, false);
+  assert.equal(report.gates.security, false);
+  assert.equal(report.gates.operability, false);
+  assert.equal(report.gates.portability, false);
+});
+
+
+test("optional semantic failure does not redefine mandatory structural correctness", async () => {
+  const tasks = loadTasks(TASKS);
+  const symbol = tasks.find((item) => item.kind === "symbol_definition");
+  const semantic = tasks.find((item) => item.kind === "semantic_lookup");
+  const provider = {
+    id: "structural-only",
+    kind: "codebase-memory",
+    capabilities: new Set(["symbol_definition", "semantic_lookup"]),
+    async probe() { return { available: true }; },
+    async execute(task) {
+      if (task.id === symbol.id) return {
+        state: "ok",
+        evidence: symbol.expectedEvidence,
+        nodes: [{
+          path: "src/service.ts",
+          name: "placeOrder",
+          qualifiedName: "fixture.OrderService.placeOrder",
+          labels: ["Method"],
+        }],
+        edges: [],
+      };
+      return { state: "unsupported", reason: "semantic_not_promoted" };
+    },
+    async close() {},
+  };
+
+  const report = await qualifyProvider(provider, [symbol, semantic], REPOS);
+
+  assert.equal(report.status, "passed");
+  assert.equal(report.gates.correctness, true);
+  assert.equal(report.tasks.find((item) => item.id === semantic.id).state, "unsupported");
+});
+
+
+test("selection is blocked unless one provider passes every mandatory gate and budgets are approved", () => {
   const failed = { id: "fallback", status: "failed", gates: { correctness: false } };
   const passing = {
     id: "provider-a",
     status: "passed",
     gates: { correctness: true, freshness: true, security: true, contract: true, portability: true, operability: true },
     metrics: { fullMs: 10, incrementalMs: 2, queryP95Ms: 1, peakRssBytes: 100, indexBytes: 50 },
+    budgetApproval: "approved",
   };
 
   assert.deepEqual(selectProvider([failed]), { outcome: "no_provider_passed", selectedProvider: null });
+  assert.deepEqual(
+    selectProvider([{ ...passing, budgetApproval: "pending" }]),
+    { outcome: "budget_approval_pending", selectedProvider: null },
+  );
   assert.deepEqual(selectProvider([failed, passing]), { outcome: "selected", selectedProvider: "provider-a" });
 });
 

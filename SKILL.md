@@ -1,6 +1,6 @@
 ---
 name: blueprint
-description: Make an LLM understand a repository. Phase 1 deterministically maps the repo (graph of docs↔claims↔code, code evidence, stale refs) via the global `blueprint` command. Phase 2 fans out parallel agents that VERIFY the extracted claims against real code and SYNTHESIZE an understanding layer (architecture, interfaces, health, security, production-readiness) grounded in the map. Output is machine-readable JSON for agents plus ONE human reference doc. Use before working in, inheriting, scaling, or auditing any repo. Replaces both the old `maprepo` mapper and the `/architecture` doc-set skill.
+description: Make an LLM understand a repository. Phase 1 deterministically maps the repo (graph of docs↔claims↔code, code evidence, stale refs) via the global `blueprint` command. Phase 2 fans out parallel agents that VERIFY the extracted claims against real code and SYNTHESIZE an understanding layer (architecture, interfaces, health, security, production-readiness, and uncovered-flow inventory) grounded in the map. Output is machine-readable JSON for agents plus ONE human reference doc. Use before working in, inheriting, scaling, auditing, or judging the architectural completeness of any repo. Replaces both the old `maprepo` mapper and the `/architecture` doc-set skill.
 allowed-tools: ["Read", "Bash", "Glob", "Grep", "Write", "Agent", "Workflow"]
 ---
 
@@ -16,7 +16,8 @@ Machine, for agents:
 - `map.json` · `claims.json` · `stale.json` · `index.json` — the deterministic graph (Phase 1).
 - `queue.json` — the grounded Phase-2 worklist: each claim paired with the code files its own doc references, plus the largest implementation files as `anchors`.
 - `verdicts.json` — per-claim verification (Phase 2).
-- `understanding.json` — the synthesized understanding layer across 5 dimensions (Phase 2).
+- `understanding.json` — the synthesized understanding layer across 5 dimensions (Phase 2), including
+  `architecture.flows[]` and `architecture.coverageGaps[]` so missing paths are first-class evidence.
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
 
 Human, ONE file:
@@ -24,6 +25,63 @@ Human, ONE file:
 
 Portable, for any agent (OKF):
 - `okf/` — the understanding layer as an **Open Knowledge Format** bundle (one markdown concept per component/interface/risk; required `type` frontmatter; concepts linked as a graph; auto `index.md`), prose **compressed** structure-safely (refs/code/links preserved). **MANDATORY Phase-2 close — not optional, not agent discretion:** run `py -3.11 D:/Claude/tools/lib/skill_emit.py blueprint <repo>` — it transforms `understanding.json` → OKF concepts (one per dimension; YAML `type` frontmatter) → emits the bundle AND ingests it into the memory engine, recallable immediately. The bare `okf.py emit` is the low-level primitive; skills call `skill_emit`, never okf.py directly. Portable into CodeRight and any OKF-aware agent; the JSON stays the structured source and `START-HERE.md` stays the uncompressed human doc. Pattern + before/after: `tools/lib/OKF-OUTPUT.md`.
+
+## Whole-repository completeness contract
+
+Blueprint's product contract is **whole-repository understanding across code and documents**. A
+large file count or a Phase-1 graph containing only `repo|doc|claim|code_ref` nodes and
+`contains|mentions-code` edges is a bootstrap document-truth index, not proof that the codebase was
+mapped. Do not let the word "graph" hide missing code semantics.
+
+Before saying a repository is mapped, understood, or architecturally complete, write
+`understanding.json.architecture.capabilityCoverage[]` with file-backed status for:
+
+- document/ADR/plan claims and precedence;
+- code symbols (files, modules, types, functions, methods, routes, schemas);
+- code relationships (defines, contains, imports, calls, implements, reads/writes, tests);
+- task retrieval across both code and documents, including semantic retrieval or an evidenced
+  equivalent that can find relevant code even when docs do not name its path;
+- contradiction/staleness arbitration and reversible source provenance.
+
+Each row is `{capability,status:covered|partial|missing|undetermined,evidence,provider}`. If code
+symbols, code relationships, or cross-code/document task retrieval are not covered, the Blueprint
+verdict is **PARTIAL** and the gap is `CODE-FELL-SHORT`; Phase 2 agent prose cannot silently stand in
+for the missing deterministic/semantic substrate. The storage/provider is implementation-neutral:
+an embedded graph, SQLite-backed provider, or external local adapter is valid when measured, but the
+capability cannot be deferred and still called whole-repo understanding.
+
+For this workspace's context engine, preserve the canonical product boundary while mapping it:
+MemRight means the three-family/eight-layer context economy (Compaction/PUSH layers 1–6,
+Retrieval/PULL layer 7, Curation/PERSIST layer 8), not merely the durable recall store.
+
+### Runtime ownership and current implementation truth
+
+Blueprint is installed once by the workspace setup, then run **separately from the root of each
+repository**. Its `.agent/` artifacts and any derived index/cache belong to that repository, are
+regenerable, and are not MemRight storage. The only allowed integration is a bounded, source-backed
+`ContextCandidateSet v1` submitted to MemRight's global admission planner, which combines it with
+durable recall/other layers and emits the final `ContextPacket v1`; verified `KnowledgeEmission v1`
+may enter the durable output path. Raw graph nodes, embeddings, edges, and visual layouts never
+enter MemRight. Blueprint never owns the final cross-layer token budget.
+
+As verified on 2026-07-12, the live Phase-1 implementation is still the bootstrap substrate:
+
+- node kinds are `repo|doc|claim|code_ref`;
+- edge kinds are `contains|mentions-code`;
+- `semanticReadFirstPaths()` returns no paths;
+- there is no live symbol/call/import index, structural+semantic query layer,
+  `ContextCandidateSet v1` producer, MemRight federated-planner integration, or visual graph explorer;
+- Codebase Memory 0.9.0 failed five of seven mandatory structural fixtures and interruption safety
+  in B0 qualification on Windows; no provider was selected, and portability remains unproven.
+
+Therefore the current implementation must report **PARTIAL / CODE-FELL-SHORT** for whole-repository
+understanding even when Phase 2 prose synthesis runs. Do not invoke or advertise planned commands
+such as `blueprint serve`, or planned graph/query artifacts, as live. Their implementation
+plan-of-record is
+`D:/Claude/docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`; the qualification
+evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.json`. Update this
+status section only after the corresponding B0–B7 code, migration, and acceptance gates actually
+pass.
 
 ## Phase 1 — deterministic map (always run first)
 
@@ -55,7 +113,7 @@ The MAIN agent merges to `verdicts.json` (reconciliation is never delegated). A 
 
 **2b. Synthesis (judgment-tier, 5 items in one fan-out).** Use native Claude **sonnet** agents; **never opus, never an external API**. One item per dimension, each grounded in `anchors` + `map.json` + `verdicts.json`. **Feed each agent `prep-context`'d anchors — `memright prep <tmp> <anchors...>` (same flags `--rate`/`--min-bytes`; binary `D:/Claude/tools/bin/memright.exe`, `memright` shim on PATH) routes code→`skel` (~78% fewer tokens) and prose→`compress` (structure-safe) and returns a manifest; hand agents the prepared copies, not raw files. Synthesis needs structure, not every body; agents pull the full body only for a specific span they must read closely. SURVEY/SYNTHESIS reads only — verification (2a) reads FULL. Stack map: `tools/lib/CONTEXT-ENGINEERING.md`.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. Merge into `understanding.json`:
 
-- `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `crossCutting[]`. Trace one real request/command end to end.
+- `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `crossCutting[]`, `capabilityCoverage[]`, `flows[]`, `coverageGaps[]`. Trace one real request/command end to end. Inventory each material user/agent/data flow from source → transforms/stores → consumer and classify it `covered|partial|missing|undetermined` with `file:line` evidence. Every non-covered flow becomes `{flow,status,evidence,impact,existingPrimitives[],handoff:"architect"}` in `coverageGaps[]`. Include negative space: a flow named by product/docs/user intent that has no implementation is evidence, not something to omit because no file exists. Populate `capabilityCoverage[]` from the whole-repository completeness contract above; scanned-file count and Phase-2 prose are not substitutes for code-symbol/relationship coverage.
 - `interfaces` — `publicApi[]`, `moduleInterfaces[]`, `dataContracts[]`, `configKeys[]`, `extensionPoints[]`, `fragileContracts[]`.
 - `health` — `oversized[]`, `slop[]`, `hotspots[]`, `duplication[]`, `coupling[]`, `untested[]`, `deadWeight[]`, `top10[]`. Describe and rank; do not generate fix patches (that is `/audit`).
 - `security` — `trustBoundaries[]`, `secrets[]` (location + presence only, redact values), `injectionSurface[]`, `authz[]`, `dataProtection[]`, `dangerousPatterns[]`, `posture[]`.
@@ -63,7 +121,7 @@ The MAIN agent merges to `verdicts.json` (reconciliation is never delegated). A 
 
 ## Phase 3 — fold into the one human doc (main session)
 
-Append to `START-HERE.md`: a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The Phase-4 RECONCILE block (below) goes at the **very top**, above everything else — it is the one thing the user must act on. Then open it:
+Append to `START-HERE.md`: a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), a Coverage Gaps table from `architecture.coverageGaps`, top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The Phase-4 RECONCILE block (below) goes at the **very top**, above everything else — it is the one thing the user must act on. Then open it:
 
 ```bash
 node D:/Claude/tools/lib/open-for-review.mjs "<repo>/.agent/START-HERE.md"
@@ -139,4 +197,10 @@ Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. ra
 - Redact secret values — report location + presence only.
 - Verification via parallel native haiku agents (inline in the main session as fallback); synthesis on native sonnet; never opus, NEVER an external model API (the api-worker lane retired 2026-07-05 — provider limits hung runs). The main agent reconciles all verdicts and synthesis output itself. Pass paths/excerpts, not file dumps.
 - Captures CURRENT state. Fix punch-lists are `/audit`; new designs are `architect`.
+- Blueprint does not research or choose external solutions. If the user asks whether the architecture
+  is the best shape or complete, Blueprint's deliverable is the evidenced coverage-gap inventory;
+  hand every material gap to `architect` for the mandatory external prior-art decision matrix before
+  anyone makes an optimality claim.
+- Never reduce a multi-family product to the subsystem currently under inspection. For MemRight,
+  explicitly verify all three families and eight layers before describing its purpose or coverage.
 - **Phase 4 reconciles DOCS, never code.** A code↔doc divergence is surfaced as a user decision in the loud RECONCILE block (the only hard blocker); blueprint proposes the doc edit (incl. "superseded by") and applies it ONLY on the user's call. `CODE-FELL-SHORT` (an agent didn't do what the plan expected) must be surfaced loudly, not softened into "stale doc."
