@@ -66,6 +66,11 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     assert.equal(mermaid.status, 0, mermaid.stderr || mermaid.stdout);
     assert.match(mermaid.stdout, /^flowchart LR/);
     assert.match(mermaid.stdout, /OrderService\.placeOrder/);
+
+    const planner = run(["graph", "planner-status", "--query", "placeOrder", "--out", ".agent", "--limit", "2"], repo);
+    assert.equal(planner.provider, "blueprint-static");
+    assert.ok(["ready", "missing_command", "unavailable"].includes(planner.planner.state));
+    assert.equal(planner.candidateSet.candidates[0].sourceKind, "repo_code");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

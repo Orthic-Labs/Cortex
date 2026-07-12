@@ -88,7 +88,7 @@ function usage() {
   ${command} build [--out .agent] [--limit N] [--check]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
   ${command} doctor [--out .agent]
-  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|candidates [--out .agent]
+  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent]
 `);
 }
 
@@ -991,8 +991,24 @@ function runGraphCommand(root, outDir, subcommand, args) {
     }), null, 2));
     return 0;
   }
+  if (subcommand === "planner-status") {
+    const generation = readFreshGraph(root, outDir);
+    const query = String(args.query ?? args.task ?? args._.join(" ")).trim();
+    const candidateSet = createContextCandidateSet(generation, {
+      task: String(args.task ?? query),
+      query,
+      maxCandidates: Number(args.limit ?? 40),
+    });
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      provider: generation.provider.id,
+      planner: memrightPlannerStatus(),
+      candidateSet,
+    }, null, 2));
+    return 0;
+  }
   if (subcommand === "schema") {
-    console.log(JSON.stringify({ schemaVersion: 1, provider: "blueprint-static", artifacts: ["manifest", "nodes", "edges", "graph", "docTruth", "mermaid", "ContextCandidateSet"] }, null, 2));
+    console.log(JSON.stringify({ schemaVersion: 1, provider: "blueprint-static", artifacts: ["manifest", "nodes", "edges", "graph", "docTruth", "mermaid", "plannerStatus", "ContextCandidateSet"] }, null, 2));
     return 0;
   }
   if (subcommand === "resolve") {
@@ -1062,6 +1078,28 @@ function runGraphCommand(root, outDir, subcommand, args) {
   }
   usage();
   return 1;
+}
+
+function memrightPlannerStatus() {
+  try {
+    const help = execFileSync("memright", ["help"], { encoding: "utf8", timeout: 5000 });
+    const hasPlanContext = /\bplan-context\b/.test(help);
+    return {
+      service: "memright",
+      command: "memright plan-context",
+      state: hasPlanContext ? "ready" : "missing_command",
+      evidence: hasPlanContext
+        ? "memright help lists plan-context"
+        : "memright help does not list plan-context; Blueprint can emit ContextCandidateSet but MemRight admission is not live",
+    };
+  } catch (error) {
+    return {
+      service: "memright",
+      command: "memright plan-context",
+      state: "unavailable",
+      evidence: String(error?.message ?? error),
+    };
+  }
 }
 
 function readFreshGraph(root, outDir) {

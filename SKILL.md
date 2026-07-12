@@ -75,6 +75,9 @@ truth map and the first Blueprint-owned code graph:
   `impact`, `resolve`, `architecture`, `flows`, and `candidates`;
 - `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
   planner boundary;
+- `graph planner-status` proves the current MemRight join state: `ready` when `memright plan-context`
+  exists, `missing_command` when Blueprint can emit candidates but MemRight has not shipped the
+  admission command, and `unavailable` when the local binary cannot be inspected;
 - task briefs use graph retrieval as a bounded read-first source before falling back to lexical
   evidence search;
 - product-flow inventory is capped and reports `truncated=true` when capped.
