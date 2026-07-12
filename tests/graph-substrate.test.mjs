@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildDocCodeJoins,
   buildGraphGeneration,
   createContextCandidateSet,
   graphStatus,
@@ -70,4 +71,46 @@ test("graph status distinguishes missing, fresh, and stale generations", () => {
 
   fs.rmSync(outDir, { recursive: true, force: true });
   assert.equal(generation.manifest.complete, true);
+});
+
+test("doc-code truth joins are typed and evidence-backed without polluting graph edges", () => {
+  const generation = {
+    schemaVersion: 1,
+    provider: { id: "blueprint-static" },
+    nodes: [
+      {
+        id: "file:src/store.ts",
+        kind: "file",
+        path: "src/store.ts",
+        evidence: [{ path: "src/store.ts", startLine: 1, endLine: 10, contentHash: "abc123" }],
+      },
+    ],
+    edges: [],
+  };
+  const docMap = {
+    generatedAt: "2026-07-12T00:00:00.000Z",
+    nodes: [
+      { id: "doc.arch", kind: "doc", path: "docs/ARCHITECTURE.md", sha1: "docsha" },
+      { id: "claim.ok", kind: "claim", source: "docs/ARCHITECTURE.md", line: 3, text: "Implemented by `src/store.ts`.", status: "implemented" },
+      { id: "claim.stale", kind: "claim", source: "docs/ARCHITECTURE.md", line: 4, text: "Stale Redis persistence claim for `src/store.ts`.", status: "stale" },
+      { id: "claim.future", kind: "claim", source: "docs/ARCHITECTURE.md", line: 5, text: "Planned future store.", status: "planned" },
+      { id: "code.store", kind: "code_ref", path: "src/store.ts", exists: true },
+      { id: "code.missing", kind: "code_ref", path: "src/missing.ts", exists: false },
+    ],
+    edges: [
+      { from: "doc.arch", to: "claim.ok", type: "contains" },
+      { from: "doc.arch", to: "claim.stale", type: "contains" },
+      { from: "doc.arch", to: "claim.future", type: "contains" },
+      { from: "doc.arch", to: "code.store", type: "mentions-code" },
+      { from: "doc.arch", to: "code.missing", type: "mentions-code" },
+    ],
+  };
+
+  const truth = buildDocCodeJoins(generation, { docMap });
+  assert.equal(truth.sourceDocMap.docs, 1);
+  assert.ok(truth.joins.some((join) => join.kind === "supports" && join.target === "file:src/store.ts"));
+  assert.ok(truth.joins.some((join) => join.kind === "contradicts" && join.evidence.docRef.line === 4));
+  assert.ok(truth.joins.every((join) => join.confidenceClass && join.evidence.codeNode.contentHash === "abc123"));
+  assert.ok(!truth.joins.some((join) => join.evidence.codeRef.path === "src/missing.ts"));
+  assert.deepEqual(generation.edges, []);
 });

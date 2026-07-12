@@ -12,6 +12,7 @@ import {
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  buildDocCodeJoins,
   buildGraphGeneration,
   createContextCandidateSet,
   graphArchitecture,
@@ -86,7 +87,7 @@ function usage() {
   ${command} build [--out .agent] [--limit N] [--check]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
   ${command} doctor [--out .agent]
-  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|candidates [--out .agent]
+  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|candidates [--out .agent]
 `);
 }
 
@@ -1036,6 +1037,12 @@ function runGraphCommand(root, outDir, subcommand, args) {
     const inventory = graphFlowInventory(generation);
     writeJson(join(root, outDir, "flows.json"), inventory);
     console.log(JSON.stringify(inventory, null, 2));
+    return 0;
+  }
+  if (subcommand === "doc-truth") {
+    const generation = readFreshGraph(root, outDir);
+    const docTruth = generation.docTruth ?? buildDocCodeJoins({ ...generation, repoRoot: root }, { outDir });
+    console.log(JSON.stringify(docTruth, null, 2));
     return 0;
   }
   usage();

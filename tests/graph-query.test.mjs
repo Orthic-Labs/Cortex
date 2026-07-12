@@ -54,6 +54,13 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     const candidates = run(["graph", "candidates", "--query", "placeOrder", "--out", ".agent", "--limit", "2"], repo);
     assert.equal(candidates.provider, "blueprint-static");
     assert.equal(candidates.candidates[0].sourceKind, "repo_code");
+
+    const build = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], { cwd: repo, encoding: "utf8" });
+    assert.equal(build.status, 0, build.stderr || build.stdout);
+    const docTruth = run(["graph", "doc-truth", "--out", ".agent"], repo);
+    assert.equal(docTruth.provider, "blueprint-static");
+    assert.ok(Array.isArray(docTruth.joins));
+    assert.ok(docTruth.sourceDocMap.docs >= 1);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

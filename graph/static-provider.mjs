@@ -207,6 +207,156 @@ export function graphImpact(generation, options = {}) {
   };
 }
 
+// Doc ↔ code join — emits deterministic edges joining doc/claim nodes (from
+// `map.json`) to file/symbol nodes (from this generation). The join is reversible
+// (every edge carries doc+file evidence + content hashes) and typed as
+// supports / contradicts / supersedes. A claim with NO matching code node does
+// not emit a join — it remains a doc-side finding, not a graph contradiction.
+export function buildDocCodeJoins(generation, options = {}) {
+  const repoRoot = generation?.repoRoot ? resolve(generation.repoRoot) : null;
+  const map = readDocMap(repoRoot, options);
+  if (!map) return { schemaVersion: 1, provider: generation.provider.id, joins: [], supersedes: [], truncated: false, sourceDocMap: null };
+  const nodesById = new Map(generation.nodes.map((node) => [node.id, node]));
+  const docById = new Map(map.nodes.filter((node) => node.kind === "doc").map((doc) => [doc.id, doc]));
+  const claimById = new Map(map.nodes.filter((node) => node.kind === "claim").map((claim) => [claim.id, claim]));
+  const claimsByDoc = new Map();
+  for (const edge of map.edges) {
+    if (edge.type === "contains" && claimById.has(edge.to)) {
+      if (!claimsByDoc.has(edge.from)) claimsByDoc.set(edge.from, []);
+      claimsByDoc.get(edge.from).push(edge.to);
+    }
+  }
+  const codeRefByDoc = new Map();
+  for (const edge of map.edges) {
+    if (edge.type !== "mentions-code") continue;
+    if (!codeRefByDoc.has(edge.from)) codeRefByDoc.set(edge.from, []);
+    codeRefByDoc.get(edge.from).push(edge.to);
+  }
+  const codeRefsById = new Map(map.nodes.filter((node) => node.kind === "code_ref").map((node) => [node.id, node]));
+  const joins = [];
+  for (const [docId, claimIds] of claimsByDoc) {
+    const doc = docById.get(docId);
+    const codeRefIds = codeRefByDoc.get(docId) ?? [];
+    for (const claimId of claimIds) {
+      const claim = claimById.get(claimId);
+      if (!doc || !claim) continue;
+      for (const codeRefId of codeRefIds) {
+        const codeRef = codeRefsById.get(codeRefId);
+        if (!codeRef?.path) continue;
+        const codeNode = nodesById.get(`file:${codeRef.path}`) ?? generation.nodes.find((node) => node.kind === "symbol" && node.path === codeRef.path);
+        if (!codeNode) continue;
+        const join = classifyJoin(claim, doc, codeRef, codeNode);
+        if (join) joins.push(join);
+      }
+    }
+  }
+  const supersedes = buildSupersedesChain(map, joins);
+  return {
+    schemaVersion: 1,
+    provider: generation.provider.id,
+    joins,
+    supersedes,
+    truncated: false,
+    sourceDocMap: { docs: docById.size, claims: claimById.size, generatedAt: map.generatedAt },
+  };
+}
+
+function classifyJoin(claim, doc, codeRef, codeNode) {
+  const status = claim.status;
+  const text = stripInlineCode(claim.text);
+  const isStale = status === "stale" || /\b(stale|contradict|drift|missing|not implemented|not built|not shipped|deprecated)\b/i.test(text);
+  const isImplemented = status === "implemented" && !isStale;
+  const isSupersedes = /\b(supersedes|superseded by|replaced by)\b/i.test(text);
+  const baseEvidence = {
+    docRef: { path: doc.path, line: claim.line ?? null, sha1: doc.sha1 ?? null },
+    codeRef: { path: codeRef.path, exists: codeRef.exists !== false },
+    codeNode: { id: codeNode.id, path: codeNode.path, contentHash: codeNode.evidence?.[0]?.contentHash ?? null },
+  };
+  if (isSupersedes) {
+    return {
+      kind: "supersedes",
+      source: codeNode.id,
+      target: `doc:${doc.path}`,
+      confidence: 0.9,
+      confidenceClass: "INFERRED",
+      reason: "claim references supersedes/replaced",
+      evidence: baseEvidence,
+    };
+  }
+  if (isStale) {
+    return {
+      kind: "contradicts",
+      source: `doc:${doc.path}`,
+      target: codeNode.id,
+      confidence: 0.85,
+      confidenceClass: "EXTRACTED",
+      reason: `claim status=${status || "claim"} mentions stale/drift/missing/contradict; code node exists`,
+      evidence: baseEvidence,
+    };
+  }
+  if (isImplemented) {
+    return {
+      kind: "supports",
+      source: `doc:${doc.path}`,
+      target: codeNode.id,
+      confidence: 0.85,
+      confidenceClass: "EXTRACTED",
+      reason: `claim status=implemented; code node exists`,
+      evidence: baseEvidence,
+    };
+  }
+  return null;
+}
+
+function buildSupersedesChain(map, joins) {
+  const supersedeClaims = map.nodes.filter(
+    (node) => node.kind === "claim" && /\b(supersedes|replaced by|deprecated by)\b/i.test(stripInlineCode(node.text ?? "")),
+  );
+  const out = [];
+  for (const claim of supersedeClaims) {
+    const doc = map.nodes.find((node) => node.kind === "doc" && node.id && map.edges.some((e) => e.type === "contains" && e.from === node.id && e.to === claim.id));
+    if (!doc) continue;
+    const target = extractSupersedeTarget(claim.text);
+    if (!target) continue;
+    out.push({
+      kind: "supersedes",
+      source: { doc: doc.path, line: claim.line, text: claim.text.slice(0, 240) },
+      target,
+      evidence: { sourceDoc: doc.path, targetMatch: target },
+    });
+  }
+  return out;
+}
+
+function extractSupersedeTarget(text) {
+  const match = text.match(/(?:supersedes|replaced by|deprecated by)\s+([^\s.]+(?:\.[^\s.]+)*)/i);
+  return match ? match[1] : null;
+}
+
+function readDocMap(repoRoot, options) {
+  const explicit = options?.docMap ?? null;
+  if (explicit) return explicit;
+  if (!repoRoot) return null;
+  const candidates = [
+    join(repoRoot, options?.outDir ?? ".agent", "map.json"),
+    join(repoRoot, ".agent", "map.json"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      try {
+        return JSON.parse(readFileSync(candidate, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function stripInlineCode(text) {
+  return String(text ?? "").replace(/`[^`]*`/g, "");
+}
+
 export function graphFlowInventory(generation, options = {}) {
   const maxFlows = Number(options.maxFlows ?? 200);
   const outgoing = new Set(generation.edges.map((edge) => edge.source));
@@ -333,7 +483,13 @@ function buildGenerationFromSources(root, source) {
   addCallEdges(source.files, nodes, edges);
   addConfigEdges(source.files, nodes, edges);
   const cleanNodes = dedupeBy(nodes, (node) => node.id);
-  const cleanEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target}:${item.evidence?.[0]?.path ?? ""}`);
+  const rawEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target}:${item.evidence?.[0]?.path ?? ""}`);
+  const candidateGeneration = { schemaVersion: 1, provider: PROVIDER, manifest: null, nodes: cleanNodes, edges: rawEdges, repoRoot: root };
+  const docMap = readDocMap(root, null);
+  const docTruth = docMap
+    ? buildDocCodeJoins(candidateGeneration, { docMap })
+    : { schemaVersion: 1, provider: PROVIDER.id, joins: [], supersedes: [], truncated: false, sourceDocMap: null };
+  const cleanEdges = dedupeBy(rawEdges, (item) => `${item.kind}:${item.source}:${item.target}:${item.evidence?.[0]?.path ?? ""}`);
   const manifest = {
     schemaVersion: 1,
     provider: PROVIDER,
@@ -348,9 +504,11 @@ function buildGenerationFromSources(root, source) {
     counts: {
       nodes: cleanNodes.length,
       edges: cleanEdges.length,
+      joins: docTruth.joins.length,
+      supersedes: docTruth.supersedes.length,
     },
   };
-  return { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges };
+  return { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges, docTruth, repoRoot: root };
 }
 
 function scanSources(root) {
