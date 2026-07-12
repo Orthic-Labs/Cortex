@@ -10,21 +10,37 @@ One tool to make an agent understand a repo. Deterministic mapping first (cheap,
 
 The deterministic layer cannot lie (it only reports what files/claims exist) but cannot judge. The agent layer judges but is fenced to the real files the map handed it, so it cannot hallucinate structure. That pairing is the whole design.
 
-## Artifacts (all under `<repo>/.agent/`)
+## Artifacts
 
-Machine, for agents:
+Machine entry point (portable, content-hashable):
+- `<repo>/.blueprint/manifest.json` — the canonical Blueprint manifest. Points at every other artifact,
+  carries the `GraphGenerationDescriptorV1`-shaped generation block (matches
+  `ContextCandidateSet.freshness.revision` and `ScopeGrantV1.manifestDigest`), and is the contract
+  downstream consumers (RightContext, audit, agent handoffs) bind to. Repo-relative paths only; no
+  absolute Windows/Mac paths. **This is the only machine entry point.** `map.json.entrypoint`
+  references this path.
+
+Machine, for agents (under `<repo>/.agent/`):
 - `map.json` · `claims.json` · `stale.json` · `index.json` — the deterministic graph (Phase 1).
 - `queue.json` — the grounded Phase-2 worklist: each claim paired with the code files its own doc references, plus the largest implementation files as `anchors`.
 - `verdicts.json` — per-claim verification (Phase 2).
 - `understanding.json` — the synthesized understanding layer across 5 dimensions (Phase 2), including
   `architecture.flows[]` and `architecture.coverageGaps[]` so missing paths are first-class evidence.
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
+- `graph/manifest.json` + `graph/generations/<generationId>/{nodes,edges,graph}.json` — the structural graph (deterministic Blueprint-owned provider, current name `blueprint-static`).
+- `flows.json` — classified product-flow inventory (complete / broken / unsupported).
 
-Human, ONE file:
-- `START-HERE.md` — stats, graph, key docs, and after Phase 2 a folded summary (verified facts, top risks, maturity). The only file a person opens.
+Human, generated (under `<repo>/docs/`):
+- `docs/product.md` — code-grounded product/marketing overview; capabilities from the complete flow
+  inventory, framing only from verified doc claims, never invented.
+- `docs/architecture.md` — code-grounded technical overview; components, interfaces, classified flow
+  table, capability coverage, health/security synthesis, and the Code Graph operational section.
+
+These two are the ONLY human-facing artifacts Blueprint emits. **`START-HERE.md` is retired.** Agents
+read the JSON directly; humans read the two generated docs (and the optional README pointer block).
 
 Portable, for any agent (OKF):
-- `okf/` — the understanding layer as an **Open Knowledge Format** bundle (one markdown concept per component/interface/risk; required `type` frontmatter; concepts linked as a graph; auto `index.md`), prose **compressed** structure-safely (refs/code/links preserved). **MANDATORY Phase-2 close — not optional, not agent discretion:** run `py -3.11 D:/Claude/tools/lib/skill_emit.py blueprint <repo>` — it transforms `understanding.json` → OKF concepts (one per dimension; YAML `type` frontmatter) → emits the bundle AND ingests it into the memory engine, recallable immediately. The bare `okf.py emit` is the low-level primitive; skills call `skill_emit`, never okf.py directly. Portable into CodeRight and any OKF-aware agent; the JSON stays the structured source and `START-HERE.md` stays the uncompressed human doc. Pattern + before/after: `tools/lib/OKF-OUTPUT.md`.
+- `okf/` — the understanding layer as an **Open Knowledge Format** bundle (one markdown concept per component/interface/risk; required `type` frontmatter; concepts linked as a graph; auto `index.md`), prose **compressed** structure-safely (refs/code/links preserved). **MANDATORY Phase-2 close — not optional, not agent discretion:** run `py -3.11 D:/Claude/tools/lib/skill_emit.py blueprint <repo>` — it transforms `understanding.json` → OKF concepts (one per dimension; YAML `type` frontmatter) → emits the bundle AND ingests it into the memory engine, recallable immediately. The bare `okf.py emit` is the low-level primitive; skills call `skill_emit`, never okf.py directly. Portable into CodeRight and any OKF-aware agent; the JSON stays the structured source and the generated docs stay the uncompressed human docs. Pattern + before/after: `tools/lib/OKF-OUTPUT.md`.
 
 ## Whole-repository completeness contract
 
@@ -65,12 +81,14 @@ may enter the durable output path. Raw graph nodes, embeddings, edges, and visua
 enter MemRight. Blueprint never owns the final cross-layer token budget.
 
 As verified on 2026-07-12, the live Phase-1 implementation now writes both the original document
-truth map and the first Blueprint-owned code graph:
+truth map and the Blueprint-owned code graph:
 
 - bootstrap node kinds remain `repo|doc|claim|code_ref`;
 - bootstrap edge kinds remain `contains|mentions-code`;
-- `blueprint build` also writes `.agent/graph/manifest.json`, immutable generation files,
-  `.agent/flows.json`, and a Code Graph section in `START-HERE.md`;
+- `blueprint build` writes `.agent/map.json`, `.agent/claims.json`, `.agent/stale.json`,
+  `.agent/index.json`, `.agent/queue.json`, `.agent/flows.json`, the `.agent/graph/` tree
+  (manifest + immutable generation files), and the portable `.blueprint/manifest.json`;
+- it also generates the two human docs `docs/product.md` and `docs/architecture.md`;
 - live graph commands include `build`, `status`, `schema`, `search`, `neighbors`, `path`,
   `impact`, `resolve`, `architecture`, `flows`, and `candidates`;
 - `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
@@ -81,11 +99,14 @@ truth map and the first Blueprint-owned code graph:
 - `graph mermaid` emits a bounded deterministic Mermaid view for static visual inspection;
 - `graph flows --complete` asks for complete flow enumeration up to the explicit safety cap instead
   of the default bounded preview;
-- `doctor` emits typed JSON states (`ready`, `missing`, `stale`, `broken`, `corrupt`) and includes
-  provider capability coverage, including the honest parsed-language list.
+- `doctor` (and `doctor --json`) emit typed JSON states (`ready`, `missing`, `stale`, `broken`,
+  `corrupt`) and include provider capability coverage, including the honest parsed-language list.
 - task briefs use graph retrieval as a bounded read-first source before falling back to lexical
   evidence search;
-- product-flow inventory is capped and reports `truncated=true` when capped.
+- product-flow inventory is capped and reports `truncated=true` when capped;
+- **`START-HERE.md` is retired.** No build writes it. `map.json.entrypoint` and the
+  `.blueprint/manifest.json` `entrypoint` field point at the portable machine manifest;
+  humans read the two generated docs.
 
 The implementation is still **PARTIAL** for final whole-repository understanding until larger
 language/parser coverage, doc-code contradiction joins, and optional visual explorer work are
@@ -99,9 +120,9 @@ evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.j
 From the repo root:
 
 ```bash
-blueprint            # build/refresh map.json, queue.json, START-HERE.md, etc.
+blueprint            # build/refresh map.json, .blueprint/manifest.json, generated docs, etc.
 blueprint "<task>"   # also writes a task-scoped runs/<ts>-<task>/TASK-BRIEF.md
-blueprint doctor     # validate graph integrity, list missing refs
+blueprint doctor     # validate graph integrity, list missing refs; --json emits typed state
 ```
 
 The bare `blueprint` command runs **Phase 1 only** — it exits after writing the map, so an agent that just runs the command naturally stops there. That is the right stopping point ONLY for a quick task-scoped brief (read `TASK-BRIEF.md` and go).
@@ -130,12 +151,12 @@ The MAIN agent merges to `verdicts.json` (reconciliation is never delegated). A 
 - `security` — `trustBoundaries[]`, `secrets[]` (location + presence only, redact values), `injectionSurface[]`, `authz[]`, `dataProtection[]`, `dangerousPatterns[]`, `posture[]`.
 - `solid` — `dimensions[]` each `{name,status:Present|Partial|Missing,note}` over observability, resilience, config/env, testing, CI/CD, performance, scalability, data lifecycle, onboarding, accessibility, licensing; plus `scorecard[]` and `top5[]`.
 
-## Phase 3 — fold into the one human doc (main session)
+## Phase 3 — fold into the generated human docs (main session)
 
-Append to `START-HERE.md`: a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), a Coverage Gaps table from `architecture.coverageGaps`, top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The Phase-4 RECONCILE block (below) goes at the **very top**, above everything else — it is the one thing the user must act on. Then open it:
+Append to `docs/architecture.md` (the technical doc is the natural home): a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), a Coverage Gaps table from `architecture.coverageGaps`, top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The Phase-4 RECONCILE block (below) goes at the **very top** of `docs/architecture.md`, above everything else — it is the one thing the user must act on. Then open it:
 
 ```bash
-node D:/Claude/tools/lib/open-for-review.mjs "<repo>/.agent/START-HERE.md"
+node D:/Claude/tools/lib/open-for-review.mjs "<repo>/docs/architecture.md"
 ```
 
 ## Phase 4 — doc-reconcile (the whole point: catch when agents didn't do what was expected)
@@ -176,7 +197,7 @@ recent decision doc beats an old plan; nothing beats a passing test/command.
 ### The RECONCILE block — the ONE hard blocker, never buried
 
 The user's reconciliation decision is the **only hard blocker** in blueprint, and it must be
-**impossible to miss** — a loud banner at the TOP of `START-HERE.md`, never a paragraph in a sea of
+**impossible to miss** — a loud banner at the TOP of `docs/architecture.md`, never a paragraph in a sea of
 prose. Render it exactly like this, above the Verified-Facts/Contradictions sections:
 
 ```markdown
@@ -194,7 +215,7 @@ prose. Render it exactly like this, above the Verified-Facts/Contradictions sect
 <new>") and applies a doc edit ONLY on the user's per-item decision — the user owns how docs get
 reconciled. Application **code** is never touched (Phase 4 keeps the read-only-code contract; it only
 ever edits *docs*, and only after the user decides). After decisions, apply the chosen doc edits with
-`apply_patch`/Edit, then re-open `START-HERE.md`.
+`apply_patch`/Edit, then re-open `docs/architecture.md`.
 
 ## Tuning
 

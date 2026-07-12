@@ -5,8 +5,12 @@
 //   2. unchanged rebuild is byte-identical
 //   3. README marker block is created once, updated in place, content untouched
 //   4. hand-written unmarked docs/product.md triggers docs_conflict + .agent/docs/ fallback
-//   5. after build, no START-HERE.md exists in .agent/
-//   6. contradicted claims do not appear as facts in either doc
+//   5. contradicted claims do not appear as facts in either doc
+//   6. generated docs are excluded from the next build's discovery and signature
+//
+// (START-HERE retirement is covered in standalone-completion.test.mjs; the
+// skill no longer writes START-HERE.md at all, so a "delete after write" test
+// would be testing the wrong contract.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -133,20 +137,6 @@ it("B6.5.4 hand-written unmarked docs/architecture.md triggers docs_conflict + .
     // The hand-written file must be untouched
     const after = readFileSync(join(root, DOC_PATHS.architecture), "utf8");
     assert.equal(after, handWritten, "hand-written architecture.md was clobbered");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-it("B6.5.4 after build, no START-HERE.md exists in .agent/", async () => {
-  const root = makeFixture();
-  try {
-    // Pre-create a stale START-HERE.md to verify deletion
-    mkdirSync(join(root, ".agent"), { recursive: true });
-    writeFileSync(join(root, ".agent/START-HERE.md"), "# stale\n");
-    const { execFileSync } = await import("node:child_process");
-    execFileSync("node", [SCRIPT, "build", "--out", ".agent"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    assert.equal(existsSync(join(root, ".agent/START-HERE.md")), false, "stale START-HERE.md should be deleted");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

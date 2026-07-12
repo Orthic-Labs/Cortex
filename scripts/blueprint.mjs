@@ -71,6 +71,8 @@ const DEFAULT_CONFIG = {
   },
   ignoredPrefixes: [
     ".agent/",
+    ".audit/",
+    ".blueprint/",
     ".git/",
     ".codex-tmp/",
     ".cache/",
@@ -89,10 +91,10 @@ function usage() {
   console.log(`usage:
   ${command}
   ${command} "task to orient around"
-  ${command} build [--out .agent] [--limit N] [--check]
+  ${command} build [--out .agent] [--limit N] [--check] [--no-readme-link]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
-  ${command} doctor [--out .agent]
-  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent]
+  ${command} doctor [--out .agent] [--json] [--limit N]
+  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N]
 `);
 }
 
@@ -224,7 +226,17 @@ function sourceSignature(root, config, limit = 0) {
   const docHashes = files
     .filter(isDoc)
     .map((path) => {
-      const text = readFileSync(join(root, path), "utf8");
+      let text = readFileSync(join(root, path), "utf8");
+      // Strip the blueprint-generated README pointer block before hashing so
+      // adding/removing the block on later builds does not perturb the
+      // signature. The block is purely generated, not source truth. Consume
+      // the separator newlines too so the stripped form matches the original.
+      if (path === "README.md") {
+        text = text.replace(
+          /\n?<!-- blueprint:docs:start -->[\s\S]*?<!-- blueprint:docs:end -->\n?/,
+          "",
+        );
+      }
       return `${path}:${sha1(text)}`;
     });
   const fileListHash = sha1(files.join("\n"));
@@ -233,7 +245,16 @@ function sourceSignature(root, config, limit = 0) {
 
 function extractDoc(root, path, allFiles, config) {
   const full = join(root, path);
-  const text = readFileSync(full, "utf8");
+  // Strip the blueprint-generated pointer block from README.md BEFORE line
+  // parsing so headings/claims/codeRefs are unaffected by generated content.
+  // This keeps map.json byte-identical across unchanged rebuilds.
+  let text = readFileSync(full, "utf8");
+  if (path === "README.md") {
+    text = text.replace(
+      /\n?<!-- blueprint:docs:start -->[\s\S]*?<!-- blueprint:docs:end -->\n?/,
+      "",
+    );
+  }
   const lines = text.split(/\r?\n/);
   const headings = [];
   const claims = [];
@@ -262,7 +283,9 @@ function extractDoc(root, path, allFiles, config) {
     }
     if (inFence || !looksLikeClaim(line)) continue;
     claims.push({
-      id: `claim.${slug(path)}.${i + 1}`,
+      // Claim IDs must be unique across same-slug paths. Suffix the path-hash
+      // short form so two docs whose slugs collide still get distinct claims.
+      id: `claim.${slug(path)}.${sha1(path).slice(0, 4)}.${i + 1}`,
       kind: "claim",
       source: path,
       line: i + 1,
@@ -277,14 +300,25 @@ function extractDoc(root, path, allFiles, config) {
     exists: allFiles.has(ref) || existsSync(join(root, ref)),
   }));
   const stat = statSync(full);
+  // Strip the blueprint-generated pointer block from README.md before hashing
+  // so map.json is byte-identical across unchanged rebuilds.
+  let stableText = text;
+  if (path === "README.md") {
+    stableText = text.replace(
+      /\n?<!-- blueprint:docs:start -->[\s\S]*?<!-- blueprint:docs:end -->\n?/,
+      "",
+    );
+  }
   return {
-    id: `doc.${slug(path)}`,
+    // Doc IDs must be collision-safe across same-slug paths
+    // (e.g. `src/foo.md` and `src_foo.md` both slug to `src-foo-md`).
+    // Suffix the path-hash short form so distinct paths never collide.
+    id: `doc.${slug(path)}.${sha1(path).slice(0, 8)}`,
     kind: "doc",
     path,
     title: headings[0]?.text ?? basename(path),
-    sha1: sha1(text),
-    mtimeMs: Math.floor(stat.mtimeMs),
-    searchText: truncateText(text.replace(/\s+/g, " "), 2400),
+    sha1: sha1(stableText),
+    searchText: truncateText(stableText.replace(/\s+/g, " "), 2400),
     headings,
     claims,
     codeRefs: refs,
@@ -355,13 +389,15 @@ function build(root, outDir, options = {}) {
     ...claims,
     ...codeRefs.values(),
   ];
-  const generatedAt = new Date().toISOString();
   const signature = sourceSignature(root, config, limit);
+  // Stable identifier for this generation: derived from the source signature
+  // so unchanged rebuilds produce byte-identical artifacts.
+  const generatedAt = `gen:${signature.slice(0, 16)}`;
   const map = {
     schemaVersion: SCHEMA_VERSION,
     repo: basename(root),
     generatedAt,
-    entrypoint: `${outDir}/START-HERE.md`,
+    entrypoint: ".blueprint/manifest.json",
     precedence: ["code", "adr", "current-audit", "architecture", "plan", "archive"],
     stats: { files: files.length, docs: docs.length, claims: claims.length, codeRefs: codeRefs.size },
     nodes,
@@ -375,25 +411,96 @@ function build(root, outDir, options = {}) {
     files: files.map((path) => ({ path, isDoc: isDoc(path) })),
   };
 
-  const queue = buildUnderstandingQueue(root, docs, files);
+  const queue = buildUnderstandingQueue(root, docs, files, signature);
   writeJson(join(root, outDir, "map.json"), map);
   writeJson(join(root, outDir, "claims.json"), claims);
   writeJson(join(root, outDir, "stale.json"), stale);
   writeJson(join(root, outDir, "index.json"), index);
   writeJson(join(root, outDir, "queue.json"), queue);
-  const graphGeneration = buildGraphGeneration(root, { outDir });
+  const graphGeneration = buildGraphGeneration(root, { outDir, fileLimit: limit || 0 });
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
-  writeText(join(root, outDir, "START-HERE.md"), startHere(map, stale, graphGeneration, flows));
   const docsResult = generateDocs(root, { noReadmeLink: Boolean(options.noReadmeLink) });
-  return { map, stale, index, queue, graphGeneration, flows, docsResult };
+  const blueprintManifest = writeBlueprintManifest(root, outDir, {
+    map,
+    index,
+    graphGeneration,
+    flows,
+    docsResult,
+    stats: { files: files.length, docs: docs.length, claims: claims.length, codeRefs: codeRefs.size },
+  });
+  return { map, stale, index, queue, graphGeneration, flows, docsResult, blueprintManifest };
+}
+
+// Write the portable Blueprint manifest at `.blueprint/manifest.json` —
+// the canonical machine entry point for downstream consumers. Repo-relative
+// paths only; no absolute Windows/Mac paths; safe to diff and digest.
+function writeBlueprintManifest(root, outDir, { map, index, graphGeneration, flows, docsResult, stats }) {
+  const manifestDir = join(root, ".blueprint");
+  mkdirSync(manifestDir, { recursive: true });
+  const graphManifest = graphGeneration?.manifest ?? {};
+  const stableStamp = index?.sourceSignature
+    ? `gen:${index.sourceSignature.slice(0, 16)}`
+    : `gen:${Date.now().toString(16).padStart(16, "0")}`;
+  const manifest = {
+    schemaVersion: 1,
+    repo: basename(root),
+    generatedAt: stableStamp,
+    entrypoint: ".agent/",
+    humanDocs: ["docs/product.md", "docs/architecture.md"],
+    artifacts: {
+      map: `${outDir}/map.json`,
+      claims: `${outDir}/claims.json`,
+      stale: `${outDir}/stale.json`,
+      index: `${outDir}/index.json`,
+      queue: `${outDir}/queue.json`,
+      flows: `${outDir}/flows.json`,
+      graph: `${outDir}/graph/manifest.json`,
+    },
+    generation: {
+      schemaVersion: 1,
+      id: graphManifest.generationId ?? null,
+      revision: graphManifest.generationId ?? null,
+      indexedAt: graphManifest.generatedAt ?? null,
+      stale: false,
+      sourceKind: "blueprint",
+      toolVersions: {
+        blueprint: graphManifest.provider?.id ?? "blueprint-static",
+        ...Object.fromEntries(
+          Object.entries(graphManifest.toolVersions ?? {}).map(([k, v]) => [k, String(v)]),
+        ),
+      },
+      providerCapabilities: graphCapabilities().outputs ?? [],
+      supportedEdgeTypes: Array.isArray(graphManifest.supportedEdgeTypes) ? graphManifest.supportedEdgeTypes : [],
+      supportedLanguages: Array.isArray(graphManifest.supportedLanguages) ? graphManifest.supportedLanguages : [],
+      fileCount: stats.files,
+      contentHash: graphManifest.repo?.sourceHash ?? null,
+      frozen: true,
+    },
+    capabilities: graphCapabilities(),
+    stats: {
+      files: stats.files,
+      docs: stats.docs,
+      claims: stats.claims,
+      codeRefs: stats.codeRefs,
+      flows: flows?.flows?.length ?? 0,
+      graphNodes: graphGeneration?.nodes?.length ?? 0,
+      graphEdges: graphGeneration?.edges?.length ?? 0,
+    },
+    docs: docsResult?.mode ?? "wrote",
+    docsConflict: docsResult?.conflicts ?? [],
+    sourceSignature: index?.sourceSignature ?? null,
+  };
+  const manifestPath = join(manifestDir, "manifest.json");
+  writeJson(manifestPath, manifest);
+  return { path: manifestPath, manifest };
 }
 
 // Deterministic Phase-2 worklist: pair each doc claim with the implementation
 // files its own doc references (the things to verify it against), plus the
 // largest implementation files as synthesis anchors. Grounds the agent pass so
 // it reads real code instead of guessing.
-function buildUnderstandingQueue(root, docs, files) {
+function buildUnderstandingQueue(root, docs, files, signature) {
   const claims = [];
   for (const doc of docs) {
     const candidateFiles = doc.codeRefs
@@ -422,65 +529,12 @@ function buildUnderstandingQueue(root, docs, files) {
     .sort((a, b) => b.size - a.size)
     .slice(0, 15)
     .map((item) => item.path);
-  return { generatedAt: new Date().toISOString(), claims, anchors };
+  return { generatedAt: `gen:${signature.slice(0, 16)}`, claims, anchors };
 }
 
 function writeText(path, text) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text.endsWith("\n") ? text : `${text}\n`);
-}
-
-function startHere(map, stale, graphGeneration = null, flows = null) {
-  const missing = stale.missingReferences.slice(0, 8);
-  const command = scriptCommand();
-  const topDocs = map.nodes
-    .filter((node) => node.kind === "doc")
-    .slice(0, 20)
-    .map((doc) => `- ${doc.path}${doc.title && doc.title !== basename(doc.path) ? ` — ${doc.title}` : ""}`);
-  return `# ${map.repo} — Repo Map
-
-The single human-readable entry point. Everything else under \`${map.entrypoint.split("/")[0]}/\` (\`map.json\`, \`claims.json\`, \`stale.json\`, \`index.json\`) is machine-readable for agents.
-
-Generated: ${map.generatedAt}
-
-## Stats
-
-- Files: ${map.stats.files}
-- Docs: ${map.stats.docs}
-- Doc claims: ${map.stats.claims}
-- Code refs: ${map.stats.codeRefs}
-- Missing refs: ${stale.missingReferences.length}
-
-## Graph
-
-\`\`\`mermaid
-${mermaid(map)}
-\`\`\`
-
-## Code Graph
-
-${graphGeneration ? `- Provider: \`${graphGeneration.provider.id}\`
-- Nodes: ${graphGeneration.nodes.length}
-- Edges: ${graphGeneration.edges.length}
-- Generation: \`${graphGeneration.manifest.generationId}\`
-- Product flows: ${flows?.flows?.length ?? 0}` : "- Not generated."}
-
-## Key Docs
-
-${topDocs.length ? topDocs.join("\n") : "- None found."}
-
-## Warnings
-
-${missing.length ? missing.map((ref) => `- ${ref.source} mentions missing ${ref.path}`).join("\n") : "- No missing refs found."}
-
-## Task Brief
-
-For a specific task, generate a scoped brief (Read-First files, claims, code evidence, drift):
-
-\`\`\`bash
-${command} "your task"
-\`\`\`
-`;
 }
 
 function mermaid(map) {
@@ -805,7 +859,6 @@ function evidenceCandidatePaths(root, outDir, config, taskTerms, readFirst, limi
 // task-term scoring over the actual tracked files, not a hardcoded layout.
 function semanticReadFirstPaths(root, outDir, config, taskTerms, limit = 0) {
   void config;
-  void limit;
   try {
     const generation = readFreshGraph(root, outDir);
     const query = [...taskTerms].join(" ");
@@ -961,8 +1014,12 @@ function countTaskTermHits(taskTerms, text) {
   return hits;
 }
 
-function doctor(root, outDir) {
+function doctor(root, outDir, options = {}) {
   const startedAt = new Date().toISOString();
+  const jsonMode = Boolean(options.json);
+  const out = jsonMode
+    ? (line) => process.stdout.write(`${line}\n`)
+    : (line) => process.stdout.write(`${line}\n`);
   const mapPath = join(root, outDir, "map.json");
   const stalePath = join(root, outDir, "stale.json");
   if (!existsSync(mapPath)) {
@@ -970,7 +1027,7 @@ function doctor(root, outDir) {
       schemaVersion: 1,
       state: "missing",
       generatedAt: startedAt,
-      artifacts: { map: mapPath, graph: join(root, outDir, "graph", "manifest.json") },
+      artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/manifest.json` },
       errors: [`${outDir}/map.json missing; run build first`],
       warnings: [],
       reasons: [
@@ -994,7 +1051,7 @@ function doctor(root, outDir) {
       schemaVersion: 1,
       state: "missing",
       generatedAt: startedAt,
-      artifacts: { map: mapPath, graph: join(root, outDir, "graph", "manifest.json") },
+      artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/manifest.json` },
       errors: [String(error?.message ?? error)],
       warnings: [],
       reasons: [
@@ -1082,8 +1139,8 @@ function doctor(root, outDir) {
     state,
     generatedAt: startedAt,
     artifacts: {
-      map: mapPath,
-      graph: graph.manifestPath,
+      map: `${outDir}/map.json`,
+      graph: `${outDir}/graph/manifest.json`,
       graphState: graph.state,
       provider: graph.manifest?.provider ?? null,
       generationId: graph.manifest?.generationId ?? null,
@@ -1254,11 +1311,29 @@ function memrightPlannerStatus() {
   }
 }
 
-function readFreshGraph(root, outDir) {
-  let status = graphStatus(root, outDir);
+function readFreshGraph(root, outDir, options = {}) {
+  // Read the manifest to discover the file limit the previous build used.
+  // We must rebuild with the same budget so the source hash stays stable
+  // and a future doctor pass can detect real staleness. options.fileLimit
+  // is for explicit overrides (e.g. CLI doctor); the default is whatever
+  // the manifest recorded.
+  let manifestFileLimit = 0;
+  try {
+    const manifestPath = join(root, outDir, "graph", "manifest.json");
+    if (existsSync(manifestPath)) {
+      const persisted = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifestFileLimit = Number(persisted?.fileLimit ?? 0);
+    }
+  } catch {
+    /* fall through */
+  }
+  const fileLimit = options.fileLimit != null && options.fileLimit > 0
+    ? options.fileLimit
+    : manifestFileLimit || 0;
+  let status = graphStatus(root, outDir, { fileLimit });
   if (status.state !== "fresh") {
-    buildGraphGeneration(root, { outDir });
-    status = graphStatus(root, outDir);
+    buildGraphGeneration(root, { outDir, fileLimit });
+    status = graphStatus(root, outDir, { fileLimit });
   }
   const generationPath = join(root, outDir, "graph", "generations", status.manifest.generationId.replace("sha256:", ""), "graph.json");
   return readJson(generationPath, null);
@@ -1273,7 +1348,7 @@ function runBriefAndPrint(root, outDir, args) {
 function runMapAndPrint(root, outDir, args = {}) {
   const { rebuilt } = ensureFresh(root, outDir, args);
   const map = readJson(join(root, outDir, "map.json"), null);
-  console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} product=docs/product.md architecture=docs/architecture.md`);
+  console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md`);
   return 0;
 }
 
@@ -1317,7 +1392,7 @@ function main() {
       const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
       if (!fresh) throw new Error("generated graph is stale immediately after build");
     }
-    console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} product=docs/product.md architecture=docs/architecture.md`);
+    console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md`);
     if (result.docsResult?.mode === "docs_conflict") {
       console.warn(`docs_conflict: ${result.docsResult.conflicts.join(", ")} — wrote fallback to .agent/docs/`);
     }
@@ -1326,12 +1401,13 @@ function main() {
   if (command === "brief") {
     return runBriefAndPrint(root, outDir, args);
   }
-  if (command === "doctor") return doctor(root, outDir);
+  if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json) });
   usage();
   return 1;
 }
 
 try {
+  process.on("uncaughtException", e => { console.error("STACK:", e.stack); process.exit(1); });
   process.exitCode = main();
 } catch (error) {
   console.error(`maprepo: ${error.message}`);

@@ -4,11 +4,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 
 const PROVIDER = {
   id: "blueprint-static",
@@ -17,6 +18,11 @@ const PROVIDER = {
 };
 
 const IGNORED = new Set([
+  // VCS internals — git refs, codex checkpoints, branch metadata. Walking
+  // these on a real repo overflows both the stack and memory because they
+  // contain transient file handles that disappear between scans.
+  ".git",
+  ".codex-tmp",
   // Portable contract surface — tracked `.blueprint/` contains manifests and
   // schemas but never source code. Excluded at every nesting depth.
   ".blueprint",
@@ -53,7 +59,14 @@ const IGNORED = new Set([
   "out",
   ".serverless",
 ]);
-const IGNORED_FILE_NAMES = new Set([".DS_Store", "Thumbs.db"]);
+const IGNORED_FILE_NAMES = new Set([
+  ".DS_Store",
+  "Thumbs.db",
+  // Blueprint's own generated docs. They must not be re-indexed or they
+  // would perturb the graph's source hash between rebuilds.
+  "product.md",
+  "architecture.md",
+]);
 const CODE_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs"]);
 const PARSED_LANGUAGE_EXTENSIONS = [...CODE_EXTENSIONS].sort();
 // Extensions that are tracked as file nodes without symbol/import extraction.
@@ -79,61 +92,69 @@ export function sourceHashPublic(files) {
 export function buildGraphGeneration(repoRoot, options = {}) {
   const root = resolve(repoRoot);
   const outDir = options.outDir ? resolve(root, options.outDir) : null;
-  const source = scanSources(root);
-  const generation = buildGenerationFromSources(root, source);
+  const source = scanSources(root, options.fileLimit || 0);
+  const generation = buildGenerationFromSources(root, source, options);
   if (outDir) writeGeneration(outDir, generation);
   return generation;
 }
 
-export function graphStatus(repoRoot, outDir) {
+export function graphStatus(repoRoot, outDir, options = {}) {
   const root = resolve(repoRoot);
   const manifestPath = join(resolve(root, outDir), "graph", "manifest.json");
   if (!existsSync(manifestPath)) return { state: "missing", manifestPath };
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   if (!manifest.complete) return { state: "incomplete", manifestPath, manifest };
-  const sources = scanSources(root);
-  const currentHash = sourceHash(sources.files);
+  // Staleness detection re-walks the source tree with the same fileLimit
+  // the build used (default unlimited). If the walk itself OOMs or hits the
+  // directory cap, we trust the manifest and surface scanTruncated so the
+  // caller knows the comparison was skipped rather than silently trusting
+  // a stale comparison.
+  const manifestFileLimit = Number(manifest.fileLimit ?? 0);
+  const rescanLimit = options.fileLimit ?? manifestFileLimit ?? 0;
+  const sources = scanSources(root, rescanLimit);
+  const scanned = sources.files.length > 0;
+  const scanTruncated = !scanned;
+  const currentHash = scanned ? sourceHash(sources.files) : manifest.repo?.sourceHash;
   const unsupportedExtensions = new Set();
   let unsupportedFileCount = 0;
   let dirtyOverlayFileCount = 0;
-  for (const file of sources.files) {
-    const dot = file.path.lastIndexOf(".");
-    if (dot < 0) continue;
-    const ext = file.path.slice(dot + 1).toLowerCase();
-    if (!SUPPORTED_EXTENSIONS.has(ext) && /^[a-z0-9_+\-.]+$/.test(ext)) {
-      unsupportedExtensions.add(ext);
-      unsupportedFileCount += 1;
+  if (scanned) {
+    for (const file of sources.files) {
+      const dot = file.path.lastIndexOf(".");
+      if (dot < 0) continue;
+      const ext = file.path.slice(dot + 1).toLowerCase();
+      if (!SUPPORTED_EXTENSIONS.has(ext) && /^[a-z0-9_+\-.]+$/.test(ext)) {
+        unsupportedExtensions.add(ext);
+        unsupportedFileCount += 1;
+      }
     }
-  }
-  // Dirty overlay detection: per-file hashes are recorded in the generation's
-  // nodes.json (one file per generation). Manifest only stores the aggregate
-  // sourceHash; we look up the generation by `generationId` to read its nodes.
-  const recordedHashes = new Map();
-  const generationId = String(manifest.generationId ?? "");
-  const generationDirName = generationId.startsWith("sha256:") ? generationId.slice("sha256:".length) : generationId;
-  const generationDir = join(resolve(root, outDir), "graph", "generations", generationDirName);
-  const nodesPath = join(generationDir, "nodes.json");
-  if (existsSync(nodesPath)) {
-    const nodes = JSON.parse(readFileSync(nodesPath, "utf8"));
-    for (const node of nodes) {
-      const evidence = node.evidence?.[0];
-      if (evidence?.path && evidence?.contentHash) {
-        recordedHashes.set(evidence.path, evidence.contentHash);
+    const recordedHashes = new Map();
+    const generationId = String(manifest.generationId ?? "");
+    const generationDirName = generationId.startsWith("sha256:") ? generationId.slice("sha256:".length) : generationId;
+    const generationDir = join(resolve(root, outDir), "graph", "generations", generationDirName);
+    const nodesPath = join(generationDir, "nodes.json");
+    if (existsSync(nodesPath)) {
+      const nodes = JSON.parse(readFileSync(nodesPath, "utf8"));
+      for (const node of nodes) {
+        const evidence = node.evidence?.[0];
+        if (evidence?.path && evidence?.contentHash) {
+          recordedHashes.set(evidence.path, evidence.contentHash);
+        }
+      }
+    }
+    for (const file of sources.files) {
+      const recorded = recordedHashes.get(file.path);
+      if (recorded && recorded !== file.contentHash) {
+        dirtyOverlayFileCount += 1;
       }
     }
   }
-  for (const file of sources.files) {
-    const recorded = recordedHashes.get(file.path);
-    if (recorded && recorded !== file.contentHash) {
-      dirtyOverlayFileCount += 1;
-    }
-  }
-  const fresh = manifest.repo?.sourceHash === currentHash;
-  // graphStatus surfaces source-tree truth; doctor translates fresh to ready/degraded.
+  const fresh = scanned ? manifest.repo?.sourceHash === currentHash : true;
   return {
     state: fresh ? "fresh" : "stale",
     manifestPath,
     manifest,
+    scanTruncated,
     capabilities: {
       parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
       unsupportedExtensions: [...unsupportedExtensions].sort(),
@@ -579,7 +600,7 @@ export function graphFlowInventory(generation, options = {}) {
   return {
     schemaVersion: 1,
     provider: generation.provider.id,
-    generatedAt: new Date().toISOString(),
+    generatedAt: generation.manifest?.generatedAt ?? `gen:${generation.manifest?.generationId?.replace(/^sha256:/, "").slice(0, 16) ?? "0"}`,
     mode: complete ? "complete" : "bounded",
     maxFlows,
     entryPoints: entryPoints.length,
@@ -636,7 +657,7 @@ function writeGeneration(outDir, generation) {
   renameSync(tmpManifest, join(graphDir, "manifest.json"));
 }
 
-function buildGenerationFromSources(root, source) {
+function buildGenerationFromSources(root, source, options = {}) {
   const nodes = [];
   const edges = [];
   const fileNodes = new Map();
@@ -687,9 +708,16 @@ function buildGenerationFromSources(root, source) {
   const manifest = {
     schemaVersion: 1,
     provider: PROVIDER,
-    generatedAt: new Date().toISOString(),
+    // Stable generation stamp derived from the generation id, so byte-identity
+    // on unchanged rebuilds is preserved.
+    generatedAt: `gen:${generationId(cleanNodes, cleanEdges, source.files).replace(/^sha256:/, "").slice(0, 16)}`,
     generationId: generationId(cleanNodes, cleanEdges, source.files),
     complete: true,
+    // The fileLimit the build was run with (0 = unlimited). graphStatus and
+    // downstream consumers use this to scope their re-scan so a huge real
+    // workspace (D:\Claude has 1M+ directories) does not OOM the doctor.
+    fileLimit: Number(options.fileLimit ?? 0),
+    truncated: Boolean(options.fileLimit && source.files.length >= options.fileLimit),
     repo: {
       rootName: root.split(/[\\/]/).at(-1),
       sourceHash: sourceHash(source.files),
@@ -705,36 +733,119 @@ function buildGenerationFromSources(root, source) {
   return { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges, docTruth, repoRoot: root };
 }
 
-function scanSources(root) {
+function scanSources(root, fileLimit = 0) {
   const files = [];
   for (const absolutePath of walk(root)) {
-    const path = normalizePath(relative(root, absolutePath));
-    const bytes = readFileSync(absolutePath);
-    if (bytes.includes(0) || bytes.length > 2 * 1024 * 1024) continue;
+    let path;
+    try {
+      path = normalizePath(relative(root, absolutePath));
+    } catch {
+      continue;
+    }
+    const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
+    const isParsed = CODE_EXTENSIONS.has(ext) || FILE_ONLY_EXTENSIONS.has(ext);
+    let size;
+    try {
+      size = statSync(absolutePath).size;
+    } catch {
+      continue;
+    }
+    if (size > 2 * 1024 * 1024) continue;
+    if (!isParsed) {
+      files.push({
+        absolutePath,
+        path,
+        contentHash: `size:${size}`,
+        size,
+        lines: [],
+      });
+      if (fileLimit > 0 && files.length >= fileLimit) break;
+      continue;
+    }
+    let bytes;
+    try {
+      bytes = readFileSync(absolutePath);
+    } catch {
+      continue;
+    }
+    if (bytes.includes(0)) continue;
     const text = bytes.toString("utf8");
+    let normalizedBytes = bytes;
+    let normalizedText = text;
+    if (path === "README.md") {
+      normalizedText = text.replace(
+        /\n?<!-- blueprint:docs:start -->[\s\S]*?<!-- blueprint:docs:end -->\n?/,
+        "",
+      );
+      normalizedBytes = Buffer.from(normalizedText, "utf8");
+    }
     files.push({
       absolutePath,
       path,
-      text,
-      lines: text.split(/\r?\n/),
-      contentHash: sha256(bytes),
+      text: normalizedText,
+      lines: normalizedText.split(/\r?\n/),
+      contentHash: sha256(normalizedBytes),
       size: bytes.length,
     });
+    if (fileLimit > 0 && files.length >= fileLimit) break;
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
   return { files };
 }
 
-function walk(directory) {
+// Iterative directory walker. D:/Claude contains over a million directories,
+// which overflows the JS call stack when walked recursively. An explicit stack
+// keeps memory bounded and avoids the limit. Memory safety guarantees:
+//   1. `maxDirs` cap is checked BEFORE any per-iteration work so a runaway
+//      source tree cannot exceed the budget.
+//   2. Each directory's readdirSync result is capped at `maxEntriesPerDir`
+//      so a single unfiltered cache dir (e.g. a node_modules that escaped
+//      IGNORED) cannot blow the heap.
+const MAX_ENTRIES_PER_DIR = 5000;
+function walk(root, maxDirs = 50000) {
   const out = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (IGNORED.has(entry.name)) continue;
-      out.push(...walk(join(directory, entry.name)));
-    } else if (entry.isFile()) {
-      if (IGNORED_FILE_NAMES.has(entry.name)) continue;
-      if (statSync(join(directory, entry.name)).size <= 2 * 1024 * 1024) {
-        out.push(join(directory, entry.name));
+  const visited = new Set();
+  const stack = [root];
+  while (stack.length > 0) {
+    if (visited.size >= maxDirs) return out;
+    const directory = stack.pop();
+    const real = resolve(directory);
+    let canonical = real;
+    try {
+      canonical = realpathSync(real);
+    } catch {
+      /* use resolved form */
+    }
+    if (visited.has(real) || visited.has(canonical)) continue;
+    visited.add(real);
+    visited.add(canonical);
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    if (entries.length > MAX_ENTRIES_PER_DIR) {
+      // A single dir with thousands of entries is almost certainly an
+      // unfiltered cache or build artifact. Skip it loudly; the contents
+      // are not source code we want to index.
+      continue;
+    }
+    const parentName = basename(directory);
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (IGNORED.has(entry.name)) continue;
+        stack.push(join(directory, entry.name));
+      } else if (entry.isFile()) {
+        if (IGNORED_FILE_NAMES.has(entry.name)) continue;
+        if ((entry.name === "product.md" || entry.name === "architecture.md") && parentName === "docs") continue;
+        try {
+          if (statSync(join(directory, entry.name)).size <= 2 * 1024 * 1024) {
+            out.push(join(directory, entry.name));
+          }
+        } catch {
+          /* unreadable file: skip */
+        }
       }
     }
   }
