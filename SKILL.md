@@ -78,6 +78,11 @@ truth map and the first Blueprint-owned code graph:
 - `graph planner-status` proves the current MemRight join state: `ready` when `memright plan-context`
   exists, `missing_command` when Blueprint can emit candidates but MemRight has not shipped the
   admission command, and `unavailable` when the local binary cannot be inspected;
+- `graph mermaid` emits a bounded deterministic Mermaid view for static visual inspection;
+- `graph flows --complete` asks for complete flow enumeration up to the explicit safety cap instead
+  of the default bounded preview;
+- `doctor` emits typed JSON states (`ready`, `missing`, `stale`, `broken`, `corrupt`) and includes
+  provider capability coverage, including the honest parsed-language list.
 - task briefs use graph retrieval as a bounded read-first source before falling back to lexical
   evidence search;
 - product-flow inventory is capped and reports `truncated=true` when capped.

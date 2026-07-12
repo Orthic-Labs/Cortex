@@ -18,6 +18,7 @@ const PROVIDER = {
 
 const IGNORED = new Set([".agent", ".agent-test-graph", ".blueprint", ".git", "node_modules", "target", "dist", "build"]);
 const CODE_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs"]);
+const PARSED_LANGUAGE_EXTENSIONS = [...CODE_EXTENSIONS].sort();
 
 export function buildGraphGeneration(repoRoot, options = {}) {
   const root = resolve(repoRoot);
@@ -39,6 +40,20 @@ export function graphStatus(repoRoot, outDir) {
     state: manifest.repo?.sourceHash === currentHash ? "fresh" : "stale",
     manifestPath,
     manifest,
+  };
+}
+
+export function graphCapabilities() {
+  return {
+    schemaVersion: 1,
+    provider: PROVIDER,
+    languageCoverage: {
+      parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
+      fallback: "All non-binary text files under 2 MiB are represented as file nodes; unsupported languages do not get symbol/call extraction.",
+      ignoredDirectories: [...IGNORED].sort(),
+      maxFileBytes: 2 * 1024 * 1024,
+    },
+    outputs: ["graph", "flows", "docTruth", "mermaid", "ContextCandidateSet"],
   };
 }
 
@@ -432,7 +447,8 @@ function stripInlineCode(text) {
 }
 
 export function graphFlowInventory(generation, options = {}) {
-  const maxFlows = Number(options.maxFlows ?? 200);
+  const complete = Boolean(options.complete);
+  const maxFlows = Number(options.maxFlows ?? (complete ? 5000 : 200));
   const outgoing = new Set(generation.edges.map((edge) => edge.source));
   const incoming = new Set(generation.edges.map((edge) => edge.target));
   const entryPoints = generation.nodes.filter((node) => node.kind === "symbol" && outgoing.has(node.id) && !incoming.has(node.id));
@@ -464,8 +480,12 @@ export function graphFlowInventory(generation, options = {}) {
     schemaVersion: 1,
     provider: generation.provider.id,
     generatedAt: new Date().toISOString(),
+    mode: complete ? "complete" : "bounded",
+    maxFlows,
+    entryPoints: entryPoints.length,
     flows,
     truncated,
+    truncationReason: truncated ? `flow inventory hit maxFlows=${maxFlows}` : null,
   };
 }
 

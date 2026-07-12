@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -57,7 +58,10 @@ test("static graph candidate set conforms to ContextCandidateSet v1 shape", () =
 });
 
 test("graph status distinguishes missing, fresh, and stale generations", () => {
-  const outDir = path.join(REPO, ".agent-test-graph");
+  const outDir = path.join(
+    os.tmpdir(),
+    `blueprint-status-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
   fs.rmSync(outDir, { recursive: true, force: true });
 
   assert.equal(graphStatus(REPO, outDir).state, "missing");

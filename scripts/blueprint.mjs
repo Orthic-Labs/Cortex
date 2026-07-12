@@ -16,6 +16,7 @@ import {
   buildGraphGeneration,
   createContextCandidateSet,
   graphArchitecture,
+  graphCapabilities,
   graphFlowInventory,
   graphImpact,
   graphMermaid,
@@ -107,7 +108,7 @@ function parseArgs(argv) {
     const [key, inline] = arg.slice(2).split("=", 2);
     if (inline !== undefined) {
       args[key] = inline;
-    } else if (["check", "refresh"].includes(key)) {
+    } else if (["check", "refresh", "complete", "json"].includes(key)) {
       args[key] = true;
     } else {
       args[key] = argv[++i];
@@ -934,10 +935,40 @@ function countTaskTermHits(taskTerms, text) {
 }
 
 function doctor(root, outDir) {
-  const map = readJson(join(root, outDir, "map.json"), null);
-  const stale = readJson(join(root, outDir, "stale.json"), { missingReferences: [] });
-  if (!map) throw new Error(`${outDir}/map.json missing; run build first`);
+  const startedAt = new Date().toISOString();
+  const mapPath = join(root, outDir, "map.json");
+  const stalePath = join(root, outDir, "stale.json");
+  if (!existsSync(mapPath)) {
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      state: "missing",
+      generatedAt: startedAt,
+      artifacts: { map: mapPath, graph: join(root, outDir, "graph", "manifest.json") },
+      errors: [`${outDir}/map.json missing; run build first`],
+      warnings: [],
+      capabilities: graphCapabilities(),
+    }, null, 2));
+    return 2;
+  }
+  let map;
+  let stale;
+  try {
+    map = readJson(mapPath, null);
+    stale = readJson(stalePath, { missingReferences: [] });
+  } catch (error) {
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      state: "corrupt",
+      generatedAt: startedAt,
+      artifacts: { map: mapPath, graph: join(root, outDir, "graph", "manifest.json") },
+      errors: [String(error?.message ?? error)],
+      warnings: [],
+      capabilities: graphCapabilities(),
+    }, null, 2));
+    return 1;
+  }
   const errors = [];
+  const warnings = [];
   const ids = new Set();
   for (const node of map.nodes) {
     if (ids.has(node.id)) errors.push(`duplicate node id: ${node.id}`);
@@ -947,15 +978,34 @@ function doctor(root, outDir) {
     if (!ids.has(edge.from)) errors.push(`edge missing from node: ${edge.from}`);
     if (!ids.has(edge.to)) errors.push(`edge missing to node: ${edge.to}`);
   }
-  console.log(`doctor: docs=${map.stats.docs} claims=${map.stats.claims} missingRefs=${stale.missingReferences.length}`);
   for (const warning of stale.missingReferences.slice(0, 10)) {
-    console.log(`warning: ${warning.source} mentions missing ${warning.path}`);
+    warnings.push(`${warning.source} mentions missing ${warning.path}`);
   }
-  if (errors.length) {
-    for (const error of errors) console.error(`error: ${error}`);
-    return 1;
-  }
-  return 0;
+  const graph = graphStatus(root, outDir);
+  if (graph.state === "stale") warnings.push("graph manifest source hash is stale relative to current files");
+  const state = errors.length ? "broken" : graph.state === "missing" ? "missing" : graph.state === "stale" ? "stale" : "ready";
+  console.log(JSON.stringify({
+    schemaVersion: 1,
+    state,
+    generatedAt: startedAt,
+    artifacts: {
+      map: mapPath,
+      graph: graph.manifestPath,
+      graphState: graph.state,
+      provider: graph.manifest?.provider ?? null,
+      generationId: graph.manifest?.generationId ?? null,
+    },
+    stats: {
+      docs: map.stats.docs,
+      claims: map.stats.claims,
+      codeRefs: map.stats.codeRefs,
+      missingRefs: stale.missingReferences.length,
+    },
+    errors,
+    warnings,
+    capabilities: graphCapabilities(),
+  }, null, 2));
+  return state === "ready" || state === "stale" ? 0 : 1;
 }
 
 function runGraphCommand(root, outDir, subcommand, args) {
@@ -1051,7 +1101,7 @@ function runGraphCommand(root, outDir, subcommand, args) {
   }
   if (subcommand === "flows") {
     const generation = readFreshGraph(root, outDir);
-    const inventory = graphFlowInventory(generation);
+    const inventory = graphFlowInventory(generation, { complete: Boolean(args.complete), maxFlows: args.limit ? Number(args.limit) : undefined });
     writeJson(join(root, outDir, "flows.json"), inventory);
     console.log(JSON.stringify(inventory, null, 2));
     return 0;

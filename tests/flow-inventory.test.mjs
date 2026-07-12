@@ -46,4 +46,11 @@ test("flow inventory is capped on branching graphs", () => {
 
   assert.equal(inventory.flows.length, 25);
   assert.equal(inventory.truncated, true);
+  assert.equal(inventory.mode, "bounded");
+  assert.match(inventory.truncationReason, /maxFlows=25/);
+
+  const complete = graphFlowInventory({ provider: { id: "blueprint-static" }, nodes, edges }, { complete: true, maxFlows: 500 });
+  assert.equal(complete.flows.length, 200);
+  assert.equal(complete.truncated, false);
+  assert.equal(complete.mode, "complete");
 });

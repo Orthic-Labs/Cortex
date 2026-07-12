@@ -37,6 +37,14 @@ test("blueprint graph build/status/search works from a repo root", () => {
     assert.equal(search.status, 0, search.stderr);
     const payload = JSON.parse(search.stdout);
     assert.equal(payload.results[0].evidence[0].path, "src/service.ts");
+
+    const fullBuild = run(["build", "--out", ".agent"], repo);
+    assert.equal(fullBuild.status, 0, fullBuild.stderr || fullBuild.stdout);
+    const doctor = run(["doctor", "--out", ".agent"], repo);
+    assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
+    const doctorPayload = JSON.parse(doctor.stdout);
+    assert.equal(doctorPayload.state, "ready");
+    assert.deepEqual(doctorPayload.capabilities.languageCoverage.parsedExtensions, ["cjs", "js", "jsx", "mjs", "ts", "tsx"]);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -48,6 +56,10 @@ test("blueprint graph status exits distinctly when no generation exists", () => 
     const status = run(["graph", "status", "--out", ".agent"], repo);
     assert.equal(status.status, 2);
     assert.match(status.stdout, /graph missing/);
+
+    const doctor = run(["doctor", "--out", ".agent"], repo);
+    assert.equal(doctor.status, 2);
+    assert.equal(JSON.parse(doctor.stdout).state, "missing");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
