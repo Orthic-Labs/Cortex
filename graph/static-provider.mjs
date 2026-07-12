@@ -207,6 +207,80 @@ export function graphImpact(generation, options = {}) {
   };
 }
 
+export function graphMermaid(generation, options = {}) {
+  const view = String(options.view ?? "architecture");
+  const limit = Math.max(1, Number(options.limit ?? 60));
+  let payload;
+  if (view === "neighbors") {
+    payload = graphNeighbors(generation, {
+      nodeId: String(options.nodeId ?? ""),
+      direction: options.direction ?? "both",
+      depth: Number(options.depth ?? 1),
+    });
+  } else if (view === "path") {
+    payload = graphPath(generation, {
+      from: options.from,
+      to: options.to,
+      maxDepth: Number(options.maxDepth ?? 5),
+    });
+  } else if (view === "impact") {
+    payload = graphImpact(generation, {
+      nodeId: String(options.nodeId ?? ""),
+      depth: Number(options.depth ?? 3),
+    });
+  } else {
+    payload = {
+      nodes: generation.nodes,
+      edges: generation.edges,
+      truncated: generation.nodes.length > limit,
+    };
+  }
+  return renderMermaid(generation, payload, { view, limit });
+}
+
+function renderMermaid(generation, payload, options) {
+  const limit = options.limit;
+  const nodes = selectMermaidNodes(payload, limit);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edges = (payload.edges ?? generation.edges)
+    .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+    .sort((left, right) => `${left.source}:${left.target}:${left.kind}`.localeCompare(`${right.source}:${right.target}:${right.kind}`))
+    .slice(0, Math.max(0, limit * 2));
+  const aliases = new Map(nodes.map((node, index) => [node.id, `n${index}`]));
+  const truncated = Boolean(payload.truncated) || nodes.length < (payload.nodes ?? generation.nodes).length || edges.length < (payload.edges ?? generation.edges).length;
+  const lines = [
+    "flowchart LR",
+    `%% provider: ${generation.provider.id}`,
+    `%% view: ${options.view}`,
+    `%% truncated: ${truncated}`,
+  ];
+  for (const node of nodes) lines.push(`  ${aliases.get(node.id)}["${escapeMermaidLabel(nodeLabel(node))}"]`);
+  for (const edge of edges) lines.push(`  ${aliases.get(edge.source)} -->|"${escapeMermaidLabel(edge.kind)}"| ${aliases.get(edge.target)}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function selectMermaidNodes(payload, limit) {
+  const byId = new Map((payload.nodes ?? []).map((node) => [node.id, node]));
+  const edgeNodes = [];
+  for (const edge of payload.edges ?? []) {
+    if (byId.has(edge.source)) edgeNodes.push(byId.get(edge.source));
+    if (byId.has(edge.target)) edgeNodes.push(byId.get(edge.target));
+  }
+  const selected = dedupeBy([...edgeNodes, ...(payload.nodes ?? [])], (node) => node.id)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .slice(0, limit);
+  return selected;
+}
+
+function nodeLabel(node) {
+  const label = node.qualifiedName || node.name || node.path || node.id;
+  return `${node.kind}:${String(label).slice(0, 80)}`;
+}
+
+function escapeMermaidLabel(value) {
+  return String(value).replaceAll("\\", "/").replaceAll("\"", "'").replaceAll("\n", " ");
+}
+
 // Doc ↔ code join — emits deterministic edges joining doc/claim nodes (from
 // `map.json`) to file/symbol nodes (from this generation). The join is reversible
 // (every edge carries doc+file evidence + content hashes) and typed as

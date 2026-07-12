@@ -8,6 +8,7 @@ import {
   buildDocCodeJoins,
   buildGraphGeneration,
   createContextCandidateSet,
+  graphMermaid,
   graphStatus,
   queryGraph,
 } from "../graph/static-provider.mjs";
@@ -113,4 +114,14 @@ test("doc-code truth joins are typed and evidence-backed without polluting graph
   assert.ok(truth.joins.every((join) => join.confidenceClass && join.evidence.codeNode.contentHash === "abc123"));
   assert.ok(!truth.joins.some((join) => join.evidence.codeRef.path === "src/missing.ts"));
   assert.deepEqual(generation.edges, []);
+});
+
+test("static graph mermaid output is bounded and deterministic", () => {
+  const generation = buildGraphGeneration(REPO);
+  const mermaid = graphMermaid(generation, { view: "neighbors", nodeId: "symbol:src/service.ts::OrderService.placeOrder", limit: 6 });
+
+  assert.match(mermaid, /^flowchart LR/);
+  assert.match(mermaid, /%% provider: blueprint-static/);
+  assert.match(mermaid, /OrderService\.placeOrder/);
+  assert.ok(mermaid.split("\n").filter((line) => /^\s+n\d+\["/.test(line)).length <= 6);
 });

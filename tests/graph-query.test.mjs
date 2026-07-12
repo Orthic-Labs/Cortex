@@ -61,6 +61,11 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     assert.equal(docTruth.provider, "blueprint-static");
     assert.ok(Array.isArray(docTruth.joins));
     assert.ok(docTruth.sourceDocMap.docs >= 1);
+
+    const mermaid = spawnSync(process.execPath, [CLI, "graph", "mermaid", "--view", "neighbors", "--node", "symbol:src/service.ts::OrderService.placeOrder", "--out", ".agent", "--limit", "8"], { cwd: repo, encoding: "utf8" });
+    assert.equal(mermaid.status, 0, mermaid.stderr || mermaid.stdout);
+    assert.match(mermaid.stdout, /^flowchart LR/);
+    assert.match(mermaid.stdout, /OrderService\.placeOrder/);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

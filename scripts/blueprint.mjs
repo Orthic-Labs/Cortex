@@ -18,6 +18,7 @@ import {
   graphArchitecture,
   graphFlowInventory,
   graphImpact,
+  graphMermaid,
   graphNeighbors,
   graphPath,
   graphStatus,
@@ -87,7 +88,7 @@ function usage() {
   ${command} build [--out .agent] [--limit N] [--check]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
   ${command} doctor [--out .agent]
-  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|candidates [--out .agent]
+  ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|candidates [--out .agent]
 `);
 }
 
@@ -991,7 +992,7 @@ function runGraphCommand(root, outDir, subcommand, args) {
     return 0;
   }
   if (subcommand === "schema") {
-    console.log(JSON.stringify({ schemaVersion: 1, provider: "blueprint-static", artifacts: ["manifest", "nodes", "edges", "graph", "ContextCandidateSet"] }, null, 2));
+    console.log(JSON.stringify({ schemaVersion: 1, provider: "blueprint-static", artifacts: ["manifest", "nodes", "edges", "graph", "docTruth", "mermaid", "ContextCandidateSet"] }, null, 2));
     return 0;
   }
   if (subcommand === "resolve") {
@@ -1043,6 +1044,20 @@ function runGraphCommand(root, outDir, subcommand, args) {
     const generation = readFreshGraph(root, outDir);
     const docTruth = generation.docTruth ?? buildDocCodeJoins({ ...generation, repoRoot: root }, { outDir });
     console.log(JSON.stringify(docTruth, null, 2));
+    return 0;
+  }
+  if (subcommand === "mermaid") {
+    const generation = readFreshGraph(root, outDir);
+    console.log(graphMermaid(generation, {
+      view: args.view ?? args._[0] ?? "architecture",
+      nodeId: String(args.node ?? ""),
+      direction: args.direction ?? "both",
+      depth: Number(args.depth ?? 1),
+      from: args.from,
+      to: args.to,
+      maxDepth: Number(args["max-depth"] ?? 5),
+      limit: Number(args.limit ?? 60),
+    }));
     return 0;
   }
   usage();
