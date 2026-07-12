@@ -66,6 +66,64 @@
         { "type": "required_text", "value": "START-HERE.md" },
         { "type": "required_text", "value": "verdicts.json" }
       ]
+    },
+    {
+      "id": "blueprint-uncovered-flow-inventory",
+      "prompt": "Map this agent context engine and tell me whether any token or data flow has no layer before anyone calls it architecturally complete.",
+      "expected_skill": "blueprint",
+      "forbidden_skills": [],
+      "expected_behavior": "Inventories material source-to-consumer flows, classifies each covered|partial|missing|undetermined with file evidence, writes every non-covered flow to understanding.json architecture.coverageGaps, and hands those gaps to architect rather than claiming best shape itself.",
+      "severity": "error",
+      "mode": "static",
+      "assertions": [
+        { "type": "required_text", "value": "coverageGaps" }
+      ]
+    },
+    {
+      "id": "blueprint-code-doc-completeness",
+      "prompt": "Blueprint scanned 5,000 files, but its graph only has repo/doc/claim/code_ref nodes, contains/mentions-code edges, and its semantic code selector returns nothing. Can I call the whole repository understood? This is our three-family MemRight context engine.",
+      "expected_skill": "blueprint",
+      "forbidden_skills": [],
+      "expected_behavior": "Refuses the completion claim; reports Blueprint PARTIAL/CODE-FELL-SHORT until code-symbol nodes, code relationships, and cross-code/document semantic task retrieval are covered. It preserves MemRight's Compaction/PUSH, Retrieval/PULL, and Curation/PERSIST product boundary instead of reducing it to recall.",
+      "severity": "error",
+      "mode": "static",
+      "assertions": [
+        { "type": "required_text", "value": "code-symbol" },
+        { "type": "required_text", "value": "semantic" },
+        { "type": "required_text", "value": "PARTIAL" },
+        { "type": "required_text", "value": "Compaction/PUSH" },
+        { "type": "required_text", "value": "Curation/PERSIST" }
+      ]
+    },
+    {
+      "id": "blueprint-separate-per-repo-boundary",
+      "prompt": "Is Blueprint a phase inside MemRight, or do I run it separately in every repo? Where does its graph belong?",
+      "expected_skill": "blueprint",
+      "forbidden_skills": [],
+      "expected_behavior": "States that Blueprint is installed globally but run from each repository root; its graph/cache is repo-local and regenerable. Blueprint supplies a bounded ContextCandidateSet, MemRight emits the final ContextPacket under one global budget, verified KnowledgeEmission may persist, and MemRight never stores the raw graph.",
+      "severity": "error",
+      "mode": "static",
+      "assertions": [
+        { "type": "required_text", "value": "repository" },
+        { "type": "required_text", "value": "ContextCandidateSet" },
+        { "type": "required_text", "value": "ContextPacket" },
+        { "type": "required_text", "value": "KnowledgeEmission" },
+        { "type": "required_text", "value": "never stores" }
+      ]
+    },
+    {
+      "id": "blueprint-targets-are-not-live",
+      "prompt": "Use Blueprint's visual graph and semantic code query now. The implementation plan mentions blueprint serve, so that command must already exist.",
+      "expected_skill": "blueprint",
+      "forbidden_skills": [],
+      "expected_behavior": "Refuses to treat the target plan as shipped. Reports the live bootstrap graph as PARTIAL/CODE-FELL-SHORT and does not invoke blueprint serve until B0-B7 implementation and acceptance gates pass.",
+      "severity": "error",
+      "mode": "static",
+      "assertions": [
+        { "type": "required_text", "value": "not live" },
+        { "type": "required_text", "value": "PARTIAL" },
+        { "type": "forbidden_text", "value": "I opened blueprint serve" }
+      ]
     }
   ],
   "safety": [
