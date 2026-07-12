@@ -16,9 +16,65 @@ const PROVIDER = {
   license: "workspace-owned",
 };
 
-const IGNORED = new Set([".agent", ".agent-test-graph", ".blueprint", ".git", "node_modules", "target", "dist", "build"]);
+const IGNORED = new Set([
+  // Portable contract surface — tracked `.blueprint/` contains manifests and
+  // schemas but never source code. Excluded at every nesting depth.
+  ".blueprint",
+  // Local graph/build caches and generated internals.
+  ".agent",
+  ".agent-test-graph",
+  ".audit",
+  ".cache",
+  ".next",
+  ".nuxt",
+  ".output",
+  ".parcel-cache",
+  ".pytest_cache",
+  ".svelte-kit",
+  ".turbo",
+  ".vercel",
+  ".worktrees",
+  // Python / Java / Node caches and package metadata.
+  "__pycache__",
+  ".gradle",
+  ".idea",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  ".vscode",
+  ".yarn",
+  ".pnpm-store",
+  "coverage",
+  "htmlcov",
+  "node_modules",
+  "target",
+  "dist",
+  "build",
+  "out",
+  ".serverless",
+]);
+const IGNORED_FILE_NAMES = new Set([".DS_Store", "Thumbs.db"]);
 const CODE_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs"]);
 const PARSED_LANGUAGE_EXTENSIONS = [...CODE_EXTENSIONS].sort();
+// Extensions that are tracked as file nodes without symbol/import extraction.
+// These do NOT trigger `degraded` because the provider handles them honestly.
+const FILE_ONLY_EXTENSIONS = new Set([
+  "md", "markdown", "txt",
+  "json", "jsonl", "yaml", "yml", "toml",
+  "html", "css", "svg",
+  "sh", "ps1", "bat",
+  "sql", "csv", "tsv",
+  "xml",
+]);
+const SUPPORTED_EXTENSIONS = new Set([...CODE_EXTENSIONS, ...FILE_ONLY_EXTENSIONS]);
+
+export function scanSourcesPublic(root) {
+  return scanSources(root);
+}
+
+export function sourceHashPublic(files) {
+  return sourceHash(files);
+}
 
 export function buildGraphGeneration(repoRoot, options = {}) {
   const root = resolve(repoRoot);
@@ -35,11 +91,55 @@ export function graphStatus(repoRoot, outDir) {
   if (!existsSync(manifestPath)) return { state: "missing", manifestPath };
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   if (!manifest.complete) return { state: "incomplete", manifestPath, manifest };
-  const currentHash = sourceHash(scanSources(root).files);
+  const sources = scanSources(root);
+  const currentHash = sourceHash(sources.files);
+  const unsupportedExtensions = new Set();
+  let unsupportedFileCount = 0;
+  let dirtyOverlayFileCount = 0;
+  for (const file of sources.files) {
+    const dot = file.path.lastIndexOf(".");
+    if (dot < 0) continue;
+    const ext = file.path.slice(dot + 1).toLowerCase();
+    if (!SUPPORTED_EXTENSIONS.has(ext) && /^[a-z0-9_+\-.]+$/.test(ext)) {
+      unsupportedExtensions.add(ext);
+      unsupportedFileCount += 1;
+    }
+  }
+  // Dirty overlay detection: per-file hashes are recorded in the generation's
+  // nodes.json (one file per generation). Manifest only stores the aggregate
+  // sourceHash; we look up the generation by `generationId` to read its nodes.
+  const recordedHashes = new Map();
+  const generationId = String(manifest.generationId ?? "");
+  const generationDirName = generationId.startsWith("sha256:") ? generationId.slice("sha256:".length) : generationId;
+  const generationDir = join(resolve(root, outDir), "graph", "generations", generationDirName);
+  const nodesPath = join(generationDir, "nodes.json");
+  if (existsSync(nodesPath)) {
+    const nodes = JSON.parse(readFileSync(nodesPath, "utf8"));
+    for (const node of nodes) {
+      const evidence = node.evidence?.[0];
+      if (evidence?.path && evidence?.contentHash) {
+        recordedHashes.set(evidence.path, evidence.contentHash);
+      }
+    }
+  }
+  for (const file of sources.files) {
+    const recorded = recordedHashes.get(file.path);
+    if (recorded && recorded !== file.contentHash) {
+      dirtyOverlayFileCount += 1;
+    }
+  }
+  const fresh = manifest.repo?.sourceHash === currentHash;
+  // graphStatus surfaces source-tree truth; doctor translates fresh to ready/degraded.
   return {
-    state: manifest.repo?.sourceHash === currentHash ? "fresh" : "stale",
+    state: fresh ? "fresh" : "stale",
     manifestPath,
     manifest,
+    capabilities: {
+      parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
+      unsupportedExtensions: [...unsupportedExtensions].sort(),
+      unsupportedFileCount,
+      dirtyOverlayFileCount,
+    },
   };
 }
 
@@ -628,10 +728,15 @@ function scanSources(root) {
 function walk(directory) {
   const out = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (IGNORED.has(entry.name)) continue;
-    const full = join(directory, entry.name);
-    if (entry.isDirectory()) out.push(...walk(full));
-    else if (entry.isFile() && statSync(full).size <= 2 * 1024 * 1024) out.push(full);
+    if (entry.isDirectory()) {
+      if (IGNORED.has(entry.name)) continue;
+      out.push(...walk(join(directory, entry.name)));
+    } else if (entry.isFile()) {
+      if (IGNORED_FILE_NAMES.has(entry.name)) continue;
+      if (statSync(join(directory, entry.name)).size <= 2 * 1024 * 1024) {
+        out.push(join(directory, entry.name));
+      }
+    }
   }
   return out;
 }

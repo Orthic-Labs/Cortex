@@ -946,6 +946,13 @@ function doctor(root, outDir) {
       artifacts: { map: mapPath, graph: join(root, outDir, "graph", "manifest.json") },
       errors: [`${outDir}/map.json missing; run build first`],
       warnings: [],
+      reasons: [
+        {
+          code: "missing_map",
+          severity: "blocker",
+          message: "Blueprint map.json is not present; planner cannot retrieve candidates.",
+        },
+      ],
       capabilities: graphCapabilities(),
     }, null, 2));
     return 2;
@@ -958,21 +965,36 @@ function doctor(root, outDir) {
   } catch (error) {
     console.log(JSON.stringify({
       schemaVersion: 1,
-      state: "corrupt",
+      state: "missing",
       generatedAt: startedAt,
       artifacts: { map: mapPath, graph: join(root, outDir, "graph", "manifest.json") },
       errors: [String(error?.message ?? error)],
       warnings: [],
+      reasons: [
+        {
+          code: "corrupt_map",
+          severity: "blocker",
+          message: "Blueprint map.json could not be parsed.",
+        },
+      ],
       capabilities: graphCapabilities(),
     }, null, 2));
     return 1;
   }
   const errors = [];
   const warnings = [];
+  const reasons = [];
   const ids = new Set();
   for (const node of map.nodes) {
     if (ids.has(node.id)) errors.push(`duplicate node id: ${node.id}`);
     ids.add(node.id);
+  }
+  if (ids.size !== map.nodes.length) {
+    reasons.push({
+      code: "duplicate_node_ids",
+      severity: "blocker",
+      message: `graph contains ${map.nodes.length - ids.size} duplicate node id(s); discovery must enforce collision-safe IDs.`,
+    });
   }
   for (const edge of map.edges) {
     if (!ids.has(edge.from)) errors.push(`edge missing from node: ${edge.from}`);
@@ -981,9 +1003,53 @@ function doctor(root, outDir) {
   for (const warning of stale.missingReferences.slice(0, 10)) {
     warnings.push(`${warning.source} mentions missing ${warning.path}`);
   }
+  if (stale.missingReferences.length > 0) {
+    reasons.push({
+      code: "missing_references",
+      severity: "warning",
+      count: stale.missingReferences.length,
+      message: "documents reference paths that no longer exist on disk",
+    });
+  }
   const graph = graphStatus(root, outDir);
-  if (graph.state === "stale") warnings.push("graph manifest source hash is stale relative to current files");
-  const state = errors.length ? "broken" : graph.state === "missing" ? "missing" : graph.state === "stale" ? "stale" : "ready";
+  if (graph.state === "stale") {
+    warnings.push("graph manifest source hash is stale relative to current files");
+    reasons.push({
+      code: "stale_graph",
+      severity: "blocker",
+      message: "graph manifest sourceHash does not match current source tree; rebuild required.",
+    });
+  }
+  if ((graph.capabilities?.unsupportedFileCount ?? 0) > 0) {
+    reasons.push({
+      code: "unsupported_languages",
+      severity: "info",
+      count: graph.capabilities.unsupportedFileCount,
+      unsupportedExtensions: graph.capabilities.unsupportedExtensions,
+      message: "graph is fresh but some source files use extensions outside the parsed set; symbol-level retrieval is partial.",
+    });
+  }
+  if ((graph.capabilities?.dirtyOverlayFileCount ?? 0) > 0) {
+    reasons.push({
+      code: "dirty_overlay",
+      severity: "info",
+      count: graph.capabilities.dirtyOverlayFileCount,
+      message: "working tree contains modified files newer than the committed graph; overlay candidates are surfaced with explicit freshness.",
+    });
+  }
+  // Map graph states to dispatch G1 states: fresh + complete coverage -> ready,
+  // fresh + unsupported-extension files -> degraded, stale -> stale,
+  // missing -> missing.
+  const fresh = graph.state === "fresh";
+  const hasIncompleteCoverage = (graph.capabilities?.unsupportedFileCount ?? 0) > 0;
+  const state =
+    errors.length || graph.state === "missing"
+      ? "missing"
+      : graph.state === "stale"
+        ? "stale"
+        : fresh && hasIncompleteCoverage
+          ? "degraded"
+          : "ready";
   console.log(JSON.stringify({
     schemaVersion: 1,
     state,
@@ -1000,12 +1066,21 @@ function doctor(root, outDir) {
       claims: map.stats.claims,
       codeRefs: map.stats.codeRefs,
       missingRefs: stale.missingReferences.length,
+      unsupportedFileCount: graph.capabilities?.unsupportedFileCount ?? 0,
+      dirtyOverlayFileCount: graph.capabilities?.dirtyOverlayFileCount ?? 0,
     },
     errors,
     warnings,
+    reasons,
     capabilities: graphCapabilities(),
+    graphCapabilities: {
+      parsedExtensions: graph.capabilities?.parsedExtensions ?? graphCapabilities().languageCoverage.parsedExtensions,
+      unsupportedExtensions: graph.capabilities?.unsupportedExtensions ?? [],
+      unsupportedFileCount: graph.capabilities?.unsupportedFileCount ?? 0,
+      dirtyOverlayFileCount: graph.capabilities?.dirtyOverlayFileCount ?? 0,
+    },
   }, null, 2));
-  return state === "ready" || state === "stale" ? 0 : 1;
+  return state === "ready" || state === "stale" || state === "degraded" ? 0 : 1;
 }
 
 function runGraphCommand(root, outDir, subcommand, args) {
