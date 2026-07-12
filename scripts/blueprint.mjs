@@ -1104,6 +1104,15 @@ function doctor(root, outDir, options = {}) {
       message: "graph manifest sourceHash does not match current source tree; rebuild required.",
     });
   }
+  if (graph.state === "indeterminate") {
+    warnings.push("graph freshness scan was truncated before it could verify the source tree");
+    reasons.push({
+      code: "scan_truncated",
+      severity: "warning",
+      truncationReasons: graph.truncationReasons ?? [],
+      message: "graph freshness is indeterminate because traversal hit a safety cap; rebuild or adjust the scan policy.",
+    });
+  }
   if ((graph.capabilities?.unsupportedFileCount ?? 0) > 0) {
     reasons.push({
       code: "unsupported_languages",
@@ -1125,13 +1134,13 @@ function doctor(root, outDir, options = {}) {
   // fresh + unsupported-extension files -> degraded, stale -> stale,
   // missing -> missing.
   const fresh = graph.state === "fresh";
-  const hasIncompleteCoverage = (graph.capabilities?.unsupportedFileCount ?? 0) > 0;
+  const hasIncompleteCoverage = graph.state === "indeterminate" || (graph.capabilities?.unsupportedFileCount ?? 0) > 0;
   const state =
     errors.length || graph.state === "missing"
       ? "missing"
       : graph.state === "stale"
         ? "stale"
-        : fresh && hasIncompleteCoverage
+        : graph.state === "indeterminate" || (fresh && hasIncompleteCoverage)
           ? "degraded"
           : "ready";
   console.log(JSON.stringify({
@@ -1318,25 +1327,37 @@ function readFreshGraph(root, outDir, options = {}) {
   // is for explicit overrides (e.g. CLI doctor); the default is whatever
   // the manifest recorded.
   let manifestFileLimit = 0;
+  let persisted = null;
+  const manifestPath = join(root, outDir, "graph", "manifest.json");
   try {
-    const manifestPath = join(root, outDir, "graph", "manifest.json");
-    if (existsSync(manifestPath)) {
-      const persisted = JSON.parse(readFileSync(manifestPath, "utf8"));
-      manifestFileLimit = Number(persisted?.fileLimit ?? 0);
+    if (!existsSync(manifestPath)) throw graphReadError("graph_missing", "Graph manifest is missing; run blueprint build");
+    persisted = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (!("fileLimit" in persisted)) {
+      throw graphReadError("graph_rebuild_required", "Legacy graph manifest has no fileLimit; run blueprint build");
     }
-  } catch {
-    /* fall through */
+    manifestFileLimit = Number(persisted.fileLimit ?? 0);
+  } catch (error) {
+    if (error?.code?.startsWith("graph_")) throw error;
+    throw graphReadError("graph_corrupt", `Graph manifest is unreadable: ${error.message}`);
   }
   const fileLimit = options.fileLimit != null && options.fileLimit > 0
     ? options.fileLimit
     : manifestFileLimit || 0;
   let status = graphStatus(root, outDir, { fileLimit });
   if (status.state !== "fresh") {
-    buildGraphGeneration(root, { outDir, fileLimit });
-    status = graphStatus(root, outDir, { fileLimit });
+    throw graphReadError("graph_rebuild_required", `Graph is ${status.state}; run blueprint build`, { state: status.state });
   }
   const generationPath = join(root, outDir, "graph", "generations", status.manifest.generationId.replace("sha256:", ""), "graph.json");
-  return readJson(generationPath, null);
+  const generation = readJson(generationPath, null);
+  if (!generation) throw graphReadError("graph_corrupt", "Graph generation is missing or unreadable");
+  return generation;
+}
+
+function graphReadError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.details = details;
+  return error;
 }
 
 function runBriefAndPrint(root, outDir, args) {
@@ -1410,6 +1431,10 @@ try {
   process.on("uncaughtException", e => { console.error("STACK:", e.stack); process.exit(1); });
   process.exitCode = main();
 } catch (error) {
-  console.error(`maprepo: ${error.message}`);
+  if (error?.code?.startsWith("graph_")) {
+    console.error(JSON.stringify({ schemaVersion: 1, error: { code: error.code, message: error.message, ...error.details } }));
+  } else {
+    console.error(`maprepo: ${error.message}`);
+  }
   process.exitCode = 1;
 }

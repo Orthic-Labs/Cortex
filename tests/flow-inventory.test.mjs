@@ -16,6 +16,8 @@ test("graph flows emits deterministic entry-to-terminal inventory", () => {
   const repo = path.join(os.tmpdir(), `blueprint-flow-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
+    const build = spawnSync(process.execPath, [CLI, "graph", "build", "--out", ".agent"], { cwd: repo, encoding: "utf8" });
+    assert.equal(build.status, 0, build.stderr || build.stdout);
     const result = spawnSync(process.execPath, [CLI, "graph", "flows", "--out", ".agent"], { cwd: repo, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const payload = JSON.parse(result.stdout);

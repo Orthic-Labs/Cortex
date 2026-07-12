@@ -18,6 +18,11 @@ test("graph candidates CLI validates as ContextCandidateSet v1", () => {
   const repo = path.join(os.tmpdir(), `blueprint-candidate-contract-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
+    const build = spawnSync(process.execPath, [CLI, "graph", "build", "--out", ".agent"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(build.status, 0, build.stderr || build.stdout);
     const generated = spawnSync(process.execPath, [CLI, "graph", "candidates", "--query", "placeOrder", "--out", ".agent"], {
       cwd: repo,
       encoding: "utf8",

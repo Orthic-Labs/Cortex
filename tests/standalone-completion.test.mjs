@@ -181,6 +181,31 @@ test("standalone: graph candidates emits schema-valid ContextCandidateSet with r
   }
 });
 
+test("standalone: graph candidates never rebuilds a stale legacy manifest", () => {
+  const repo = makeCleanRepo();
+  try {
+    runCli(repo, ["build", "--out", ".agent"]);
+    const manifestPath = join(repo, ".agent/graph/manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    delete manifest.fileLimit;
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeFileSync(join(repo, "src/handler.ts"), "export function changedHandler() { return 'changed'; }\n");
+
+    const result = spawnSync(process.execPath, [CLI, "graph", "candidates", "--task", "handler"], {
+      cwd: repo,
+      encoding: "utf8",
+      timeout: 2000,
+    });
+    assert.notEqual(result.status, 0, "query must fail fast instead of rebuilding");
+    assert.equal(result.signal, null, "query must return before timeout");
+    assert.match(result.stderr, /graph_rebuild_required/);
+    const after = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal("fileLimit" in after, false, "query must not mutate the legacy manifest");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // 5) Same-slug file paths get stable unique IDs.
 test("standalone: same-slug paths receive collision-safe IDs", () => {
   const repo = makeRepo();

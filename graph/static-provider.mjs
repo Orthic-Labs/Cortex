@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  opendirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   renameSync,
   statSync,
@@ -81,8 +81,8 @@ const FILE_ONLY_EXTENSIONS = new Set([
 ]);
 const SUPPORTED_EXTENSIONS = new Set([...CODE_EXTENSIONS, ...FILE_ONLY_EXTENSIONS]);
 
-export function scanSourcesPublic(root) {
-  return scanSources(root);
+export function scanSourcesPublic(root, fileLimit = 0, walkOptions = {}) {
+  return scanSources(root, fileLimit, walkOptions);
 }
 
 export function sourceHashPublic(files) {
@@ -92,7 +92,7 @@ export function sourceHashPublic(files) {
 export function buildGraphGeneration(repoRoot, options = {}) {
   const root = resolve(repoRoot);
   const outDir = options.outDir ? resolve(root, options.outDir) : null;
-  const source = scanSources(root, options.fileLimit || 0);
+  const source = scanSources(root, options.fileLimit || 0, options);
   const generation = buildGenerationFromSources(root, source, options);
   if (outDir) writeGeneration(outDir, generation);
   return generation;
@@ -111,10 +111,10 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   // a stale comparison.
   const manifestFileLimit = Number(manifest.fileLimit ?? 0);
   const rescanLimit = options.fileLimit ?? manifestFileLimit ?? 0;
-  const sources = scanSources(root, rescanLimit);
+  const sources = scanSources(root, rescanLimit, options);
   const scanned = sources.files.length > 0;
-  const scanTruncated = !scanned;
-  const currentHash = scanned ? sourceHash(sources.files) : manifest.repo?.sourceHash;
+  const scanTruncated = Boolean(sources.traversalTruncated);
+  const currentHash = scanned && !scanTruncated ? sourceHash(sources.files) : manifest.repo?.sourceHash;
   const unsupportedExtensions = new Set();
   let unsupportedFileCount = 0;
   let dirtyOverlayFileCount = 0;
@@ -149,12 +149,13 @@ export function graphStatus(repoRoot, outDir, options = {}) {
       }
     }
   }
-  const fresh = scanned ? manifest.repo?.sourceHash === currentHash : true;
+  const fresh = scanned && !scanTruncated ? manifest.repo?.sourceHash === currentHash : true;
   return {
-    state: fresh ? "fresh" : "stale",
+    state: scanTruncated ? "indeterminate" : fresh ? "fresh" : "stale",
     manifestPath,
     manifest,
     scanTruncated,
+    truncationReasons: sources.truncationReasons,
     capabilities: {
       parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
       unsupportedExtensions: [...unsupportedExtensions].sort(),
@@ -717,7 +718,8 @@ function buildGenerationFromSources(root, source, options = {}) {
     // downstream consumers use this to scope their re-scan so a huge real
     // workspace (D:\Claude has 1M+ directories) does not OOM the doctor.
     fileLimit: Number(options.fileLimit ?? 0),
-    truncated: Boolean(options.fileLimit && source.files.length >= options.fileLimit),
+    truncated: Boolean(source.fileLimitReached || source.traversalTruncated),
+    truncationReasons: source.truncationReasons,
     repo: {
       rootName: root.split(/[\\/]/).at(-1),
       sourceHash: sourceHash(source.files),
@@ -733,9 +735,11 @@ function buildGenerationFromSources(root, source, options = {}) {
   return { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges, docTruth, repoRoot: root };
 }
 
-function scanSources(root, fileLimit = 0) {
+function scanSources(root, fileLimit = 0, walkOptions = {}) {
   const files = [];
-  for (const absolutePath of walk(root)) {
+  const traversal = walk(root, walkOptions);
+  let fileLimitReached = false;
+  for (const absolutePath of traversal.paths) {
     let path;
     try {
       path = normalizePath(relative(root, absolutePath));
@@ -759,7 +763,10 @@ function scanSources(root, fileLimit = 0) {
         size,
         lines: [],
       });
-      if (fileLimit > 0 && files.length >= fileLimit) break;
+      if (fileLimit > 0 && files.length >= fileLimit) {
+        fileLimitReached = true;
+        break;
+      }
       continue;
     }
     let bytes;
@@ -787,10 +794,20 @@ function scanSources(root, fileLimit = 0) {
       contentHash: sha256(normalizedBytes),
       size: bytes.length,
     });
-    if (fileLimit > 0 && files.length >= fileLimit) break;
+    if (fileLimit > 0 && files.length >= fileLimit) {
+      fileLimitReached = true;
+      break;
+    }
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
-  return { files };
+  const truncationReasons = new Set(traversal.reasons);
+  if (fileLimitReached) truncationReasons.add("file_limit");
+  return {
+    files,
+    fileLimitReached,
+    traversalTruncated: traversal.state.truncated,
+    truncationReasons: [...truncationReasons].sort(),
+  };
 }
 
 // Iterative directory walker. D:/Claude contains over a million directories,
@@ -798,58 +815,87 @@ function scanSources(root, fileLimit = 0) {
 // keeps memory bounded and avoids the limit. Memory safety guarantees:
 //   1. `maxDirs` cap is checked BEFORE any per-iteration work so a runaway
 //      source tree cannot exceed the budget.
-//   2. Each directory's readdirSync result is capped at `maxEntriesPerDir`
-//      so a single unfiltered cache dir (e.g. a node_modules that escaped
-//      IGNORED) cannot blow the heap.
+//   2. Directory entries are streamed and retained only up to
+//      `maxEntriesPerDir + 1`, so an escaped cache cannot allocate an
+//      unbounded Dirent array.
 const MAX_ENTRIES_PER_DIR = 5000;
-function walk(root, maxDirs = 50000) {
-  const out = [];
-  const visited = new Set();
-  const stack = [root];
-  while (stack.length > 0) {
-    if (visited.size >= maxDirs) return out;
-    const directory = stack.pop();
-    const real = resolve(directory);
-    let canonical = real;
-    try {
-      canonical = realpathSync(real);
-    } catch {
-      /* use resolved form */
-    }
-    if (visited.has(real) || visited.has(canonical)) continue;
-    visited.add(real);
-    visited.add(canonical);
-    let entries;
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    if (entries.length > MAX_ENTRIES_PER_DIR) {
-      // A single dir with thousands of entries is almost certainly an
-      // unfiltered cache or build artifact. Skip it loudly; the contents
-      // are not source code we want to index.
-      continue;
-    }
-    const parentName = basename(directory);
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (IGNORED.has(entry.name)) continue;
-        stack.push(join(directory, entry.name));
-      } else if (entry.isFile()) {
-        if (IGNORED_FILE_NAMES.has(entry.name)) continue;
-        if ((entry.name === "product.md" || entry.name === "architecture.md") && parentName === "docs") continue;
-        try {
-          if (statSync(join(directory, entry.name)).size <= 2 * 1024 * 1024) {
-            out.push(join(directory, entry.name));
-          }
-        } catch {
-          /* unreadable file: skip */
+function walk(root, options = {}) {
+  const maxDirs = Number(options.maxDirs ?? 50000);
+  const maxEntriesPerDir = Number(options.maxEntriesPerDir ?? MAX_ENTRIES_PER_DIR);
+  const reasons = new Set();
+  const state = { truncated: false };
+
+  function* iteratePaths() {
+    const visited = new Set();
+    const stack = [root];
+    let processedDirs = 0;
+    while (stack.length > 0) {
+      if (processedDirs >= maxDirs) {
+        reasons.add("directory_limit");
+        state.truncated = true;
+        return;
+      }
+      const directory = stack.pop();
+      const real = resolve(directory);
+      let canonical = real;
+      try {
+        canonical = realpathSync(real);
+      } catch {
+        /* use resolved form */
+      }
+      if (visited.has(canonical)) continue;
+      visited.add(canonical);
+      processedDirs += 1;
+      const entries = [];
+      let dir;
+      try {
+        dir = opendirSync(directory);
+        while (true) {
+          const entry = dir.readSync();
+          if (!entry) break;
+          entries.push(entry);
+          if (entries.length > maxEntriesPerDir) break;
         }
+      } catch {
+        continue;
+      } finally {
+        try {
+          dir?.closeSync();
+        } catch {
+          /* already closed */
+        }
+      }
+      if (entries.length > maxEntriesPerDir) {
+        reasons.add("directory_entry_limit");
+        state.truncated = true;
+        continue;
+      }
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      const parentName = basename(directory);
+      const childDirectories = [];
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (IGNORED.has(entry.name)) continue;
+          childDirectories.push(join(directory, entry.name));
+        } else if (entry.isFile()) {
+          if (IGNORED_FILE_NAMES.has(entry.name)) continue;
+          if ((entry.name === "product.md" || entry.name === "architecture.md") && parentName === "docs") continue;
+          try {
+            if (statSync(join(directory, entry.name)).size <= 2 * 1024 * 1024) {
+              yield join(directory, entry.name);
+            }
+          } catch {
+            /* unreadable file: skip */
+          }
+        }
+      }
+      for (let index = childDirectories.length - 1; index >= 0; index -= 1) {
+        stack.push(childDirectories[index]);
       }
     }
   }
-  return out;
+
+  return { paths: iteratePaths(), state, reasons };
 }
 
 function extractSymbols(file, addNode) {

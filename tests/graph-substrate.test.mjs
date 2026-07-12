@@ -12,6 +12,7 @@ import {
   graphMermaid,
   graphStatus,
   queryGraph,
+  scanSourcesPublic,
 } from "../graph/static-provider.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -76,6 +77,92 @@ test("graph status distinguishes missing, fresh, and stale generations", () => {
 
   fs.rmSync(outDir, { recursive: true, force: true });
   assert.equal(generation.manifest.complete, true);
+});
+
+test("source scan reports directory-budget truncation", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-dir-cap-"));
+  try {
+    fs.mkdirSync(path.join(repo, "a"));
+    fs.mkdirSync(path.join(repo, "b"));
+    fs.writeFileSync(path.join(repo, "a", "a.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(repo, "b", "b.ts"), "export const b = 1;\n");
+
+    const scan = scanSourcesPublic(repo, 0, { maxDirs: 1 });
+    assert.equal(scan.traversalTruncated, true);
+    assert.ok(scan.truncationReasons.includes("directory_limit"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("graph status is indeterminate when freshness traversal hits a directory cap", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-status-cap-"));
+  const outDir = path.join(repo, ".agent");
+  try {
+    fs.mkdirSync(path.join(repo, "a"));
+    fs.mkdirSync(path.join(repo, "b"));
+    fs.writeFileSync(path.join(repo, "a", "a.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(repo, "b", "b.ts"), "export const b = 1;\n");
+    buildGraphGeneration(repo, { outDir, maxDirs: 1 });
+
+    const status = graphStatus(repo, outDir, { maxDirs: 1 });
+    assert.equal(status.state, "indeterminate");
+    assert.equal(status.scanTruncated, true);
+    assert.ok(status.truncationReasons.includes("directory_limit"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("source scan bounds oversized directories and reports the skipped subtree", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-entry-cap-"));
+  try {
+    fs.writeFileSync(path.join(repo, "a.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(repo, "b.ts"), "export const b = 1;\n");
+    fs.writeFileSync(path.join(repo, "c.ts"), "export const c = 1;\n");
+
+    const scan = scanSourcesPublic(repo, 0, { maxEntriesPerDir: 2 });
+    assert.equal(scan.files.length, 0);
+    assert.equal(scan.traversalTruncated, true);
+    assert.ok(scan.truncationReasons.includes("directory_entry_limit"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("limited source scan selects paths deterministically in lexical order", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-order-"));
+  try {
+    for (const name of ["z", "a", "m"]) {
+      fs.mkdirSync(path.join(repo, name));
+      fs.writeFileSync(path.join(repo, name, `${name}.ts`), `export const ${name} = 1;\n`);
+    }
+
+    const scan = scanSourcesPublic(repo, 2);
+    assert.deepEqual(scan.files.map((file) => file.path), ["a/a.ts", "m/m.ts"]);
+    assert.equal(scan.fileLimitReached, true);
+    assert.ok(scan.truncationReasons.includes("file_limit"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("limited source scan stops traversal after satisfying the file budget", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-early-stop-"));
+  try {
+    fs.mkdirSync(path.join(repo, "a"));
+    fs.writeFileSync(path.join(repo, "a", "a.ts"), "export const a = 1;\n");
+    fs.mkdirSync(path.join(repo, "z"));
+    for (const name of ["one.ts", "two.ts", "three.ts"]) {
+      fs.writeFileSync(path.join(repo, "z", name), `export const ${name.replace(".ts", "")} = 1;\n`);
+    }
+
+    const scan = scanSourcesPublic(repo, 1, { maxEntriesPerDir: 2 });
+    assert.deepEqual(scan.files.map((file) => file.path), ["a/a.ts"]);
+    assert.deepEqual(scan.truncationReasons, ["file_limit"]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("doc-code truth joins are typed and evidence-backed without polluting graph edges", () => {
