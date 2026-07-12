@@ -26,6 +26,7 @@ import {
   queryGraph,
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
+import { generateDocs } from "../lib/generated-docs.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
@@ -78,6 +79,8 @@ const DEFAULT_CONFIG = {
     "target/",
     "engine/target",
     "dist/",
+    "docs/product.md",
+    "docs/architecture.md",
   ],
 };
 
@@ -108,7 +111,7 @@ function parseArgs(argv) {
     const [key, inline] = arg.slice(2).split("=", 2);
     if (inline !== undefined) {
       args[key] = inline;
-    } else if (["check", "refresh", "complete", "json"].includes(key)) {
+    } else if (["check", "refresh", "complete", "json", "no-readme-link"].includes(key)) {
       args[key] = true;
     } else {
       args[key] = argv[++i];
@@ -182,8 +185,28 @@ function walk(dir) {
 
 function loadConfig(root, outDir) {
   const path = join(root, outDir, "config.json");
-  if (!existsSync(path)) writeJson(path, DEFAULT_CONFIG);
-  return readJson(path, DEFAULT_CONFIG);
+  if (!existsSync(path)) {
+    writeJson(path, DEFAULT_CONFIG);
+    return DEFAULT_CONFIG;
+  }
+  // Forward-merge new defaults into a stored config created before they were added.
+  // Array-valued keys (ignoredPrefixes, canonicalDocs, archiveGlobs) are unioned;
+  // object-valued keys are shallow-merged with stored winning; everything else passes through.
+  const stored = readJson(path, {});
+  const merged = { ...DEFAULT_CONFIG, ...stored };
+  if (Array.isArray(DEFAULT_CONFIG.ignoredPrefixes) && Array.isArray(stored.ignoredPrefixes)) {
+    merged.ignoredPrefixes = [...new Set([...DEFAULT_CONFIG.ignoredPrefixes, ...stored.ignoredPrefixes])];
+  }
+  if (Array.isArray(DEFAULT_CONFIG.canonicalDocs) && Array.isArray(stored.canonicalDocs)) {
+    merged.canonicalDocs = [...new Set([...DEFAULT_CONFIG.canonicalDocs, ...stored.canonicalDocs])];
+  }
+  if (Array.isArray(DEFAULT_CONFIG.archiveGlobs) && Array.isArray(stored.archiveGlobs)) {
+    merged.archiveGlobs = [...new Set([...DEFAULT_CONFIG.archiveGlobs, ...stored.archiveGlobs])];
+  }
+  if (DEFAULT_CONFIG.budgets && stored.budgets) {
+    merged.budgets = { ...DEFAULT_CONFIG.budgets, ...stored.budgets };
+  }
+  return merged;
 }
 
 function isDoc(path) {
@@ -208,13 +231,14 @@ function sourceSignature(root, config, limit = 0) {
   return sha1([fileListHash, ...docHashes].join("\n"));
 }
 
-function extractDoc(root, path, allFiles) {
+function extractDoc(root, path, allFiles, config) {
   const full = join(root, path);
   const text = readFileSync(full, "utf8");
   const lines = text.split(/\r?\n/);
   const headings = [];
   const claims = [];
   const codeRefs = new Set();
+  const ignored = config?.ignoredPrefixes ?? [];
   let currentHeading = "";
   let inFence = false;
   for (let i = 0; i < lines.length; i += 1) {
@@ -231,7 +255,9 @@ function extractDoc(root, path, allFiles) {
     }
     if (!inFence) {
       for (const match of line.matchAll(PATH_RE)) {
-        codeRefs.add(normalizePath(match[1]));
+        const normalized = normalizePath(match[1]);
+        if (ignored.some((prefix) => normalized.startsWith(prefix))) continue;
+        codeRefs.add(normalized);
       }
     }
     if (inFence || !looksLikeClaim(line)) continue;
@@ -304,7 +330,7 @@ function build(root, outDir, options = {}) {
   const limit = Number(options.limit ?? 0);
   const files = repoFiles(root, config, limit);
   const allFiles = new Set(files);
-  const docs = files.filter(isDoc).map((path) => extractDoc(root, path, allFiles));
+  const docs = files.filter(isDoc).map((path) => extractDoc(root, path, allFiles, config));
   const claims = docs.flatMap((doc) => doc.claims);
   const codeRefs = new Map();
   const edges = [];
@@ -359,7 +385,8 @@ function build(root, outDir, options = {}) {
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
   writeText(join(root, outDir, "START-HERE.md"), startHere(map, stale, graphGeneration, flows));
-  return { map, stale, index, queue, graphGeneration, flows };
+  const docsResult = generateDocs(root, { noReadmeLink: Boolean(options.noReadmeLink) });
+  return { map, stale, index, queue, graphGeneration, flows, docsResult };
 }
 
 // Deterministic Phase-2 worklist: pair each doc claim with the implementation
@@ -1246,7 +1273,7 @@ function runBriefAndPrint(root, outDir, args) {
 function runMapAndPrint(root, outDir, args = {}) {
   const { rebuilt } = ensureFresh(root, outDir, args);
   const map = readJson(join(root, outDir, "map.json"), null);
-  console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} start=${outDir}/START-HERE.md`);
+  console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} product=docs/product.md architecture=docs/architecture.md`);
   return 0;
 }
 
@@ -1290,7 +1317,10 @@ function main() {
       const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
       if (!fresh) throw new Error("generated graph is stale immediately after build");
     }
-    console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims}`);
+    console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} product=docs/product.md architecture=docs/architecture.md`);
+    if (result.docsResult?.mode === "docs_conflict") {
+      console.warn(`docs_conflict: ${result.docsResult.conflicts.join(", ")} — wrote fallback to .agent/docs/`);
+    }
     return 0;
   }
   if (command === "brief") {
