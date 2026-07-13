@@ -26,8 +26,15 @@ test("Blueprint hygiene facts are cached, generation-bound, and become stale wit
       "}",
       "",
     ].join("\n"));
+    // Above-trigger file in a language the graph provider does NOT parse — its candidate must say
+    // graphMetrics "unavailable", never fabricated zero symbol counts.
+    fs.writeFileSync(path.join(repo, "src", "service.go"), [
+      "package service",
+      ...Array.from({ length: 500 }, (_, index) => `// go line ${index + 1}`),
+      "",
+    ].join("\n"));
     assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
-    assert.equal(spawnSync("git", ["add", "src/large.ts"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["add", "src/large.ts", "src/service.go"], { cwd: repo }).status, 0);
 
     const graphBuild = run(repo, ["graph", "build", "--out", ".agent"]);
     assert.equal(graphBuild.status, 0, graphBuild.stderr || graphBuild.stdout);
@@ -49,12 +56,19 @@ test("Blueprint hygiene facts are cached, generation-bound, and become stale wit
     assert.ok(fs.existsSync(path.join(repo, ".agent", "hygiene", "facts.json")));
     const decomposition = refreshed.checks.find((check) => check.check === "decomposition");
     assert.equal(decomposition.findings_count, 0);
-    assert.equal(decomposition.candidate_count, 1);
+    assert.equal(decomposition.candidate_count, 2);
     assert.equal(decomposition.meta.threshold, 410);
     assert.equal(decomposition.meta.thresholdKind, "review-trigger");
-    assert.equal(decomposition.meta.oversized[0].symbolCount, 2);
-    assert.ok(decomposition.meta.oversized[0].bytes > 0);
-    assert.ok(decomposition.meta.oversized[0].largestSymbolLines >= 200);
+    assert.equal(decomposition.meta.graphMetricsVersion, 2);
+    const parsedCandidate = decomposition.meta.oversized.find((item) => item.file === "src/large.ts");
+    assert.equal(parsedCandidate.graphMetrics, "available");
+    assert.equal(parsedCandidate.symbolCount, 2);
+    assert.ok(parsedCandidate.bytes > 0);
+    assert.ok(parsedCandidate.largestSymbolLines >= 200);
+    const unparsedCandidate = decomposition.meta.oversized.find((item) => item.file === "src/service.go");
+    assert.equal(unparsedCandidate.graphMetrics, "unavailable");
+    assert.match(unparsedCandidate.graphMetricsReason, /language not parsed/);
+    assert.ok(!("symbolCount" in unparsedCandidate));
 
     const fresh = run(repo, ["hygiene", "status", "--out", ".agent", "--json"]);
     assert.equal(fresh.status, 0, fresh.stderr || fresh.stdout);

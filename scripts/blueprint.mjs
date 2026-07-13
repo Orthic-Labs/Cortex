@@ -27,6 +27,7 @@ import {
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
 import { generateDocs } from "../lib/generated-docs.mjs";
+import { CODE_EXTENSIONS } from "../graph/language-extractors.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
@@ -1507,15 +1508,33 @@ function enrichDecompositionCandidates(facts, generation) {
   if (!check?.meta) return;
   const nodes = generation?.nodes ?? [];
   const edges = generation?.edges ?? [];
-  const enrich = (candidate, pathKey) => {
-    const candidatePath = candidate[pathKey];
-    const symbols = nodes.filter((node) => node.path === candidatePath && (node.kind === "symbol" || node.kind === "class"));
+  const indexedPaths = new Set(nodes.map((node) => node.path).filter(Boolean));
+  const parsed = (path) => CODE_EXTENSIONS.has(String(path).split(".").at(-1)?.toLowerCase());
+  // A candidate outside the provider's parsed languages (or outside the indexed generation) gets
+  // graphMetrics "unavailable", never fabricated zeros — symbolCount 0 must mean "no symbols found
+  // in a parsed file", not "the provider cannot see this language".
+  const unavailability = (paths) => {
+    const unparsed = paths.filter((path) => !parsed(path));
+    if (unparsed.length) return `language not parsed by provider: ${unparsed.join(", ")}`;
+    const unindexed = paths.filter((path) => !indexedPaths.has(path));
+    if (unindexed.length) return `not in graph generation: ${unindexed.join(", ")}`;
+    return null;
+  };
+  const enrich = (candidate, paths) => {
+    const reason = unavailability(paths);
+    if (reason) {
+      Object.assign(candidate, { graphMetrics: "unavailable", graphMetricsReason: reason });
+      return;
+    }
+    const pathSet = new Set(paths);
+    const symbols = nodes.filter((node) => pathSet.has(node.path) && (node.kind === "symbol" || node.kind === "class"));
     const symbolIds = new Set(symbols.map((node) => node.id));
     const spans = symbols.map((node) => {
       const evidence = node.evidence?.[0] ?? {};
       return {
         name: node.qualifiedName ?? node.name,
         kind: node.kind,
+        path: node.path,
         labels: node.labels ?? [],
         startLine: evidence.startLine ?? null,
         endLine: evidence.endLine ?? null,
@@ -1525,6 +1544,7 @@ function enrichDecompositionCandidates(facts, generation) {
     const incoming = edges.filter((edge) => symbolIds.has(edge.target) && !symbolIds.has(edge.source)).length;
     const outgoing = edges.filter((edge) => symbolIds.has(edge.source) && !symbolIds.has(edge.target)).length;
     Object.assign(candidate, {
+      graphMetrics: "available",
       symbolCount: symbols.length,
       largestSymbolLines: spans[0]?.lines ?? 0,
       incomingRelationships: incoming,
@@ -1532,8 +1552,9 @@ function enrichDecompositionCandidates(facts, generation) {
       topSymbols: spans.slice(0, 12),
     });
   };
-  for (const candidate of check.meta.oversized ?? []) enrich(candidate, "file");
-  check.meta.graphMetricsVersion = 1;
+  for (const candidate of check.meta.oversized ?? []) enrich(candidate, [candidate.file]);
+  for (const candidate of check.meta.mechanical_splits ?? []) enrich(candidate, candidate.part_files ?? candidate.files ?? []);
+  check.meta.graphMetricsVersion = 2;
   check.meta.review_candidates = [...(check.meta.oversized ?? []), ...(check.meta.mechanical_splits ?? [])];
   facts.decomposition = check.meta;
 }
