@@ -17,12 +17,22 @@ test("Blueprint hygiene facts are cached, generation-bound, and become stale wit
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-hygiene-"));
   try {
     fs.mkdirSync(path.join(repo, "src"));
-    fs.writeFileSync(path.join(repo, "src", "large.ts"), `${Array.from({ length: 405 }, (_, index) => `// line ${index + 1}`).join("\n")}\n`);
+    fs.writeFileSync(path.join(repo, "src", "large.ts"), [
+      "export function alpha() {",
+      ...Array.from({ length: 207 }, (_, index) => `  // alpha ${index + 1}`),
+      "}",
+      "export function beta() {",
+      ...Array.from({ length: 207 }, (_, index) => `  // beta ${index + 1}`),
+      "}",
+      "",
+    ].join("\n"));
     assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
     assert.equal(spawnSync("git", ["add", "src/large.ts"], { cwd: repo }).status, 0);
 
     const graphBuild = run(repo, ["graph", "build", "--out", ".agent"]);
     assert.equal(graphBuild.status, 0, graphBuild.stderr || graphBuild.stdout);
+    const configPath = path.join(repo, ".agent", "config.json");
+    fs.writeFileSync(configPath, `${JSON.stringify({ hygiene: { decompositionReviewLoc: 410 } }, null, 2)}\n`);
 
     const missing = run(repo, ["hygiene", "status", "--out", ".agent", "--json"]);
     assert.equal(missing.status, 2);
@@ -37,7 +47,14 @@ test("Blueprint hygiene facts are cached, generation-bound, and become stale wit
     assert.deepEqual(refreshed.selectedChecks, ["decomposition", "debt_markers"]);
     assert.match(refreshed.sourceGenerationId, /^sha256:[a-f0-9]{64}$/);
     assert.ok(fs.existsSync(path.join(repo, ".agent", "hygiene", "facts.json")));
-    assert.ok(refreshed.checks.some((check) => check.check === "decomposition" && check.findings_count === 1));
+    const decomposition = refreshed.checks.find((check) => check.check === "decomposition");
+    assert.equal(decomposition.findings_count, 0);
+    assert.equal(decomposition.candidate_count, 1);
+    assert.equal(decomposition.meta.threshold, 410);
+    assert.equal(decomposition.meta.thresholdKind, "review-trigger");
+    assert.equal(decomposition.meta.oversized[0].symbolCount, 2);
+    assert.ok(decomposition.meta.oversized[0].bytes > 0);
+    assert.ok(decomposition.meta.oversized[0].largestSymbolLines >= 200);
 
     const fresh = run(repo, ["hygiene", "status", "--out", ".agent", "--json"]);
     assert.equal(fresh.status, 0, fresh.stderr || fresh.stdout);

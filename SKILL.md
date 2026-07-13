@@ -1,12 +1,14 @@
 ---
 name: blueprint
-description: Make an LLM understand a repository. Phase 1 deterministically maps the repo (graph of docs↔claims↔code, code evidence, stale refs) via the global `blueprint` command. Phase 2 fans out parallel agents that VERIFY the extracted claims against real code and SYNTHESIZE an understanding layer (architecture, interfaces, health, security, production-readiness, and uncovered-flow inventory) grounded in the map. Output is machine-readable JSON for agents plus ONE human reference doc. Use before working in, inheriting, scaling, auditing, or judging the architectural completeness of any repo. Replaces both the old `maprepo` mapper and the `/architecture` doc-set skill.
+description: Make an LLM understand a repository. Phase 1 deterministically maps the repo (graph of docs↔claims↔code, code evidence, stale refs) via the global `blueprint` command. Phase 2 fans out parallel agents that VERIFY the extracted claims against real code and SYNTHESIZE an understanding layer (architecture, interfaces, health, security, production-readiness, and uncovered-flow inventory) grounded in the map. Output is machine-readable JSON for agents plus two generated human docs. Use before working in, inheriting, scaling, auditing, or judging the architectural completeness of any repo. Replaces both the old `maprepo` mapper and the `/architecture` doc-set skill.
 allowed-tools: ["Read", "Bash", "Glob", "Grep", "Write", "Agent", "Workflow"]
 ---
 
 # Blueprint
 
-One tool to make an agent understand a repo. Deterministic mapping first (cheap, complete, grounds everything in real files), then parallel agents to verify and synthesize. The human gets one reference doc; the LLM gets structured machine artifacts. This is comprehension — it never modifies application code.
+One tool to make an agent understand a repo. Deterministic mapping first (cheap, complete, grounds everything in real files), then parallel agents to verify and synthesize. Humans get `docs/product.md` and `docs/architecture.md`; agents get structured machine artifacts. This is comprehension — it never modifies application code.
+
+Canonical ownership and workflow boundary: `D:/Claude/docs/BLUEPRINT-AUDIT-ARCHITECT-WORKFLOW.md`.
 
 The deterministic layer cannot lie (it only reports what files/claims exist) but cannot judge. The agent layer judges but is fenced to the real files the map handed it, so it cannot hallucinate structure. That pairing is the whole design.
 
@@ -32,7 +34,7 @@ Machine, for agents (under `<repo>/.agent/`):
 - `hygiene/manifest.json` + `hygiene/facts.json` — optional generation-bound reusable hygiene
   evidence. `blueprint hygiene refresh` runs the targeted deterministic/expensive probes once;
   `blueprint hygiene status` reports `missing|fresh|stale`. Audit consumes fresh facts instead of
-  rerunning them.
+  rerunning them. Structural size entries are review candidates, not quality verdicts.
 
 Human, generated (under `<repo>/docs/`):
 - `docs/product.md` — code-grounded product/marketing overview; capabilities from the complete flow
@@ -114,7 +116,9 @@ truth map and the Blueprint-owned code graph:
 - `hygiene refresh` reuses Audit's existing scanner implementations but makes their reusable output
   Blueprint-owned and graph-generation-bound. Default facts cover dependency freshness, dead-code
   and duplication scanners, oversized/mechanical-split structure, binary pins, dependency pinning,
-  negative space, and debt markers. The full ponytail/minimize judgment and severity remain Audit.
+  negative space, and debt markers. Decomposition candidates carry LOC, bytes, symbol/span, and graph
+  relationship metrics; crossing the configurable review threshold never proves bloat. The full
+  decomposition verdict/target plan, ponytail/minimize judgment, and severity remain Audit/Architect.
 - task briefs use graph retrieval as a bounded read-first source before falling back to lexical
   evidence search;
 - product-flow inventory is capped and reports `truncated=true` when capped;
@@ -164,7 +168,7 @@ The MAIN agent merges to `verdicts.json` (reconciliation is never delegated). A 
 
 - `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `crossCutting[]`, `capabilityCoverage[]`, `flows[]`, `coverageGaps[]`. Trace one real request/command end to end. Inventory each material user/agent/data flow from source → transforms/stores → consumer and classify it `covered|partial|missing|undetermined` with `file:line` evidence. Every non-covered flow becomes `{flow,status,evidence,impact,existingPrimitives[],handoff:"architect"}` in `coverageGaps[]`. Include negative space: a flow named by product/docs/user intent that has no implementation is evidence, not something to omit because no file exists. Populate `capabilityCoverage[]` from the whole-repository completeness contract above; scanned-file count and Phase-2 prose are not substitutes for code-symbol/relationship coverage.
 - `interfaces` — `publicApi[]`, `moduleInterfaces[]`, `dataContracts[]`, `configKeys[]`, `extensionPoints[]`, `fragileContracts[]`.
-- `health` — `oversized[]`, `slop[]`, `hotspots[]`, `duplication[]`, `coupling[]`, `untested[]`, `deadWeight[]`, `top10[]`. Describe and rank; do not generate fix patches (that is `/audit`).
+- `health` — `oversized[]`, `slop[]`, `hotspots[]`, `duplication[]`, `coupling[]`, `untested[]`, `deadWeight[]`, `top10[]`. Describe and rank signals; size alone is not a decomposition verdict. Do not generate fix patches or target designs (those are Audit + Architect).
 - `security` — `trustBoundaries[]`, `secrets[]` (location + presence only, redact values), `injectionSurface[]`, `authz[]`, `dataProtection[]`, `dangerousPatterns[]`, `posture[]`.
 - `solid` — `dimensions[]` each `{name,status:Present|Partial|Missing,note}` over observability, resilience, config/env, testing, CI/CD, performance, scalability, data lifecycle, onboarding, accessibility, licensing; plus `scorecard[]` and `top5[]`.
 
@@ -250,6 +254,9 @@ Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. ra
 - Redact secret values — report location + presence only.
 - Use native parallel workers with platform-supported routing; never emit unsupported client-specific model names and never use an external model API. Retry a failed worker once from scratch, then complete the batch or dimension inline. The main agent owns completion, reconciliation, and merge. Pass paths/excerpts, not file dumps.
 - Captures CURRENT state. Fix punch-lists are `/audit`; new designs are `architect`.
+- A size threshold only nominates a component for review. Never claim that a component needs
+  decomposition without the responsibility/coupling/state/caller/test evidence and exact target plan
+  required by `docs/BLUEPRINT-AUDIT-ARCHITECT-WORKFLOW.md`.
 - Blueprint does not research or choose external solutions. If the user asks whether the architecture
   is the best shape or complete, Blueprint's deliverable is the evidenced coverage-gap inventory;
   hand every material gap to `architect` for the mandatory external prior-art decision matrix before

@@ -82,6 +82,10 @@ const DEFAULT_CONFIG = {
     maxGotchas: 8,
     maxCodeEvidence: 14,
   },
+  hygiene: {
+    // Review trigger only. Size never proves that a component should be decomposed.
+    decompositionReviewLoc: 400,
+  },
   ignoredPrefixes: [
     ".agent/",
     ".audit/",
@@ -221,6 +225,9 @@ function loadConfig(root, outDir) {
   }
   if (DEFAULT_CONFIG.budgets && stored.budgets) {
     merged.budgets = { ...DEFAULT_CONFIG.budgets, ...stored.budgets };
+  }
+  if (DEFAULT_CONFIG.hygiene && stored.hygiene) {
+    merged.hygiene = { ...DEFAULT_CONFIG.hygiene, ...stored.hygiene };
   }
   return merged;
 }
@@ -1435,6 +1442,7 @@ function refreshHygiene(root, outDir, args) {
     ? selectedChecks.filter((check) => !NETWORK_ONLY_HYGIENE_CHECKS.has(check))
     : selectedChecks;
   if (collectorChecks.length > 0) {
+    const config = loadConfig(root, outDir);
     execFileSync(process.execPath, [
       AUDIT_FACT_COLLECTOR,
       root,
@@ -1446,7 +1454,11 @@ function refreshHygiene(root, outDir, args) {
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: args.offline ? { ...process.env, AUDIT_OFFLINE: "1" } : process.env,
+      env: {
+        ...process.env,
+        ...(args.offline ? { AUDIT_OFFLINE: "1" } : {}),
+        BLUEPRINT_DECOMPOSITION_REVIEW_LOC: String(config.hygiene?.decompositionReviewLoc ?? 400),
+      },
     });
   }
   const factsPath = join(hygieneDir, "facts.json");
@@ -1454,6 +1466,7 @@ function refreshHygiene(root, outDir, args) {
     ? readJson(factsPath, null)
     : { kind: "audit-facts", generated_at: new Date().toISOString(), workspace: root, checks: [] };
   if (!facts?.checks) throw new Error("hygiene collector did not emit facts.json");
+  enrichDecompositionCandidates(facts, readFreshGraph(root, outDir));
   for (const check of selectedChecks.filter((value) => args.offline && NETWORK_ONLY_HYGIENE_CHECKS.has(value))) {
     facts.checks.push({
       check,
@@ -1487,6 +1500,42 @@ function refreshHygiene(root, outDir, args) {
   };
   writeJson(join(hygieneDir, "manifest.json"), manifest);
   return manifest;
+}
+
+function enrichDecompositionCandidates(facts, generation) {
+  const check = facts.checks.find((item) => item.check === "decomposition");
+  if (!check?.meta) return;
+  const nodes = generation?.nodes ?? [];
+  const edges = generation?.edges ?? [];
+  const enrich = (candidate, pathKey) => {
+    const candidatePath = candidate[pathKey];
+    const symbols = nodes.filter((node) => node.path === candidatePath && (node.kind === "symbol" || node.kind === "class"));
+    const symbolIds = new Set(symbols.map((node) => node.id));
+    const spans = symbols.map((node) => {
+      const evidence = node.evidence?.[0] ?? {};
+      return {
+        name: node.qualifiedName ?? node.name,
+        kind: node.kind,
+        labels: node.labels ?? [],
+        startLine: evidence.startLine ?? null,
+        endLine: evidence.endLine ?? null,
+        lines: evidence.startLine && evidence.endLine ? evidence.endLine - evidence.startLine + 1 : 0,
+      };
+    }).sort((left, right) => right.lines - left.lines || left.name.localeCompare(right.name));
+    const incoming = edges.filter((edge) => symbolIds.has(edge.target) && !symbolIds.has(edge.source)).length;
+    const outgoing = edges.filter((edge) => symbolIds.has(edge.source) && !symbolIds.has(edge.target)).length;
+    Object.assign(candidate, {
+      symbolCount: symbols.length,
+      largestSymbolLines: spans[0]?.lines ?? 0,
+      incomingRelationships: incoming,
+      outgoingRelationships: outgoing,
+      topSymbols: spans.slice(0, 12),
+    });
+  };
+  for (const candidate of check.meta.oversized ?? []) enrich(candidate, "file");
+  check.meta.graphMetricsVersion = 1;
+  check.meta.review_candidates = [...(check.meta.oversized ?? []), ...(check.meta.mechanical_splits ?? [])];
+  facts.decomposition = check.meta;
 }
 
 function runHygieneCommand(root, outDir, subcommand, args) {
