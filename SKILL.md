@@ -66,6 +66,8 @@ retired document at the very top with exactly one of these two-line forms:
 The first target must be an indexed repo-relative regular file whose physical path remains inside
 the repo; absolute paths, `../` escapes, symlink/junction escapes, directories, and unindexed targets
 do not retire the document and are emitted in `stale.json.invalidSupersessionMarkers`.
+When a recognized top-level supersession first line has a missing or malformed required historical
+note, the document likewise stays current and emits `historical-note-invalid` in that list.
 Blueprint records `doc.lifecycle`, retains a `supersedes` relationship when the canonical source is
 inside the repo, and excludes superseded content from live claims, stale-reference findings, Phase-2
 queues, generated current docs, and task briefs. Paths matching `archiveGlobs` (defaults:
@@ -74,8 +76,9 @@ queues, generated current docs, and task briefs. Paths matching `archiveGlobs` (
 Use a whole-document banner only when the entire document is historical. If one row, section, or
 claim is stale, update that claim or add an inline canonical-source pointer; an inline
 `Superseded by` note never retires the whole document. A deployed site whose source moved to another
-repository is outside this repository's Blueprint scope; map that owning repo separately and audit
-the live URL through `audit-visual`.
+repository is outside this repository's Blueprint scope; map that owning repo separately, run
+`/seo audit <url>` for deployed crawl/index/content/schema/CWV evidence, and run `/audit-visual <url>`
+for rendered UI/UX evidence. Neither live-URL pass replaces the owning repository's `/audit`.
 
 ## Whole-repository completeness contract
 

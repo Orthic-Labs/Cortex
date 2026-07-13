@@ -117,6 +117,55 @@ test("an inline superseded note does not retire an otherwise current document", 
   }
 });
 
+test("malformed top-level supersession banners stay current and surface an invalid marker", () => {
+  const repo = path.join(os.tmpdir(), `blueprint-malformed-superseded-${process.pid}-${Date.now()}`);
+  fs.mkdirSync(repo, { recursive: true });
+  try {
+    write(
+      repo,
+      "README.md",
+      "> Superseded by `docs/current.md` on 2026-07-13.\n" +
+        "> Kept for reference.\n\n" +
+        "# Current reference\n\nThe current setting is implemented.\n",
+    );
+    write(
+      repo,
+      "docs/external.md",
+      "> Superseded on 2026-06-28.\n\n" +
+        "# Historical site audit\n\nThe old sitemap is implemented.\n",
+    );
+    write(repo, "docs/current.md", "# Current decision\n\nThe current gate is implemented.\n");
+
+    const result = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--no-readme-link"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const map = JSON.parse(fs.readFileSync(path.join(repo, ".agent/map.json"), "utf8"));
+    const claims = JSON.parse(fs.readFileSync(path.join(repo, ".agent/claims.json"), "utf8"));
+    const stale = JSON.parse(fs.readFileSync(path.join(repo, ".agent/stale.json"), "utf8"));
+    const docs = new Map(map.nodes.filter((node) => node.kind === "doc").map((node) => [node.path, node]));
+
+    assert.equal(docs.get("README.md")?.lifecycle?.status, "current");
+    assert.equal(docs.get("docs/external.md")?.lifecycle?.status, "current");
+    assert.ok(claims.some((claim) => claim.source === "README.md"));
+    assert.ok(claims.some((claim) => claim.source === "docs/external.md"));
+    assert.deepEqual(stale.invalidSupersessionMarkers, [
+      {
+        source: "README.md",
+        target: "docs/current.md",
+        reason: "historical-note-invalid",
+      },
+      {
+        source: "docs/external.md",
+        reason: "historical-note-invalid",
+      },
+    ]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("a supersession marker cannot hide claims through a path outside the repository", () => {
   const parent = path.join(os.tmpdir(), `blueprint-superseded-escape-${process.pid}-${Date.now()}`);
   const repo = path.join(parent, "repo");

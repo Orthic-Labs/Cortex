@@ -198,6 +198,15 @@ function parseDocLifecycle(root, path, lines, allFiles, config) {
   const targeted = /^>\s*Superseded by\s+`([^`]+)`\s+on\s+(\d{4}-\d{2}-\d{2})\.\s*$/i.exec(first);
   const external = /^>\s*Superseded on\s+(\d{4}-\d{2}-\d{2})\.\s*$/i.exec(first);
 
+  if (targeted && !hasRepoHistoricalNote) {
+    return {
+      status: "current",
+      invalidMarker: { target: targeted[1].trim(), reason: "historical-note-invalid" },
+    };
+  }
+  if (external && !hasExternalHistoricalNote) {
+    return { status: "current", invalidMarker: { reason: "historical-note-invalid" } };
+  }
   if (targeted && hasRepoHistoricalNote) {
     const rawTarget = targeted[1].trim();
     if (/^(?:[A-Za-z]:[\\/]|[\\/]{1,2})/.test(rawTarget)) {
