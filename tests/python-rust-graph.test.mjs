@@ -139,7 +139,7 @@ test("provider upgrades invalidate generations that predate Python and Rust extr
     buildGraphGeneration(repo, { outDir });
     const manifestPath = path.join(outDir, "graph", "manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    manifest.provider.version = "repo-local-deterministic-v0";
+    manifest.provider.version = "repo-local-deterministic-v1";
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
     const status = graphStatus(repo, outDir);
@@ -315,7 +315,7 @@ test("workspace script languages emit functions and call relationships", () => {
 
 test("capabilities enumerate every parsed language in the tracked workspace stack", () => {
   assert.deepEqual(graphCapabilities().languageCoverage.parsedExtensions, [
-    "astro", "bat", "cjs", "cts", "js", "jsx", "mjs", "mts", "ps1", "py", "rs", "sh", "swift", "ts", "tsx", "vbs", "vue",
+    "astro", "bat", "c", "cc", "cjs", "cpp", "cts", "cxx", "gql", "graphql", "h", "hpp", "js", "jsx", "m", "mjs", "mm", "mts", "nsh", "nsi", "ps1", "py", "rs", "sh", "sql", "swift", "ts", "tsx", "vbs", "vue",
   ]);
 });
 

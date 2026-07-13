@@ -45,7 +45,7 @@ test("blueprint graph build/status/search works from a repo root", () => {
     const doctorPayload = JSON.parse(doctor.stdout);
     assert.equal(doctorPayload.state, "ready");
     assert.deepEqual(doctorPayload.capabilities.languageCoverage.parsedExtensions, [
-      "astro", "bat", "cjs", "cts", "js", "jsx", "mjs", "mts", "ps1", "py", "rs", "sh", "swift", "ts", "tsx", "vbs", "vue",
+      "astro", "bat", "c", "cc", "cjs", "cpp", "cts", "cxx", "gql", "graphql", "h", "hpp", "js", "jsx", "m", "mjs", "mm", "mts", "nsh", "nsi", "ps1", "py", "rs", "sh", "sql", "swift", "ts", "tsx", "vbs", "vue",
     ]);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });

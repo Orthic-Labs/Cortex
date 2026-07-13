@@ -107,8 +107,10 @@ truth map and the Blueprint-owned code graph:
   `corrupt`) and include provider capability coverage, including the honest parsed-language list.
 - the deterministic lexical provider parses the tracked first-party executable stack: JS/TS
   (including JSX/TSX/MJS/CJS/MTS/CTS and React arrow components), Python, Rust/Tauri, Swift,
-  Vue/Astro script regions, and workspace Bash/PowerShell/BAT/VBS functions. Known opaque assets
-  remain file nodes and do not masquerade as unsupported languages; vendor trees are excluded.
+  C/C++/Objective-C/Objective-C++, Vue/Astro script regions, NSIS installers, workspace
+  Bash/PowerShell/BAT/VBS functions, and GraphQL/SQL schema definitions and references. Known
+  opaque assets remain file nodes and do not masquerade as unsupported languages; vendor trees are
+  excluded.
 - `hygiene refresh` reuses Audit's existing scanner implementations but makes their reusable output
   Blueprint-owned and graph-generation-bound. Default facts cover dependency freshness, dead-code
   and duplication scanners, oversized/mechanical-split structure, binary pins, dependency pinning,
@@ -122,9 +124,9 @@ truth map and the Blueprint-owned code graph:
 
 The implementation is still **PARTIAL** for final whole-repository understanding because the
 provider is deterministic lexical extraction rather than compiler/AST coverage for every language,
-and schema-specific GraphQL/SQL relationships, doc-code contradiction joins, and optional visual
-explorer work remain incomplete. Do not advertise an interactive visual explorer or raw graph
-ingestion into MemRight as live. The implementation plan-of-record is
+and doc-code contradiction joins and optional visual explorer work remain incomplete. Do not
+advertise an interactive visual explorer or raw graph ingestion into MemRight as live. The
+implementation plan-of-record is
 `D:/Claude/docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`; the qualification
 evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
 

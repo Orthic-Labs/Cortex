@@ -17,10 +17,11 @@ import {
   extractImports,
   extractSymbols,
 } from "./language-extractors.mjs";
+import { addSchemaReferenceEdges } from "./schema-extractors.mjs";
 
 const PROVIDER = {
   id: "blueprint-static",
-  version: "repo-local-deterministic-v1",
+  version: "repo-local-deterministic-v2",
   license: "workspace-owned",
 };
 
@@ -714,6 +715,7 @@ function buildGenerationFromSources(root, source, options = {}) {
       if (sourceNode && targetNode) edges.push(edge("IMPORTS", sourceNode, targetNode, [fileEvidence(file, 1, 1)]));
     }
   }
+  addSchemaReferenceEdges(source.files, nodes, edges);
   addCallEdges(source.files, nodes, edges);
   addConfigEdges(source.files, nodes, edges);
   const cleanNodes = dedupeBy(nodes, (node) => node.id);

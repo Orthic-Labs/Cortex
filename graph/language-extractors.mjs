@@ -1,11 +1,18 @@
+import { SCHEMA_EXTENSIONS, extractSchemaSymbols } from "./schema-extractors.mjs";
+
 const JAVASCRIPT_EXTENSIONS = new Set(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]);
 const COMPONENT_EXTENSIONS = new Set(["vue", "astro"]);
 const SCRIPT_EXTENSIONS = new Set(["sh", "ps1", "bat", "vbs"]);
+const NATIVE_EXTENSIONS = new Set(["c", "h", "cc", "cpp", "cxx", "hpp", "m", "mm"]);
+const NSIS_EXTENSIONS = new Set(["nsi", "nsh"]);
 
 export const CODE_EXTENSIONS = new Set([
   ...JAVASCRIPT_EXTENSIONS,
   ...COMPONENT_EXTENSIONS,
   ...SCRIPT_EXTENSIONS,
+  ...NATIVE_EXTENSIONS,
+  ...NSIS_EXTENSIONS,
+  ...SCHEMA_EXTENSIONS,
   "py",
   "rs",
   "swift",
@@ -14,9 +21,12 @@ export const PARSED_LANGUAGE_EXTENSIONS = [...CODE_EXTENSIONS].sort();
 
 export function extractSymbols(file, addNode) {
   const extension = file.path.split(".").at(-1)?.toLowerCase();
+  if (SCHEMA_EXTENSIONS.has(extension)) return extractSchemaSymbols(file, addNode);
   if (extension === "py") return extractPythonSymbols(file, addNode);
   if (extension === "rs") return extractRustSymbols(file, addNode);
   if (extension === "swift") return extractSwiftSymbols(file, addNode);
+  if (NATIVE_EXTENSIONS.has(extension)) return extractNativeSymbols(file, addNode);
+  if (NSIS_EXTENSIONS.has(extension)) return extractNsisSymbols(file, addNode);
   if (SCRIPT_EXTENSIONS.has(extension)) return extractScriptSymbols(file, extension, addNode);
   return extractJavaScriptSymbols(file, addNode);
 }
@@ -168,10 +178,50 @@ function extractScriptSymbols(file, extension, addNode) {
   }
 }
 
+function extractNativeSymbols(file, addNode) {
+  let objectiveCType = null;
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const lineNo = index + 1;
+    const objectiveCStart = line.match(/^\s*@implementation\s+([A-Za-z_]\w*)/);
+    if (objectiveCStart) { objectiveCType = objectiveCStart[1]; continue; }
+    if (/^\s*@end\b/.test(line)) { objectiveCType = null; continue; }
+    const objectiveCMethod = objectiveCType && line.match(/^\s*[-+]\s*\([^)]*\)\s*([A-Za-z_]\w*)[^\{]*\{/);
+    if (objectiveCMethod) {
+      const qualified = `${objectiveCType}.${objectiveCMethod[1]}`;
+      addNode(symbolNode("symbol", file, objectiveCMethod[1], qualified, lineNo, findBlockEnd(file.lines, index), ["Method"]));
+      continue;
+    }
+    const typeMatch = line.match(/^\s*(?:typedef\s+)?(class|struct|enum)\s+([A-Za-z_]\w*)\b/);
+    if (typeMatch) {
+      addNode(symbolNode("class", file, typeMatch[2], typeMatch[2], lineNo, findBlockEnd(file.lines, index), ["Class", titleCase(typeMatch[1])]));
+    }
+    const functionMatch = line.match(/^\s*(?:(?:static|inline|extern|virtual|constexpr|const|unsigned|signed)\s+)*(?:[A-Za-z_]\w*(?:::\w+)?(?:\s*[*&])?\s+)+([A-Za-z_]\w*(?:::\w+)*)\s*\([^;{}]*\)\s*([;{])/);
+    if (!functionMatch) continue;
+    const qualified = functionMatch[1].replaceAll("::", ".");
+    const name = qualified.split(".").at(-1);
+    addNode(symbolNode("symbol", file, name, qualified, lineNo, functionMatch[2] === ";" ? lineNo : findBlockEnd(file.lines, index), ["Function"]));
+  }
+}
+
+function extractNsisSymbols(file, addNode) {
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const functionMatch = file.lines[index].match(/^\s*Function\s+([A-Za-z_.][\w.-]*)\s*$/i);
+    const sectionMatch = file.lines[index].match(/^\s*Section\s+(?:"[^"]*"\s+)?([A-Za-z_.][\w.-]*)\s*$/i);
+    const match = functionMatch ?? sectionMatch;
+    if (!match) continue;
+    const endToken = functionMatch ? "FunctionEnd" : "SectionEnd";
+    addNode(symbolNode("symbol", file, match[1], match[1], index + 1, findNamedEnd(file.lines, index, endToken), [functionMatch ? "Function" : "Section"]));
+  }
+}
+
 export function extractImports(file, files) {
   const extension = file.path.split(".").at(-1)?.toLowerCase();
+  if (SCHEMA_EXTENSIONS.has(extension)) return [];
   if (extension === "py") return extractPythonImports(file, files);
   if (extension === "rs") return extractRustImports(file, files);
+  if (NATIVE_EXTENSIONS.has(extension)) return extractNativeImports(file, files);
+  if (NSIS_EXTENSIONS.has(extension)) return extractNsisImports(file, files);
   if (["sh", "ps1", "bat"].includes(extension)) return extractScriptImports(file, files, extension);
   return extractJavaScriptImports(file, files);
 }
@@ -256,12 +306,35 @@ function extractScriptImports(file, files, extension) {
   return [...imports];
 }
 
+function extractNativeImports(file, files) {
+  const imports = new Set();
+  for (const line of file.lines) {
+    const specifier = line.match(/^\s*#\s*(?:include|import)\s*"([^"]+)"/)?.[1];
+    if (!specifier) continue;
+    const resolved = resolveRelativeFile(file.path, specifier, files);
+    if (resolved) imports.add(resolved);
+  }
+  return [...imports];
+}
+
+function extractNsisImports(file, files) {
+  const imports = new Set();
+  for (const line of file.lines) {
+    const specifier = line.match(/^\s*!include\s+"([^"]+)"/i)?.[1];
+    if (!specifier) continue;
+    const resolved = resolveRelativeFile(file.path, specifier, files);
+    if (resolved) imports.add(resolved);
+  }
+  return [...imports];
+}
+
 export function containsCall(file, body, callName) {
   const extension = file.path.split(".").at(-1)?.toLowerCase();
   const escaped = escapeRegExp(callName);
   if (extension === "sh" || extension === "ps1") return new RegExp(`(?:^|[\\s;&|])${escaped}(?=\\s|$)`, "m").test(body);
   if (extension === "bat") return new RegExp(`\\bcall\\s+:${escaped}\\b`, "i").test(body);
   if (extension === "vbs") return new RegExp(`\\b(?:Call\\s+)?${escaped}\\s*\\(`, "i").test(body);
+  if (NSIS_EXTENSIONS.has(extension)) return new RegExp(`\\bCall\\s+${escaped}\\b`, "i").test(body);
   return new RegExp(`(?:\\.|\\b)${escaped}\\s*\\(`).test(body);
 }
 
@@ -322,6 +395,12 @@ function findBatchBlockEnd(lines, startIndex) {
 
 function findVbsBlockEnd(lines, startIndex) {
   for (let index = startIndex + 1; index < lines.length; index += 1) if (/^\s*End\s+(?:Sub|Function)\b/i.test(lines[index])) return index + 1;
+  return startIndex + 1;
+}
+
+function findNamedEnd(lines, startIndex, token) {
+  const pattern = new RegExp(`^\\s*${escapeRegExp(token)}\\b`, "i");
+  for (let index = startIndex + 1; index < lines.length; index += 1) if (pattern.test(lines[index])) return index + 1;
   return startIndex + 1;
 }
 
