@@ -86,6 +86,9 @@ const DEFAULT_CONFIG = {
   hygiene: {
     // Review trigger only. Size never proves that a component should be decomposed.
     decompositionReviewLoc: 400,
+    // A not-needed dismissal of a candidate with this many incoming graph relationships requires a
+    // second assessor (audit renderer enforces; same rule as the >=3x-size trigger).
+    secondAssessorIncomingRelationships: 25,
   },
   ignoredPrefixes: [
     ".agent/",
