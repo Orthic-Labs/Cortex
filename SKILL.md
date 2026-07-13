@@ -29,6 +29,10 @@ Machine, for agents (under `<repo>/.agent/`):
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
 - `graph/manifest.json` + `graph/generations/<generationId>/{nodes,edges,graph}.json` — the structural graph (deterministic Blueprint-owned provider, current name `blueprint-static`).
 - `flows.json` — classified product-flow inventory (complete / broken / unsupported).
+- `hygiene/manifest.json` + `hygiene/facts.json` — optional generation-bound reusable hygiene
+  evidence. `blueprint hygiene refresh` runs the targeted deterministic/expensive probes once;
+  `blueprint hygiene status` reports `missing|fresh|stale`. Audit consumes fresh facts instead of
+  rerunning them.
 
 Human, generated (under `<repo>/docs/`):
 - `docs/product.md` — code-grounded product/marketing overview; capabilities from the complete flow
@@ -101,6 +105,14 @@ truth map and the Blueprint-owned code graph:
   of the default bounded preview;
 - `doctor` (and `doctor --json`) emit typed JSON states (`ready`, `missing`, `stale`, `broken`,
   `corrupt`) and include provider capability coverage, including the honest parsed-language list.
+- the deterministic lexical provider parses the tracked first-party executable stack: JS/TS
+  (including JSX/TSX/MJS/CJS/MTS/CTS and React arrow components), Python, Rust/Tauri, Swift,
+  Vue/Astro script regions, and workspace Bash/PowerShell/BAT/VBS functions. Known opaque assets
+  remain file nodes and do not masquerade as unsupported languages; vendor trees are excluded.
+- `hygiene refresh` reuses Audit's existing scanner implementations but makes their reusable output
+  Blueprint-owned and graph-generation-bound. Default facts cover dependency freshness, dead-code
+  and duplication scanners, oversized/mechanical-split structure, binary pins, dependency pinning,
+  negative space, and debt markers. The full ponytail/minimize judgment and severity remain Audit.
 - task briefs use graph retrieval as a bounded read-first source before falling back to lexical
   evidence search;
 - product-flow inventory is capped and reports `truncated=true` when capped;
@@ -108,10 +120,11 @@ truth map and the Blueprint-owned code graph:
   `.blueprint/manifest.json` `entrypoint` field point at the portable machine manifest;
   humans read the two generated docs.
 
-The implementation is still **PARTIAL** for final whole-repository understanding until larger
-language/parser coverage, doc-code contradiction joins, and optional visual explorer work are
-hardened. Do not advertise an interactive visual explorer or raw graph ingestion into MemRight as
-live. The implementation plan-of-record is
+The implementation is still **PARTIAL** for final whole-repository understanding because the
+provider is deterministic lexical extraction rather than compiler/AST coverage for every language,
+and schema-specific GraphQL/SQL relationships, doc-code contradiction joins, and optional visual
+explorer work remain incomplete. Do not advertise an interactive visual explorer or raw graph
+ingestion into MemRight as live. The implementation plan-of-record is
 `D:/Claude/docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`; the qualification
 evidence is `D:/Claude/docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
 
@@ -123,6 +136,8 @@ From the repo root:
 blueprint            # build/refresh map.json, .blueprint/manifest.json, generated docs, etc.
 blueprint "<task>"   # also writes a task-scoped runs/<ts>-<task>/TASK-BRIEF.md
 blueprint doctor     # validate graph integrity, list missing refs; --json emits typed state
+blueprint hygiene status --json
+blueprint hygiene refresh --json  # targeted reusable facts; network-backed checks are timestamped
 ```
 
 The bare `blueprint` command runs **Phase 1 only** — it exits after writing the map, so an agent that just runs the command naturally stops there. That is the right stopping point ONLY for a quick task-scoped brief (read `TASK-BRIEF.md` and go).

@@ -10,10 +10,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+  CODE_EXTENSIONS,
+  PARSED_LANGUAGE_EXTENSIONS,
+  containsCall,
+  extractImports,
+  extractSymbols,
+} from "./language-extractors.mjs";
 
 const PROVIDER = {
   id: "blueprint-static",
-  version: "repo-local-deterministic-v0",
+  version: "repo-local-deterministic-v1",
   license: "workspace-owned",
 };
 
@@ -57,6 +64,7 @@ const IGNORED = new Set([
   "dist",
   "build",
   "out",
+  "vendor",
   ".serverless",
 ]);
 const IGNORED_FILE_NAMES = new Set([
@@ -67,19 +75,24 @@ const IGNORED_FILE_NAMES = new Set([
   "product.md",
   "architecture.md",
 ]);
-const CODE_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs"]);
-const PARSED_LANGUAGE_EXTENSIONS = [...CODE_EXTENSIONS].sort();
 // Extensions that are tracked as file nodes without symbol/import extraction.
 // These do NOT trigger `degraded` because the provider handles them honestly.
 const FILE_ONLY_EXTENSIONS = new Set([
   "md", "markdown", "txt",
   "json", "jsonl", "yaml", "yml", "toml",
   "html", "css", "svg",
-  "sh", "ps1", "bat",
   "sql", "csv", "tsv",
   "xml",
 ]);
-const SUPPORTED_EXTENSIONS = new Set([...CODE_EXTENSIONS, ...FILE_ONLY_EXTENSIONS]);
+const OPAQUE_FILE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp", "gif", "ico", "bmp", "avif",
+  "ttf", "otf", "woff", "woff2",
+  "wav", "mp3", "flac", "ogg", "mp4", "mov", "webm",
+  "pdf", "zip", "gz", "tar", "dmg", "exe", "dll", "so", "dylib", "wasm", "pdb",
+  "onnx", "safetensors", "gguf", "bin",
+  "mtlx", "tres", "srt", "lock", "hash", "sha256", "gitignore",
+]);
+const SUPPORTED_EXTENSIONS = new Set([...CODE_EXTENSIONS, ...FILE_ONLY_EXTENSIONS, ...OPAQUE_FILE_EXTENSIONS]);
 
 export function scanSourcesPublic(root, fileLimit = 0, walkOptions = {}) {
   return scanSources(root, fileLimit, walkOptions);
@@ -149,15 +162,18 @@ export function graphStatus(repoRoot, outDir, options = {}) {
       }
     }
   }
-  const fresh = scanned && !scanTruncated ? manifest.repo?.sourceHash === currentHash : true;
+  const providerMismatch = manifest.provider?.id !== PROVIDER.id || manifest.provider?.version !== PROVIDER.version;
+  const fresh = !providerMismatch && (scanned && !scanTruncated ? manifest.repo?.sourceHash === currentHash : true);
   return {
     state: scanTruncated ? "indeterminate" : fresh ? "fresh" : "stale",
     manifestPath,
     manifest,
+    providerMismatch,
     scanTruncated,
     truncationReasons: sources.truncationReasons,
     capabilities: {
       parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
+      opaqueFileExtensions: [...OPAQUE_FILE_EXTENSIONS].sort(),
       unsupportedExtensions: [...unsupportedExtensions].sort(),
       unsupportedFileCount,
       dirtyOverlayFileCount,
@@ -171,7 +187,9 @@ export function graphCapabilities() {
     provider: PROVIDER,
     languageCoverage: {
       parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
-      fallback: "All non-binary text files under 2 MiB are represented as file nodes; unsupported languages do not get symbol/call extraction.",
+      opaqueFileExtensions: [...OPAQUE_FILE_EXTENSIONS].sort(),
+      parserMode: "deterministic-lexical-v1",
+      fallback: "Text/config and known opaque assets are represented as file nodes; unsupported source languages do not get symbol/call extraction.",
       ignoredDirectories: [...IGNORED].sort(),
       maxFileBytes: 2 * 1024 * 1024,
     },
@@ -898,66 +916,44 @@ function walk(root, options = {}) {
   return { paths: iteratePaths(), state, reasons };
 }
 
-function extractSymbols(file, addNode) {
-  const classStack = [];
-  for (let index = 0; index < file.lines.length; index += 1) {
-    const line = file.lines[index];
-    const lineNo = index + 1;
-    const classMatch = line.match(/^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/);
-    if (classMatch) {
-      const name = classMatch[1];
-      const endLine = findBlockEnd(file.lines, index);
-      classStack.push({ name, endLine });
-      addNode(symbolNode("class", file, name, name, lineNo, endLine));
-      continue;
-    }
-    while (classStack.length && lineNo > classStack.at(-1).endLine) classStack.pop();
-    const functionMatch = line.match(/^\s*(?:export\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/);
-    if (functionMatch) {
-      addNode(symbolNode("symbol", file, functionMatch[1], functionMatch[1], lineNo, findBlockEnd(file.lines, index), ["Function"]));
-    }
-    const constMatch = line.match(/^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\b/);
-    if (constMatch) {
-      addNode(symbolNode("symbol", file, constMatch[1], constMatch[1], lineNo, lineNo, ["Const"]));
-    }
-    const currentClass = classStack.at(-1);
-    const methodMatch = currentClass && line.match(/^\s{2,}([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/);
-    if (methodMatch && methodMatch[1] !== "constructor") {
-      const qualified = `${currentClass.name}.${methodMatch[1]}`;
-      addNode(symbolNode("symbol", file, qualified, qualified, lineNo, findBlockEnd(file.lines, index), ["Method"]));
-    }
-    const testMatch = line.match(/^\s*test\s*\(\s*["']([^"']+)["']/);
-    if (testMatch) {
-      addNode(symbolNode("symbol", file, testMatch[1], testMatch[1], lineNo, findBlockEnd(file.lines, index), ["Test"]));
-    }
-  }
-}
-
-function symbolNode(kind, file, name, qualifiedName, startLine, endLine, labels = ["Symbol"]) {
-  return {
-    id: `symbol:${file.path}::${qualifiedName}`,
-    kind,
-    labels,
-    name,
-    qualifiedName,
-    path: file.path,
-    evidence: [fileEvidence(file, startLine, endLine)],
-  };
-}
-
 function addCallEdges(files, nodes, edges) {
   const targets = nodes.filter((node) => node.kind === "symbol" && ["Method", "Function"].some((label) => node.labels.includes(label)));
   const sources = nodes.filter((node) => node.kind === "symbol" && ["Method", "Function", "Test"].some((label) => node.labels.includes(label)));
+  const targetsByName = new Map();
+  for (const target of targets) {
+    const callName = target.qualifiedName.split(".").at(-1);
+    const matches = targetsByName.get(callName) ?? [];
+    matches.push(target);
+    targetsByName.set(callName, matches);
+  }
+  const importsByPath = new Map();
+  for (const importEdge of edges.filter((item) => item.kind === "IMPORTS")) {
+    const sourcePath = importEdge.source.replace(/^file:/, "");
+    const targetPath = importEdge.target.replace(/^file:/, "");
+    const imported = importsByPath.get(sourcePath) ?? new Set();
+    imported.add(targetPath);
+    importsByPath.set(sourcePath, imported);
+  }
   for (const source of sources) {
     const file = files.find((item) => item.path === source.path);
     if (!file) continue;
     const ev = source.evidence[0];
     const body = file.lines.slice(ev.startLine - 1, ev.endLine).join("\n");
-    for (const target of targets) {
-      if (source.id === target.id) continue;
-      const callName = target.qualifiedName.split(".").at(-1);
-      if (!new RegExp(`(?:\\.|\\b)${escapeRegExp(callName)}\\s*\\(`).test(body)) continue;
-      edges.push(edge(source.labels.includes("Test") ? "TESTS" : "CALLS", source, target, source.evidence));
+    for (const [callName, namedTargets] of targetsByName) {
+      if (!containsCall(file, body, callName)) continue;
+      const sameFile = namedTargets.filter((target) => target.path === source.path && target.id !== source.id);
+      const importedPaths = importsByPath.get(source.path) ?? new Set();
+      const imported = namedTargets.filter((target) => importedPaths.has(target.path) && target.id !== source.id);
+      const resolvedTargets = sameFile.length > 0
+        ? sameFile
+        : imported.length > 0
+          ? imported
+          : namedTargets.length === 1 && namedTargets[0].id !== source.id
+            ? namedTargets
+            : [];
+      for (const target of resolvedTargets) {
+        edges.push(edge(source.labels.includes("Test") ? "TESTS" : "CALLS", source, target, source.evidence));
+      }
     }
   }
 }
@@ -973,25 +969,6 @@ function addConfigEdges(files, nodes, edges) {
       if (target) edges.push(edge("CONFIGURES", source, target, source.evidence));
     }
   }
-}
-
-function extractImports(file, files) {
-  const imports = [];
-  const baseDir = file.path.split("/").slice(0, -1);
-  for (const match of file.text.matchAll(/import(?:\s+type)?[\s\S]*?\sfrom\s+["']([^"']+)["']/g)) {
-    const specifier = match[1];
-    if (!specifier.startsWith(".")) continue;
-    const raw = [...baseDir, ...specifier.split("/")].filter((part) => part && part !== ".");
-    const parts = [];
-    for (const part of raw) {
-      if (part === "..") parts.pop();
-      else parts.push(part);
-    }
-    const base = parts.join("/").replace(/\.(js|jsx|mjs|cjs)$/, "");
-    const found = files.find((candidate) => [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}/index.ts`].includes(candidate.path));
-    if (found) imports.push(found.path);
-  }
-  return imports;
 }
 
 function edge(kind, source, target, evidence) {
@@ -1014,23 +991,6 @@ function evidenceFresh(generation, evidence) {
     const file = generation.nodes.find((node) => node.kind === "file" && node.path === item.path);
     return file?.evidence?.[0]?.contentHash === item.contentHash;
   });
-}
-
-function findBlockEnd(lines, startIndex) {
-  let depth = 0;
-  let seenOpen = false;
-  for (let index = startIndex; index < lines.length; index += 1) {
-    for (const char of lines[index]) {
-      if (char === "{") {
-        depth += 1;
-        seenOpen = true;
-      } else if (char === "}") {
-        depth -= 1;
-        if (seenOpen && depth <= 0) return index + 1;
-      }
-    }
-  }
-  return startIndex + 1;
 }
 
 function scoreNode(node, terms) {

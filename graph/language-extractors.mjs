@@ -1,0 +1,342 @@
+const JAVASCRIPT_EXTENSIONS = new Set(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]);
+const COMPONENT_EXTENSIONS = new Set(["vue", "astro"]);
+const SCRIPT_EXTENSIONS = new Set(["sh", "ps1", "bat", "vbs"]);
+
+export const CODE_EXTENSIONS = new Set([
+  ...JAVASCRIPT_EXTENSIONS,
+  ...COMPONENT_EXTENSIONS,
+  ...SCRIPT_EXTENSIONS,
+  "py",
+  "rs",
+  "swift",
+]);
+export const PARSED_LANGUAGE_EXTENSIONS = [...CODE_EXTENSIONS].sort();
+
+export function extractSymbols(file, addNode) {
+  const extension = file.path.split(".").at(-1)?.toLowerCase();
+  if (extension === "py") return extractPythonSymbols(file, addNode);
+  if (extension === "rs") return extractRustSymbols(file, addNode);
+  if (extension === "swift") return extractSwiftSymbols(file, addNode);
+  if (SCRIPT_EXTENSIONS.has(extension)) return extractScriptSymbols(file, extension, addNode);
+  return extractJavaScriptSymbols(file, addNode);
+}
+
+function extractJavaScriptSymbols(file, addNode) {
+  const classStack = [];
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const lineNo = index + 1;
+    const classMatch = line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/);
+    if (classMatch) {
+      const name = classMatch[1];
+      const endLine = findBlockEnd(file.lines, index);
+      classStack.push({ name, endLine });
+      addNode(symbolNode("class", file, name, name, lineNo, endLine));
+      continue;
+    }
+    while (classStack.length && lineNo > classStack.at(-1).endLine) classStack.pop();
+    const functionMatch = line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/);
+    if (functionMatch) {
+      addNode(symbolNode("symbol", file, functionMatch[1], functionMatch[1], lineNo, findBlockEnd(file.lines, index), ["Function"]));
+    }
+    const arrowMatch = line.match(/^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/);
+    if (arrowMatch) {
+      addNode(symbolNode("symbol", file, arrowMatch[1], arrowMatch[1], lineNo, findBlockEnd(file.lines, index), ["Function"]));
+    }
+    const constMatch = !arrowMatch && line.match(/^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\b/);
+    if (constMatch) {
+      addNode(symbolNode("symbol", file, constMatch[1], constMatch[1], lineNo, lineNo, ["Const"]));
+    }
+    const typeMatch = line.match(/^\s*(?:export\s+)?(?:declare\s+)?(interface|type|enum)\s+([A-Za-z_$][\w$]*)\b/);
+    if (typeMatch) {
+      const [, typeKind, name] = typeMatch;
+      const label = typeKind === "type" ? "TypeAlias" : `${typeKind[0].toUpperCase()}${typeKind.slice(1)}`;
+      addNode(symbolNode("symbol", file, name, name, lineNo, typeKind === "type" ? lineNo : findBlockEnd(file.lines, index), [label]));
+    }
+    const currentClass = classStack.at(-1);
+    const methodMatch = currentClass && line.match(/^\s{2,}(?:(?:public|private|protected|static|abstract|async|readonly|override|get|set)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*\([^)]*\)\s*(?::[^\{]+)?\s*\{/);
+    const nonMethods = new Set(["constructor", "if", "for", "while", "switch", "catch"]);
+    if (methodMatch && !nonMethods.has(methodMatch[1])) {
+      const qualified = `${currentClass.name}.${methodMatch[1]}`;
+      addNode(symbolNode("symbol", file, qualified, qualified, lineNo, findBlockEnd(file.lines, index), ["Method"]));
+    }
+    const testMatch = line.match(/^\s*test\s*\(\s*["']([^"']+)["']/);
+    if (testMatch) {
+      addNode(symbolNode("symbol", file, testMatch[1], testMatch[1], lineNo, findBlockEnd(file.lines, index), ["Test"]));
+    }
+  }
+}
+
+function extractPythonSymbols(file, addNode) {
+  const classStack = [];
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const lineNo = index + 1;
+    const indent = leadingWhitespace(line);
+    while (classStack.length && indent <= classStack.at(-1).indent) classStack.pop();
+    const classMatch = line.match(/^\s*class\s+([A-Za-z_]\w*)\b/);
+    if (classMatch) {
+      const name = classMatch[1];
+      const parent = classStack.map((entry) => entry.name).join(".");
+      const qualified = parent ? `${parent}.${name}` : name;
+      addNode(symbolNode("class", file, name, qualified, lineNo, findPythonBlockEnd(file.lines, index), ["Class"]));
+      classStack.push({ name, indent });
+      continue;
+    }
+    const functionMatch = line.match(/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/);
+    if (!functionMatch) continue;
+    const name = functionMatch[1];
+    const currentClass = classStack.at(-1);
+    const qualified = currentClass ? `${classStack.map((entry) => entry.name).join(".")}.${name}` : name;
+    addNode(symbolNode("symbol", file, name, qualified, lineNo, findPythonBlockEnd(file.lines, index), [currentClass ? "Method" : "Function"]));
+  }
+}
+
+function extractRustSymbols(file, addNode) {
+  const implStack = [];
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const lineNo = index + 1;
+    while (implStack.length && lineNo > implStack.at(-1).endLine) implStack.pop();
+    const typeMatch = line.match(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(struct|enum|trait)\s+([A-Za-z_]\w*)\b/);
+    if (typeMatch) {
+      const [, typeKind, name] = typeMatch;
+      addNode(symbolNode("class", file, name, name, lineNo, findBlockEnd(file.lines, index), ["Class", titleCase(typeKind)]));
+    }
+    const implMatch = line.match(/^\s*impl(?:\s*<[^>]+>)?\s+(?:(?:[A-Za-z_]\w*(?:::\w+)*)(?:<[^>]+>)?\s+for\s+)?([A-Za-z_]\w*(?:::\w+)*)(?:<[^>]+>)?\s*\{/);
+    if (implMatch) {
+      implStack.push({ name: implMatch[1].split("::").at(-1), endLine: findBlockEnd(file.lines, index) });
+      continue;
+    }
+    const functionMatch = line.match(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+(?:"[^"]+"\s+)?)?fn\s+([A-Za-z_]\w*)\s*(?:<[^>]+>)?\s*\(/);
+    if (!functionMatch) continue;
+    const name = functionMatch[1];
+    const currentImpl = implStack.at(-1);
+    const qualified = currentImpl ? `${currentImpl.name}.${name}` : name;
+    addNode(symbolNode("symbol", file, name, qualified, lineNo, findBlockEnd(file.lines, index), [currentImpl ? "Method" : "Function"]));
+  }
+}
+
+function extractSwiftSymbols(file, addNode) {
+  const typeStack = [];
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const lineNo = index + 1;
+    while (typeStack.length && lineNo > typeStack.at(-1).endLine) typeStack.pop();
+    const modifiers = "(?:(?:public|private|internal|fileprivate|open|final|indirect|nonisolated)\\s+)*";
+    const typeMatch = line.match(new RegExp(`^\\s*${modifiers}(class|struct|enum|protocol|actor)\\s+([A-Za-z_]\\w*)\\b`));
+    if (typeMatch) {
+      const [, typeKind, name] = typeMatch;
+      const endLine = findBlockEnd(file.lines, index);
+      addNode(symbolNode("class", file, name, name, lineNo, endLine, ["Class", titleCase(typeKind)]));
+      typeStack.push({ name, endLine });
+      continue;
+    }
+    const extensionMatch = line.match(/^\s*extension\s+([A-Za-z_]\w*)\b[^\{]*\{/);
+    if (extensionMatch) {
+      typeStack.push({ name: extensionMatch[1], endLine: findBlockEnd(file.lines, index) });
+      continue;
+    }
+    const functionMatch = line.match(/^\s*(?:(?:public|private|internal|fileprivate|open|final|static|class|mutating|nonmutating|override|required|convenience|nonisolated)\s+)*func\s+([A-Za-z_]\w*)\s*(?:<[^>]+>)?\s*\(/);
+    if (!functionMatch) continue;
+    const name = functionMatch[1];
+    const currentType = typeStack.at(-1);
+    const qualified = currentType ? `${currentType.name}.${name}` : name;
+    addNode(symbolNode("symbol", file, name, qualified, lineNo, findBlockEnd(file.lines, index), [currentType ? "Method" : "Function"]));
+  }
+}
+
+function extractScriptSymbols(file, extension, addNode) {
+  for (let index = 0; index < file.lines.length; index += 1) {
+    const line = file.lines[index];
+    const lineNo = index + 1;
+    if (extension === "sh") {
+      const match = line.match(/^\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*(?:\(\s*\))?\s*\{/);
+      if (match) addNode(symbolNode("symbol", file, match[1], match[1], lineNo, findBlockEnd(file.lines, index), ["Function"]));
+    } else if (extension === "ps1") {
+      const match = line.match(/^\s*function\s+([A-Za-z_][\w-]*)\b[^\{]*\{/i);
+      if (match) addNode(symbolNode("symbol", file, match[1], match[1], lineNo, findBlockEnd(file.lines, index), ["Function"]));
+    } else if (extension === "bat") {
+      const match = line.match(/^:([A-Za-z_][\w.-]*)\s*$/);
+      if (match) addNode(symbolNode("symbol", file, match[1], match[1], lineNo, findBatchBlockEnd(file.lines, index), ["Function"]));
+    } else if (extension === "vbs") {
+      const match = line.match(/^\s*(?:(?:Public|Private)\s+)?(?:Sub|Function)\s+([A-Za-z_]\w*)\b/i);
+      if (match) addNode(symbolNode("symbol", file, match[1], match[1], lineNo, findVbsBlockEnd(file.lines, index), ["Function"]));
+    }
+  }
+}
+
+export function extractImports(file, files) {
+  const extension = file.path.split(".").at(-1)?.toLowerCase();
+  if (extension === "py") return extractPythonImports(file, files);
+  if (extension === "rs") return extractRustImports(file, files);
+  if (["sh", "ps1", "bat"].includes(extension)) return extractScriptImports(file, files, extension);
+  return extractJavaScriptImports(file, files);
+}
+
+function extractJavaScriptImports(file, files) {
+  const imports = new Set();
+  const baseDir = file.path.split("/").slice(0, -1);
+  const specifiers = [
+    ...[...file.text.matchAll(/(?:import|export)(?:\s+type)?[\s\S]*?\sfrom\s+["']([^"']+)["']/g)].map((match) => match[1]),
+    ...[...file.text.matchAll(/import\s*["']([^"']+)["']/g)].map((match) => match[1]),
+    ...[...file.text.matchAll(/require\s*\(\s*["']([^"']+)["']\s*\)/g)].map((match) => match[1]),
+  ];
+  for (const specifier of specifiers) {
+    if (!specifier.startsWith(".")) continue;
+    const raw = [...baseDir, ...specifier.split("/")].filter((part) => part && part !== ".");
+    const parts = [];
+    for (const part of raw) part === ".." ? parts.pop() : parts.push(part);
+    const base = parts.join("/").replace(/\.(js|jsx|mjs|cjs)$/, "");
+    const candidates = [
+      base,
+      ...["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "astro"].map((extension) => `${base}.${extension}`),
+      ...["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"].map((extension) => `${base}/index.${extension}`),
+    ];
+    const found = files.find((candidate) => candidates.includes(candidate.path));
+    if (found) imports.add(found.path);
+  }
+  return [...imports];
+}
+
+function extractPythonImports(file, files) {
+  const imports = new Set();
+  const baseDir = file.path.split("/").slice(0, -1);
+  for (const line of file.lines) {
+    const fromMatch = line.match(/^\s*from\s+([.A-Za-z_]\w*(?:\.\w+)*)\s+import\s+/);
+    const importMatch = line.match(/^\s*import\s+([A-Za-z_]\w*(?:\.\w+)*)/);
+    const moduleName = fromMatch?.[1] ?? importMatch?.[1];
+    if (!moduleName) continue;
+    const leadingDots = moduleName.match(/^\.+/)?.[0].length ?? 0;
+    const moduleParts = moduleName.slice(leadingDots).split(".").filter(Boolean);
+    const relativeBase = leadingDots > 0 ? baseDir.slice(0, Math.max(0, baseDir.length - (leadingDots - 1))) : [];
+    const candidateBase = [...relativeBase, ...moduleParts].join("/");
+    const candidates = [`${candidateBase}.py`, `${candidateBase}/__init__.py`, ...suffixModuleCandidates(files, moduleParts, "py")];
+    const found = candidates.find((candidate) => files.some((item) => item.path === candidate));
+    if (found && found !== file.path) imports.add(found);
+  }
+  return [...imports];
+}
+
+function extractRustImports(file, files) {
+  const imports = new Set();
+  const baseDir = file.path.split("/").slice(0, -1);
+  for (const line of file.lines) {
+    const moduleMatch = line.match(/^\s*(?:pub\s+)?mod\s+([A-Za-z_]\w*)\s*;/);
+    if (moduleMatch) {
+      const name = moduleMatch[1];
+      const candidates = [[...baseDir, `${name}.rs`].join("/"), [...baseDir, name, "mod.rs"].join("/")];
+      const found = candidates.find((candidate) => files.some((item) => item.path === candidate));
+      if (found) imports.add(found);
+      continue;
+    }
+    const useMatch = line.match(/^\s*(?:pub\s+)?use\s+(?:(?:crate|self|super)::)?([A-Za-z_]\w*)/);
+    if (!useMatch) continue;
+    const found = suffixModuleCandidates(files, [useMatch[1]], "rs").find((candidate) => candidate !== file.path);
+    if (found) imports.add(found);
+  }
+  return [...imports];
+}
+
+function extractScriptImports(file, files, extension) {
+  const imports = new Set();
+  for (const line of file.lines) {
+    let specifier = null;
+    if (extension === "sh") specifier = line.match(/^\s*(?:source|\.)\s+["']?([^"'\s]+)["']?/)?.[1] ?? null;
+    else if (extension === "ps1") {
+      specifier = line.match(/^\s*\.\s+["']?([^"'\s]+)["']?/)?.[1] ?? null;
+      specifier = specifier?.replace(/^\$PSScriptRoot[\\/]/i, "./") ?? null;
+    } else if (extension === "bat") specifier = line.match(/^\s*call\s+["']?([^:"'\s][^"'\s]*\.bat)["']?/i)?.[1] ?? null;
+    if (!specifier) continue;
+    const resolved = resolveRelativeFile(file.path, specifier, files);
+    if (resolved && resolved !== file.path) imports.add(resolved);
+  }
+  return [...imports];
+}
+
+export function containsCall(file, body, callName) {
+  const extension = file.path.split(".").at(-1)?.toLowerCase();
+  const escaped = escapeRegExp(callName);
+  if (extension === "sh" || extension === "ps1") return new RegExp(`(?:^|[\\s;&|])${escaped}(?=\\s|$)`, "m").test(body);
+  if (extension === "bat") return new RegExp(`\\bcall\\s+:${escaped}\\b`, "i").test(body);
+  if (extension === "vbs") return new RegExp(`\\b(?:Call\\s+)?${escaped}\\s*\\(`, "i").test(body);
+  return new RegExp(`(?:\\.|\\b)${escaped}\\s*\\(`).test(body);
+}
+
+function symbolNode(kind, file, name, qualifiedName, startLine, endLine, labels = ["Symbol"]) {
+  return {
+    id: `symbol:${file.path}::${qualifiedName}`,
+    kind,
+    labels,
+    name,
+    qualifiedName,
+    path: file.path,
+    evidence: [{ path: file.path, startLine, endLine, contentHash: file.contentHash }],
+  };
+}
+
+function resolveRelativeFile(sourcePath, specifier, files) {
+  const baseDir = sourcePath.split("/").slice(0, -1);
+  const raw = [...baseDir, ...normalizePath(specifier).split("/")].filter((part) => part && part !== ".");
+  const parts = [];
+  for (const part of raw) part === ".." ? parts.pop() : parts.push(part);
+  const candidate = parts.join("/");
+  return files.some((file) => file.path === candidate) ? candidate : null;
+}
+
+function suffixModuleCandidates(files, moduleParts, extension) {
+  const suffixes = [`${moduleParts.join("/")}.${extension}`, `${moduleParts.join("/")}/${extension === "py" ? "__init__.py" : "mod.rs"}`];
+  return files.map((item) => item.path).filter((candidate) => suffixes.some((suffix) => candidate === suffix || candidate.endsWith(`/${suffix}`))).sort();
+}
+
+function findBlockEnd(lines, startIndex) {
+  let depth = 0;
+  let seenOpen = false;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    for (const char of lines[index]) {
+      if (char === "{") { depth += 1; seenOpen = true; }
+      else if (char === "}") { depth -= 1; if (seenOpen && depth <= 0) return index + 1; }
+    }
+  }
+  return startIndex + 1;
+}
+
+function findPythonBlockEnd(lines, startIndex) {
+  const startIndent = leadingWhitespace(lines[startIndex]);
+  let endLine = startIndex + 1;
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    if (leadingWhitespace(line) <= startIndent) break;
+    endLine = index + 1;
+  }
+  return endLine;
+}
+
+function findBatchBlockEnd(lines, startIndex) {
+  for (let index = startIndex + 1; index < lines.length; index += 1) if (/^:[A-Za-z_][\w.-]*\s*$/.test(lines[index])) return index;
+  return lines.length;
+}
+
+function findVbsBlockEnd(lines, startIndex) {
+  for (let index = startIndex + 1; index < lines.length; index += 1) if (/^\s*End\s+(?:Sub|Function)\b/i.test(lines[index])) return index + 1;
+  return startIndex + 1;
+}
+
+function leadingWhitespace(line) {
+  return line.match(/^\s*/)?.[0].replaceAll("\t", "    ").length ?? 0;
+}
+
+function titleCase(value) {
+  return value[0].toUpperCase() + value.slice(1);
+}
+
+function normalizePath(value) {
+  return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

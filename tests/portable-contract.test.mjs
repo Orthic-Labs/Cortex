@@ -301,11 +301,11 @@ test("graphStatus detects dirty overlays when files have been modified post-buil
 test("doctor reports degraded with machine-readable reasons for unsupported languages", () => {
   const repo = copyFixture();
   try {
-    // Drop a Python file into the checkout BEFORE the first build so the
+    // Drop an unsupported Go file into the checkout BEFORE the first build so the
     // recorded sourceHash already includes the unsupported extension.
-    const pyDir = path.join(repo, "py-src");
-    fs.mkdirSync(pyDir, { recursive: true });
-    fs.writeFileSync(path.join(pyDir, "thing.py"), "def hello(): return 'world'\n");
+    const goDir = path.join(repo, "go-src");
+    fs.mkdirSync(goDir, { recursive: true });
+    fs.writeFileSync(path.join(goDir, "thing.go"), "package thing\n\nfunc hello() string { return \"world\" }\n");
     spawnBuild(repo, ".agent");
 
     const payload = JSON.parse(spawnDoc(repo, ".agent"));

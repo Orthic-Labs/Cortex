@@ -31,6 +31,19 @@ import { generateDocs } from "../lib/generated-docs.mjs";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
 const CONTEXT_BUDGET_LOG = resolve(SCRIPT_DIR, "../../../.cache/metrics/context-budget.jsonl");
+const AUDIT_FACT_COLLECTOR = resolve(SCRIPT_DIR, "../../audit/collect-facts.mjs");
+const DEFAULT_HYGIENE_CHECKS = [
+  "decomposition",
+  "dead_code",
+  "duplication",
+  "outdated",
+  "cargo_outdated",
+  "binary_pins",
+  "debt_markers",
+  "dep_pinning",
+  "negative_space",
+];
+const NETWORK_ONLY_HYGIENE_CHECKS = new Set(["outdated", "cargo_outdated"]);
 
 const DEFAULT_OUT = ".agent";
 const SCHEMA_VERSION = 1;
@@ -94,6 +107,7 @@ function usage() {
   ${command} build [--out .agent] [--limit N] [--check] [--no-readme-link]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
   ${command} doctor [--out .agent] [--json] [--limit N]
+  ${command} hygiene status|refresh [--out .agent] [--only check,...] [--offline] [--json]
   ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N]
 `);
 }
@@ -113,7 +127,7 @@ function parseArgs(argv) {
     const [key, inline] = arg.slice(2).split("=", 2);
     if (inline !== undefined) {
       args[key] = inline;
-    } else if (["check", "refresh", "complete", "json", "no-readme-link"].includes(key)) {
+    } else if (["check", "refresh", "complete", "json", "offline", "no-readme-link"].includes(key)) {
       args[key] = true;
     } else {
       args[key] = argv[++i];
@@ -1097,11 +1111,16 @@ function doctor(root, outDir, options = {}) {
   }
   const graph = graphStatus(root, outDir);
   if (graph.state === "stale") {
-    warnings.push("graph manifest source hash is stale relative to current files");
+    warnings.push(graph.providerMismatch
+      ? "graph manifest was built by an older Blueprint provider and must be rebuilt"
+      : "graph manifest source hash is stale relative to current files");
     reasons.push({
       code: "stale_graph",
       severity: "blocker",
-      message: "graph manifest sourceHash does not match current source tree; rebuild required.",
+      providerMismatch: Boolean(graph.providerMismatch),
+      message: graph.providerMismatch
+        ? "graph provider version does not match the installed Blueprint extractor; rebuild required."
+        : "graph manifest sourceHash does not match current source tree; rebuild required.",
     });
   }
   if (graph.state === "indeterminate") {
@@ -1373,6 +1392,118 @@ function runMapAndPrint(root, outDir, args = {}) {
   return 0;
 }
 
+function hygieneStatus(root, outDir) {
+  const hygieneDir = join(root, outDir, "hygiene");
+  const manifestPath = join(hygieneDir, "manifest.json");
+  const factsPath = join(hygieneDir, "facts.json");
+  if (!existsSync(manifestPath) || !existsSync(factsPath)) {
+    return { schemaVersion: 1, kind: "blueprint-hygiene", state: "missing", manifestPath: normalizePath(relative(root, manifestPath)) };
+  }
+  const manifest = readJson(manifestPath, null);
+  const graph = graphStatus(root, outDir);
+  const generationMatches = graph.manifest?.generationId === manifest?.sourceGenerationId;
+  const state = graph.state === "fresh" && generationMatches ? "fresh" : "stale";
+  return {
+    ...manifest,
+    state,
+    graphState: graph.state,
+    generationMatches,
+  };
+}
+
+function refreshHygiene(root, outDir, args) {
+  const graph = graphStatus(root, outDir);
+  if (graph.state !== "fresh") {
+    return {
+      schemaVersion: 1,
+      kind: "blueprint-hygiene",
+      state: graph.state === "missing" ? "missing" : "stale",
+      graphState: graph.state,
+      error: "fresh Blueprint graph required before hygiene refresh",
+    };
+  }
+  const selectedChecks = String(args.only ?? DEFAULT_HYGIENE_CHECKS.join(","))
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!selectedChecks.length || selectedChecks.some((value) => !/^[a-z0-9_]+$/.test(value))) {
+    throw new Error("hygiene --only must be a comma-separated list of check identifiers");
+  }
+  const hygieneDir = join(root, outDir, "hygiene");
+  mkdirSync(hygieneDir, { recursive: true });
+  const collectorChecks = args.offline
+    ? selectedChecks.filter((check) => !NETWORK_ONLY_HYGIENE_CHECKS.has(check))
+    : selectedChecks;
+  if (collectorChecks.length > 0) {
+    execFileSync(process.execPath, [
+      AUDIT_FACT_COLLECTOR,
+      root,
+      "--out",
+      hygieneDir,
+      "--only",
+      collectorChecks.join(","),
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: args.offline ? { ...process.env, AUDIT_OFFLINE: "1" } : process.env,
+    });
+  }
+  const factsPath = join(hygieneDir, "facts.json");
+  const facts = collectorChecks.length > 0
+    ? readJson(factsPath, null)
+    : { kind: "audit-facts", generated_at: new Date().toISOString(), workspace: root, checks: [] };
+  if (!facts?.checks) throw new Error("hygiene collector did not emit facts.json");
+  for (const check of selectedChecks.filter((value) => args.offline && NETWORK_ONLY_HYGIENE_CHECKS.has(value))) {
+    facts.checks.push({
+      check,
+      tool: check === "outdated" ? "package-manager outdated" : "cargo-outdated",
+      required: false,
+      command: null,
+      exit_code: null,
+      status: "skipped",
+      skip_reason: "offline mode",
+      findings_count: null,
+      duration_ms: 0,
+      meta: null,
+      log: "",
+      tool_absent: false,
+    });
+  }
+  facts.checks.sort((left, right) => selectedChecks.indexOf(left.check) - selectedChecks.indexOf(right.check));
+  writeJson(factsPath, facts);
+  const selected = facts.checks.filter((check) => selectedChecks.includes(check.check));
+  const manifest = {
+    schemaVersion: 1,
+    kind: "blueprint-hygiene",
+    state: "fresh",
+    sourceGenerationId: graph.manifest.generationId,
+    sourceHash: graph.manifest.repo?.sourceHash ?? null,
+    provider: graph.manifest.provider,
+    refreshedAt: facts.generated_at,
+    selectedChecks,
+    factsPath: normalizePath(relative(root, factsPath)),
+    checks: selected,
+  };
+  writeJson(join(hygieneDir, "manifest.json"), manifest);
+  return manifest;
+}
+
+function runHygieneCommand(root, outDir, subcommand, args) {
+  const result = subcommand === "refresh"
+    ? refreshHygiene(root, outDir, args)
+    : subcommand === "status"
+      ? hygieneStatus(root, outDir)
+      : null;
+  if (!result) {
+    usage();
+    return 1;
+  }
+  if (args.json) console.log(JSON.stringify(result, null, 2));
+  else console.log(`hygiene ${result.state} checks=${result.checks?.length ?? 0} generation=${result.sourceGenerationId ?? "none"}`);
+  return result.state === "fresh" ? 0 : 2;
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const [command, ...rest] = argv;
@@ -1385,7 +1516,7 @@ function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -1405,6 +1536,11 @@ function main() {
     const [subcommand, ...graphRest] = rest;
     const graphArgs = parseArgs(graphRest);
     return runGraphCommand(root, outDir, subcommand, graphArgs);
+  }
+  if (command === "hygiene") {
+    const [subcommand, ...hygieneRest] = rest;
+    const hygieneArgs = parseArgs(hygieneRest);
+    return runHygieneCommand(root, outDir, subcommand, hygieneArgs);
   }
   if (command === "build") {
     const result = build(root, outDir, args);
