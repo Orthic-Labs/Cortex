@@ -539,10 +539,18 @@ function classifyJoin(claim, doc, codeRef, codeNode) {
 }
 
 function buildSupersedesChain(map, joins) {
+  const lifecycleDocs = map.nodes.filter(
+    (node) => node.kind === "doc" && node.lifecycle?.status === "superseded",
+  );
+  const out = lifecycleDocs.map((doc) => ({
+    kind: "supersedes",
+    source: doc.lifecycle.supersededBy ? { doc: doc.lifecycle.supersededBy } : { external: true },
+    target: { doc: doc.path, supersededOn: doc.lifecycle.supersededOn ?? null },
+    evidence: { sourceDoc: doc.path, targetMatch: doc.lifecycle.supersededBy ?? null },
+  }));
   const supersedeClaims = map.nodes.filter(
     (node) => node.kind === "claim" && /\b(supersedes|replaced by|deprecated by)\b/i.test(stripInlineCode(node.text ?? "")),
   );
-  const out = [];
   for (const claim of supersedeClaims) {
     const doc = map.nodes.find((node) => node.kind === "doc" && node.id && map.edges.some((e) => e.type === "contains" && e.from === node.id && e.to === claim.id));
     if (!doc) continue;

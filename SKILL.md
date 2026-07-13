@@ -48,6 +48,35 @@ read the JSON directly; humans read the two generated docs (and the optional REA
 Portable, for any agent (OKF):
 - `okf/` — the understanding layer as an **Open Knowledge Format** bundle (one markdown concept per component/interface/risk; required `type` frontmatter; concepts linked as a graph; auto `index.md`), prose **compressed** structure-safely (refs/code/links preserved). **MANDATORY Phase-2 close — not optional, not agent discretion:** run `py -3.11 D:/Claude/tools/lib/skill_emit.py blueprint <repo>` — it transforms `understanding.json` → OKF concepts (one per dimension; YAML `type` frontmatter) → emits the bundle AND ingests it into the memory engine, recallable immediately. The bare `okf.py emit` is the low-level primitive; skills call `skill_emit`, never okf.py directly. Portable into CodeRight and any OKF-aware agent; the JSON stays the structured source and the generated docs stay the uncompressed human docs. Pattern + before/after: `tools/lib/OKF-OUTPUT.md`.
 
+### Historical-document lifecycle
+
+Superseded documents remain in the map as provenance, but they are not current claims. Mark a wholly
+retired document at the very top with exactly one of these two-line forms:
+
+```markdown
+> Superseded by `repo/relative/source.ext` on YYYY-MM-DD.
+> Retained as historical context; do not treat as current.
+```
+
+```markdown
+> Superseded on YYYY-MM-DD.
+> Historical record of a retired external surface; the live surface is audited separately outside this repository.
+```
+
+The first target must be an indexed repo-relative regular file whose physical path remains inside
+the repo; absolute paths, `../` escapes, symlink/junction escapes, directories, and unindexed targets
+do not retire the document and are emitted in `stale.json.invalidSupersessionMarkers`.
+Blueprint records `doc.lifecycle`, retains a `supersedes` relationship when the canonical source is
+inside the repo, and excludes superseded content from live claims, stale-reference findings, Phase-2
+queues, generated current docs, and task briefs. Paths matching `archiveGlobs` (defaults:
+`docs/archive/`, `docs/history/`) receive the same live-input exclusion with `status: archived`.
+
+Use a whole-document banner only when the entire document is historical. If one row, section, or
+claim is stale, update that claim or add an inline canonical-source pointer; an inline
+`Superseded by` note never retires the whole document. A deployed site whose source moved to another
+repository is outside this repository's Blueprint scope; map that owning repo separately and audit
+the live URL through `audit-visual`.
+
 ## Whole-repository completeness contract
 
 Blueprint's product contract is **whole-repository understanding across code and documents**. A
@@ -244,7 +273,7 @@ Phase 2–4 writes understanding artifacts and documentation after the initial g
 
 ## Tuning
 
-Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. raise `maxReadFirstFiles` if files get crowded out of a brief) and `canonicalDocs`. No code changes needed.
+Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. raise `maxReadFirstFiles` if files get crowded out of a brief), `canonicalDocs`, and `archiveGlobs`. Archive matches remain mapped as historical provenance but are excluded from live claim/brief/reconciliation inputs. No code changes needed.
 
 ## Hard rules
 

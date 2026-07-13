@@ -182,7 +182,14 @@ test("doc-code truth joins are typed and evidence-backed without polluting graph
   const docMap = {
     generatedAt: "2026-07-12T00:00:00.000Z",
     nodes: [
-      { id: "doc.arch", kind: "doc", path: "docs/ARCHITECTURE.md", sha1: "docsha" },
+      { id: "doc.arch", kind: "doc", path: "docs/ARCHITECTURE.md", sha1: "docsha", lifecycle: { status: "current" } },
+      {
+        id: "doc.old",
+        kind: "doc",
+        path: "docs/archive/OLD.md",
+        sha1: "oldsha",
+        lifecycle: { status: "superseded", supersededBy: "docs/ARCHITECTURE.md", supersededOn: "2026-07-13" },
+      },
       { id: "claim.ok", kind: "claim", source: "docs/ARCHITECTURE.md", line: 3, text: "Implemented by `src/store.ts`.", status: "implemented" },
       { id: "claim.stale", kind: "claim", source: "docs/ARCHITECTURE.md", line: 4, text: "Stale Redis persistence claim for `src/store.ts`.", status: "stale" },
       { id: "claim.future", kind: "claim", source: "docs/ARCHITECTURE.md", line: 5, text: "Planned future store.", status: "planned" },
@@ -199,11 +206,17 @@ test("doc-code truth joins are typed and evidence-backed without polluting graph
   };
 
   const truth = buildDocCodeJoins(generation, { docMap });
-  assert.equal(truth.sourceDocMap.docs, 1);
+  assert.equal(truth.sourceDocMap.docs, 2);
   assert.ok(truth.joins.some((join) => join.kind === "supports" && join.target === "file:src/store.ts"));
   assert.ok(truth.joins.some((join) => join.kind === "contradicts" && join.evidence.docRef.line === 4));
   assert.ok(truth.joins.every((join) => join.confidenceClass && join.evidence.codeNode.contentHash === "abc123"));
   assert.ok(!truth.joins.some((join) => join.evidence.codeRef.path === "src/missing.ts"));
+  assert.deepEqual(truth.supersedes, [{
+    kind: "supersedes",
+    source: { doc: "docs/ARCHITECTURE.md" },
+    target: { doc: "docs/archive/OLD.md", supersededOn: "2026-07-13" },
+    evidence: { sourceDoc: "docs/archive/OLD.md", targetMatch: "docs/ARCHITECTURE.md" },
+  }]);
   assert.deepEqual(generation.edges, []);
 });
 

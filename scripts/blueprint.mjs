@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -74,7 +75,7 @@ const TASK_STOP_TERMS = new Set([
 
 const DEFAULT_CONFIG = {
   canonicalDocs: ["AGENTS.md", "CLAUDE.md", "README.md"],
-  archiveGlobs: ["docs/archive/"],
+  archiveGlobs: ["docs/archive/", "docs/history/"],
   budgets: {
     briefMaxLines: 160,
     maxReadFirstFiles: 8,
@@ -168,6 +169,70 @@ function slug(input) {
 
 function normalizePath(path) {
   return path.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function archivePathMatches(path, pattern) {
+  const normalizedPath = normalizePath(path);
+  const normalizedPattern = normalizePath(String(pattern ?? "").trim());
+  if (!normalizedPattern) return false;
+  if (!normalizedPattern.includes("*")) {
+    const prefix = normalizedPattern.endsWith("/") ? normalizedPattern : `${normalizedPattern}/`;
+    return normalizedPath === normalizedPattern.replace(/\/$/, "") || normalizedPath.startsWith(prefix);
+  }
+  const escaped = normalizedPattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replaceAll("**", "\0")
+    .replaceAll("*", "[^/]*")
+    .replaceAll("\0", ".*");
+  return new RegExp(`^${escaped}$`).test(normalizedPath);
+}
+
+function parseDocLifecycle(root, path, lines, allFiles, config) {
+  const firstIndex = lines.findIndex((line) => line.trim().length > 0);
+  const first = firstIndex >= 0 ? lines[firstIndex].replace(/^\uFEFF/, "").trim() : "";
+  const second = firstIndex >= 0 ? (lines[firstIndex + 1] ?? "").trim() : "";
+  const hasRepoHistoricalNote = /^>\s*Retained as historical context; do not treat as current\.\s*$/i.test(second);
+  const hasExternalHistoricalNote = second.startsWith(">")
+    && /historical/i.test(second)
+    && /outside this repository/i.test(second);
+  const targeted = /^>\s*Superseded by\s+`([^`]+)`\s+on\s+(\d{4}-\d{2}-\d{2})\.\s*$/i.exec(first);
+  const external = /^>\s*Superseded on\s+(\d{4}-\d{2}-\d{2})\.\s*$/i.exec(first);
+
+  if (targeted && hasRepoHistoricalNote) {
+    const rawTarget = targeted[1].trim();
+    if (/^(?:[A-Za-z]:[\\/]|[\\/]{1,2})/.test(rawTarget)) {
+      return { status: "current", invalidMarker: { target: rawTarget, reason: "target-absolute" } };
+    }
+    const resolvedTarget = resolve(root, rawTarget);
+    const relativeTarget = normalizePath(relative(root, resolvedTarget));
+    if (!relativeTarget || relativeTarget === ".." || relativeTarget.startsWith("../")) {
+      return { status: "current", invalidMarker: { target: rawTarget, reason: "target-outside-repo" } };
+    }
+    if (!allFiles.has(relativeTarget)) {
+      return { status: "current", invalidMarker: { target: rawTarget, reason: "target-not-indexed" } };
+    }
+    let physicalTarget;
+    try {
+      physicalTarget = realpathSync(resolvedTarget);
+      if (!statSync(physicalTarget).isFile()) {
+        return { status: "current", invalidMarker: { target: rawTarget, reason: "target-not-file" } };
+      }
+    } catch {
+      return { status: "current", invalidMarker: { target: rawTarget, reason: "target-not-indexed" } };
+    }
+    const physicalRelative = normalizePath(relative(realpathSync(root), physicalTarget));
+    if (!physicalRelative || physicalRelative === ".." || physicalRelative.startsWith("../")) {
+      return { status: "current", invalidMarker: { target: rawTarget, reason: "target-outside-repo" } };
+    }
+    return { status: "superseded", supersededBy: relativeTarget, supersededOn: targeted[2] };
+  }
+  if (external && hasExternalHistoricalNote) {
+    return { status: "superseded", supersededBy: null, supersededOn: external[1] };
+  }
+  if ((config?.archiveGlobs ?? []).some((pattern) => archivePathMatches(path, pattern))) {
+    return { status: "archived", supersededBy: null, supersededOn: null };
+  }
+  return { status: "current" };
 }
 
 function repoFiles(root, config, limit = 0) {
@@ -281,6 +346,7 @@ function extractDoc(root, path, allFiles, config) {
     );
   }
   const lines = text.split(/\r?\n/);
+  const lifecycle = parseDocLifecycle(root, path, lines, allFiles, config);
   const headings = [];
   const claims = [];
   const codeRefs = new Set();
@@ -299,6 +365,7 @@ function extractDoc(root, path, allFiles, config) {
       headings.push({ line: i + 1, level: heading[1].length, text: currentHeading });
       continue;
     }
+    if (lifecycle.status !== "current") continue;
     if (!inFence) {
       for (const match of line.matchAll(PATH_RE)) {
         const normalized = normalizePath(match[1]);
@@ -344,6 +411,7 @@ function extractDoc(root, path, allFiles, config) {
     title: headings[0]?.text ?? basename(path),
     sha1: sha1(stableText),
     searchText: truncateText(stableText.replace(/\s+/g, " "), 2400),
+    lifecycle,
     headings,
     claims,
     codeRefs: refs,
@@ -393,9 +461,12 @@ function build(root, outDir, options = {}) {
   const claims = docs.flatMap((doc) => doc.claims);
   const codeRefs = new Map();
   const edges = [];
-  const stale = { missingReferences: [], staleClaims: [] };
+  const stale = { missingReferences: [], staleClaims: [], invalidSupersessionMarkers: [] };
 
   for (const doc of docs) {
+    if (doc.lifecycle?.invalidMarker) {
+      stale.invalidSupersessionMarkers.push({ source: doc.path, ...doc.lifecycle.invalidMarker });
+    }
     for (const claim of doc.claims) {
       edges.push({ from: doc.id, to: claim.id, type: "contains" });
       if (claim.status === "stale") stale.staleClaims.push(claim);
@@ -406,6 +477,20 @@ function build(root, outDir, options = {}) {
       edges.push({ from: doc.id, to: id, type: "mentions-code" });
       if (!ref.exists) stale.missingReferences.push({ source: doc.path, path: ref.path });
     }
+  }
+
+  const docsByPath = new Map(docs.map((doc) => [doc.path, doc]));
+  for (const doc of docs) {
+    const targetPath = doc.lifecycle?.status === "superseded" ? doc.lifecycle.supersededBy : null;
+    if (!targetPath) continue;
+    const targetDoc = docsByPath.get(targetPath);
+    if (targetDoc) {
+      edges.push({ from: targetDoc.id, to: doc.id, type: "supersedes" });
+      continue;
+    }
+    const id = `code.${slug(targetPath)}.${sha1(targetPath).slice(0, 8)}`;
+    codeRefs.set(targetPath, { id, kind: "code_ref", path: targetPath, exists: true });
+    edges.push({ from: id, to: doc.id, type: "supersedes" });
   }
 
   const nodes = [
@@ -680,7 +765,10 @@ function brief(root, outDir, options) {
   const contextBudget = plannedContextBudget(task, root);
   const map = readJson(join(root, outDir, "map.json"), null);
   const taskTerms = taskKeywords(task);
-  const docById = new Map(map.nodes.filter((node) => node.kind === "doc").map((doc) => [doc.id, doc]));
+  const currentDocs = map.nodes.filter(
+    (node) => node.kind === "doc" && (node.lifecycle?.status ?? "current") === "current",
+  );
+  const docById = new Map(currentDocs.map((doc) => [doc.id, doc]));
   const edgesByDoc = new Map();
   for (const edge of map.edges) {
     if (!edgesByDoc.has(edge.from)) edgesByDoc.set(edge.from, []);
@@ -720,7 +808,7 @@ function brief(root, outDir, options) {
     selectedDocs.set(doc.path, doc);
   }
   if (selectedDocs.size === 0) {
-    for (const doc of map.nodes.filter((node) => node.kind === "doc")) {
+    for (const doc of currentDocs) {
       const score = scoreText(taskTerms, `${doc.path} ${doc.title} ${doc.searchText ?? ""}`);
       if (score > 0) selectedDocs.set(doc.path, doc);
     }
