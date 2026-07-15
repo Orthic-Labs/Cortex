@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   opendirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -18,10 +21,11 @@ import {
   extractSymbols,
 } from "./language-extractors.mjs";
 import { addSchemaReferenceEdges } from "./schema-extractors.mjs";
+import { emptyCache, loadParseCache, writeParseCache, nextCache } from "./parse-cache.mjs";
 
 const PROVIDER = {
   id: "blueprint-static",
-  version: "repo-local-deterministic-v2",
+  version: "repo-local-deterministic-v3",
   license: "workspace-owned",
 };
 
@@ -107,8 +111,15 @@ export function buildGraphGeneration(repoRoot, options = {}) {
   const root = resolve(repoRoot);
   const outDir = options.outDir ? resolve(root, options.outDir) : null;
   const source = scanSources(root, options.fileLimit || 0, options);
-  const generation = buildGenerationFromSources(root, source, options);
-  if (outDir) writeGeneration(outDir, generation);
+  // B2 incremental: reuse per-file symbol extraction for byte-identical files.
+  // Resolution (imports/calls/config) still runs globally over the union, so a
+  // rename in a changed file correctly drops a stale edge from an unchanged one.
+  const parseCache = outDir ? loadParseCache(outDir) : emptyCache();
+  const { generation, parseCache: nextParseCache } = buildGenerationFromSources(root, source, { ...options, parseCache });
+  if (outDir) {
+    writeGeneration(outDir, generation);
+    writeParseCache(outDir, nextParseCache);
+  }
   return generation;
 }
 
@@ -191,6 +202,7 @@ export function graphCapabilities() {
       opaqueFileExtensions: [...OPAQUE_FILE_EXTENSIONS].sort(),
       parserMode: "deterministic-lexical-v1",
       fallback: "Text/config and known opaque assets are represented as file nodes; unsupported source languages do not get symbol/call extraction.",
+      gitIgnoreMode: "tracked-plus-unignored",
       ignoredDirectories: [...IGNORED].sort(),
       maxFileBytes: 2 * 1024 * 1024,
     },
@@ -683,6 +695,28 @@ function writeGeneration(outDir, generation) {
   mkdirSync(dirname(tmpManifest), { recursive: true });
   writeJson(tmpManifest, generation.manifest);
   renameSync(tmpManifest, join(graphDir, "manifest.json"));
+  // Exactly one generation on disk. The manifest now points at the current
+  // generation, so every other generation dir is unreachable derived state —
+  // prune it. This is content-addressed output, not a history log; keeping old
+  // generations was unbounded growth that also blocked committing the graph
+  // (each build minted a fresh, un-deltable directory). Publish-then-prune keeps
+  // a reader that already opened the current manifest safe; rmSync(force) ignores
+  // a dir a straggler reader still holds open.
+  pruneGenerations(graphDir, generation.manifest.generationId.replace("sha256:", ""));
+}
+
+function pruneGenerations(graphDir, keepId) {
+  const generationsDir = join(graphDir, "generations");
+  let entries;
+  try {
+    entries = readdirSync(generationsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === keepId) continue;
+    rmSync(join(generationsDir, entry.name), { recursive: true, force: true });
+  }
 }
 
 function buildGenerationFromSources(root, source, options = {}) {
@@ -715,7 +749,24 @@ function buildGenerationFromSources(root, source, options = {}) {
     });
     fileNodes.set(file.path, node);
   }
-  for (const file of source.files.filter(isCodeFile)) extractSymbols(file, addNode);
+  const parseCache = options.parseCache ?? emptyCache();
+  const nextRecords = [];
+  for (const file of source.files.filter(isCodeFile)) {
+    const cached = parseCache.records.get(file.path);
+    if (cached && cached.contentHash === file.contentHash) {
+      // Byte-identical file: reuse its already-extracted symbol nodes verbatim.
+      for (const symbol of cached.symbols) nodes.push(symbol);
+      nextRecords.push({ path: file.path, record: cached });
+    } else {
+      const collected = [];
+      extractSymbols(file, (node) => {
+        const normalized = addNode(node);
+        collected.push(normalized);
+        return normalized;
+      });
+      nextRecords.push({ path: file.path, record: { contentHash: file.contentHash, symbols: collected } });
+    }
+  }
   for (const file of source.files.filter(isCodeFile)) {
     const sourceNode = fileNodes.get(file.path);
     for (const imported of extractImports(file, source.files)) {
@@ -760,7 +811,8 @@ function buildGenerationFromSources(root, source, options = {}) {
       supersedes: docTruth.supersedes.length,
     },
   };
-  return { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges, docTruth, repoRoot: root };
+  const generation = { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges, docTruth, repoRoot: root };
+  return { generation, parseCache: nextCache(nextRecords) };
 }
 
 function scanSources(root, fileLimit = 0, walkOptions = {}) {
@@ -847,9 +899,43 @@ function scanSources(root, fileLimit = 0, walkOptions = {}) {
 //      `maxEntriesPerDir + 1`, so an escaped cache cannot allocate an
 //      unbounded Dirent array.
 const MAX_ENTRIES_PER_DIR = 5000;
+
+function gitEligiblePaths(root, options = {}) {
+  // Portability contract: the persisted graph must be a pure function of the
+  // COMMIT, not the working tree. Tracked-only (`--cached`, no `--others`) makes a
+  // clean clone reproduce the graph byte-for-byte, which is what lets `.agent/`
+  // travel through git instead of being regenerated on every machine. Untracked
+  // files are surfaced separately as a dirty-tree warning (see uncommittedReport),
+  // never silently indexed. `trackedOnly:false` keeps the legacy working-tree scan
+  // for callers that explicitly want the local dirty view.
+  const trackedOnly = options.trackedOnly !== false;
+  const lsFilesArgs = trackedOnly
+    ? ["-C", root, "ls-files", "-z", "--cached", "--"]
+    : ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"];
+  const result = spawnSync("git", lsFilesArgs, { encoding: "buffer", maxBuffer: 512 * 1024 * 1024, windowsHide: true });
+  if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) return null;
+
+  const files = new Set();
+  const directories = new Set();
+  for (const rawPath of result.stdout.toString("utf8").split("\0")) {
+    const path = normalizePath(rawPath);
+    if (!path) continue;
+    files.add(path);
+    const parts = path.split("/");
+    parts.pop();
+    let parent = "";
+    for (const part of parts) {
+      parent = parent ? `${parent}/${part}` : part;
+      directories.add(parent);
+    }
+  }
+  return { files, directories };
+}
+
 function walk(root, options = {}) {
   const maxDirs = Number(options.maxDirs ?? 50000);
   const maxEntriesPerDir = Number(options.maxEntriesPerDir ?? MAX_ENTRIES_PER_DIR);
+  const gitEligible = gitEligiblePaths(root, options);
   const reasons = new Set();
   const state = { truncated: false };
 
@@ -902,15 +988,19 @@ function walk(root, options = {}) {
       const parentName = basename(directory);
       const childDirectories = [];
       for (const entry of entries) {
+        const absolutePath = join(directory, entry.name);
+        const repoPath = normalizePath(relative(root, absolutePath));
         if (entry.isDirectory()) {
           if (IGNORED.has(entry.name)) continue;
-          childDirectories.push(join(directory, entry.name));
+          if (gitEligible && !gitEligible.directories.has(repoPath)) continue;
+          childDirectories.push(absolutePath);
         } else if (entry.isFile()) {
           if (IGNORED_FILE_NAMES.has(entry.name)) continue;
+          if (gitEligible && !gitEligible.files.has(repoPath)) continue;
           if ((entry.name === "product.md" || entry.name === "architecture.md") && parentName === "docs") continue;
           try {
-            if (statSync(join(directory, entry.name)).size <= 2 * 1024 * 1024) {
-              yield join(directory, entry.name);
+            if (statSync(absolutePath).size <= 2 * 1024 * 1024) {
+              yield absolutePath;
             }
           } catch {
             /* unreadable file: skip */

@@ -185,4 +185,21 @@ export const adapterInfo = {
   description: "Working-tree dirty files and per-file diffs versus HEAD.",
 };
 
+// Names-only summary of what the tracked-only graph omits, for the CLI dirty-tree
+// warning. Shares the SAME porcelain reader/parser as produce() so the warning and
+// the overlay candidates can never disagree about what "dirty" means.
+//   dirtyTracked — modified/staged/renamed/copied/deleted tracked files
+//   untracked    — new files not yet added (excluded by tracked-only indexing)
+// A file is in exactly one bucket. Ignored files are never listed.
+export function workingTreeSummary(repoRoot) {
+  const status = tryGit(repoRoot, ["status", "--porcelain", "--untracked-files=all", "--ignored=no"]);
+  if (!status.ok) return { available: false, dirtyTracked: [], untracked: [] };
+  const dirtyTracked = [];
+  const untracked = [];
+  for (const entry of parsePorcelain(status.stdout)) {
+    (entry.status === "untracked" ? untracked : dirtyTracked).push(entry.path);
+  }
+  return { available: true, dirtyTracked: dirtyTracked.sort(), untracked: untracked.sort() };
+}
+
 export const _internals = { parsePorcelain, diffForFile, scoreForStatus };

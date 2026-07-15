@@ -338,6 +338,43 @@ export function containsCall(file, body, callName) {
   return new RegExp(`(?:\\.|\\b)${escaped}\\s*\\(`).test(body);
 }
 
+// Inverse of containsCall: instead of testing one candidate name against a body,
+// harvest every name the body calls in a single pass. Each pattern below is the
+// capturing form of the matching containsCall branch, so for any name N,
+// `extractCallNames(file, body).names` contains N exactly when
+// `containsCall(file, body, N)` is true. The equivalence is pinned by
+// tests/incremental-index.test.mjs.
+//
+// This is what makes per-file parse results cacheable: call RESOLUTION then needs
+// only the global symbol index, never the source text of an unchanged file.
+export function extractCallNames(file, body) {
+  const extension = file.path.split(".").at(-1)?.toLowerCase();
+  const names = new Set();
+  const harvest = (pattern) => {
+    for (const match of body.matchAll(pattern)) {
+      if (match[1]) names.add(match[1]);
+    }
+  };
+  if (extension === "sh" || extension === "ps1") {
+    harvest(/(?:^|[\s;&|])([^\s;&|]+)(?=\s|$)/gm);
+    return { names: [...names], caseInsensitive: false };
+  }
+  if (extension === "bat") {
+    harvest(/\bcall\s+:(\w+)\b/gi);
+    return { names: [...names], caseInsensitive: true };
+  }
+  if (extension === "vbs") {
+    harvest(/\b(?:Call\s+)?(\w+)\s*\(/gi);
+    return { names: [...names], caseInsensitive: true };
+  }
+  if (NSIS_EXTENSIONS.has(extension)) {
+    harvest(/\bCall\s+(\w+)\b/gi);
+    return { names: [...names], caseInsensitive: true };
+  }
+  harvest(/(?:\.|\b)(\w+)\s*\(/g);
+  return { names: [...names], caseInsensitive: false };
+}
+
 function symbolNode(kind, file, name, qualifiedName, startLine, endLine, labels = ["Symbol"]) {
   return {
     id: `symbol:${file.path}::${qualifiedName}`,

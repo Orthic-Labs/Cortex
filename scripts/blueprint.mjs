@@ -29,6 +29,7 @@ import {
 } from "../graph/static-provider.mjs";
 import { generateDocs } from "../lib/generated-docs.mjs";
 import { CODE_EXTENSIONS } from "../graph/language-extractors.mjs";
+import { workingTreeSummary } from "../sources/dirty-files.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
@@ -682,6 +683,41 @@ function isFresh(root, outDir, config, limit = 0) {
   if (!index?.sourceSignature) return false;
   if (index.sourceSignature !== sourceSignature(root, config, limit)) return false;
   return graphStatus(root, outDir).state === "fresh";
+}
+
+// The graph is tracked-only (a function of the COMMIT, so `.agent/` can travel
+// through git). Anything in the working tree but not committed is therefore absent
+// from the graph. Surface it loudly so the omission is a choice, not a surprise —
+// the exact "told-done-when-not" / silent-omission failure mode this rebuild exists
+// to kill. Query-time overlay adapters (dirty-files, live-overlay) still inject
+// this dirty work into context packets; only the persisted graph omits it.
+function warnUncommitted(root, outDir) {
+  let summary;
+  try {
+    summary = workingTreeSummary(root);
+  } catch {
+    return;
+  }
+  if (!summary.available) return;
+  // Blueprint's OWN generated artifacts are not "user work missing from the graph"
+  // — warning about them is noise, and once .agent/ is tracked they would dominate
+  // the list. Exclude the output dir, the portable manifest, and the generated docs
+  // regardless of their git-ignore status.
+  const outPrefix = `${normalizePath(outDir)}/`;
+  const ownPaths = new Set([".blueprint", "docs/product.md", "docs/architecture.md"]);
+  const isBlueprintOwned = (path) =>
+    path.startsWith(outPrefix) || path.startsWith(".blueprint/") || ownPaths.has(path);
+  const dirtyTracked = summary.dirtyTracked.filter((path) => !isBlueprintOwned(path));
+  const untracked = summary.untracked.filter((path) => !isBlueprintOwned(path));
+  const total = dirtyTracked.length + untracked.length;
+  if (total === 0) return;
+  const sample = [...dirtyTracked, ...untracked].slice(0, 8);
+  console.warn(
+    `uncommitted: ${total} working-tree file(s) are NOT in the graph ` +
+      `(${dirtyTracked.length} modified tracked, ${untracked.length} untracked). ` +
+      `Commit them to include them; they remain visible to task briefs via the overlay. ` +
+      `e.g. ${sample.join(", ")}${total > sample.length ? " …" : ""}`,
+  );
 }
 
 function ensureFresh(root, outDir, options) {
@@ -1723,6 +1759,7 @@ function main() {
     if (result.docsResult?.mode === "docs_conflict") {
       console.warn(`docs_conflict: ${result.docsResult.conflicts.join(", ")} — wrote fallback to .agent/docs/`);
     }
+    warnUncommitted(root, outDir);
     return 0;
   }
   if (command === "brief") {

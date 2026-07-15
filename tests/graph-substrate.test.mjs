@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -90,6 +91,59 @@ test("source scan reports directory-budget truncation", () => {
     const scan = scanSourcesPublic(repo, 0, { maxDirs: 1 });
     assert.equal(scan.traversalTruncated, true);
     assert.ok(scan.truncationReasons.includes("directory_limit"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("source scan excludes Git-ignored paths while preserving tracked files", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-gitignore-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
+    fs.writeFileSync(path.join(repo, ".gitignore"), [
+      ".env",
+      ".fastembed_cache/",
+      ".gstack/",
+      ".venv/",
+      "generated/",
+      "scratch-output/",
+      "",
+    ].join("\n"));
+    for (const ignored of [
+      ".env",
+      ".fastembed_cache/model.bin",
+      ".gstack/cache.ts",
+      ".venv/site-packages/dependency.py",
+      "scratch-output/leaked.ts",
+    ]) {
+      fs.mkdirSync(path.dirname(path.join(repo, ignored)), { recursive: true });
+      fs.writeFileSync(path.join(repo, ignored), "ignored\n");
+    }
+    fs.mkdirSync(path.join(repo, "generated"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "generated/tracked.ts"), "export const tracked = true;\n");
+    assert.equal(spawnSync("git", ["add", "-f", "generated/tracked.ts"], { cwd: repo }).status, 0);
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src/legit.ts"), "export const legit = true;\n");
+    assert.equal(spawnSync("git", ["add", "src/legit.ts"], { cwd: repo }).status, 0);
+    // An untracked-but-unignored file: under the tracked-only portability contract
+    // it must NOT enter the graph (the graph is a function of the commit, not the
+    // working tree). It is surfaced via the dirty-tree warning instead.
+    fs.writeFileSync(path.join(repo, "src/uncommitted.ts"), "export const wip = true;\n");
+
+    const paths = scanSourcesPublic(repo).files.map((file) => file.path);
+
+    assert.ok(paths.includes("src/legit.ts"));
+    assert.ok(paths.includes("generated/tracked.ts"), "tracked files remain eligible even when an ignore rule matches");
+    assert.ok(!paths.includes("src/uncommitted.ts"), "untracked files must be excluded from the tracked-only graph");
+    for (const ignored of [
+      ".env",
+      ".fastembed_cache/model.bin",
+      ".gstack/cache.ts",
+      ".venv/site-packages/dependency.py",
+      "scratch-output/leaked.ts",
+    ]) {
+      assert.ok(!paths.includes(ignored), `${ignored} must be excluded by Git ignore rules`);
+    }
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

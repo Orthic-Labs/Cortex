@@ -115,6 +115,36 @@ test("dirty-files: surfaces modified and untracked files via git status", () => 
   });
 });
 
+test("workingTreeSummary buckets modified-tracked vs untracked, sorted", () => {
+  withTempRepo("wt-summary", (repo) => {
+    spawnSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
+    spawnSync("git", ["config", "user.email", "ci@example.com"], { cwd: repo, stdio: "ignore" });
+    spawnSync("git", ["config", "user.name", "ci"], { cwd: repo, stdio: "ignore" });
+    writeFileSync(path.join(repo, "a.ts"), "export const a = 1;\n");
+    writeFileSync(path.join(repo, "b.ts"), "export const b = 1;\n");
+    spawnSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+    spawnSync("git", ["commit", "-q", "-m", "init"], { cwd: repo, stdio: "ignore" });
+    writeFileSync(path.join(repo, "a.ts"), "export const a = 2;\n"); // modified tracked
+    writeFileSync(path.join(repo, "z.ts"), "export const z = 9;\n"); // untracked
+    writeFileSync(path.join(repo, "m.ts"), "export const m = 9;\n"); // untracked (sort check)
+
+    const summary = dirtyFiles.workingTreeSummary(repo);
+    assert.equal(summary.available, true);
+    assert.deepEqual(summary.dirtyTracked, ["a.ts"]);
+    assert.deepEqual(summary.untracked, ["m.ts", "z.ts"], "untracked must be sorted");
+  });
+});
+
+test("workingTreeSummary reports unavailable outside a git repo", () => {
+  withTempRepo("wt-nogit", (repo) => {
+    // No git init.
+    const summary = dirtyFiles.workingTreeSummary(repo);
+    assert.equal(summary.available, false);
+    assert.deepEqual(summary.dirtyTracked, []);
+    assert.deepEqual(summary.untracked, []);
+  });
+});
+
 // ---- graph-resolve ----
 
 test("graph-resolve: emits file and symbol candidates when graph is available", () => {
