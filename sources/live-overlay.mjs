@@ -6,11 +6,11 @@
 //
 // Strategy:
 //   - Read the graph's `manifest.generatedAt` (or fall back to the source
-//     file count + sourceHash timestamp recorded in `.agent/graph.json`).
+//     file count + sourceHash timestamp recorded in `.agent/graph/graph.json`).
 //   - Walk the supported source tree using the same IGNORED rules as the
 //     static provider.
 //   - For every file whose mtime > graph.generatedAt AND whose path is NOT
-//     in the recorded per-file hashes from the graph's `nodes.json`,
+//     in the recorded per-file hashes from the graph's `graph.json`,
 //     emit a `live_overlay` candidate with the file body (bounded).
 //   - For files whose recorded contentHash differs from the live contentHash,
 //     also emit — the graph knows about the file but its body has drifted.
@@ -45,7 +45,7 @@ const TRUNCATION_MARKER = "\n\n[…file body truncated; per-file byte cap applie
 
 function loadGenerationMeta(repoRoot) {
   const candidates = [
-    join(repoRoot, ".agent", "graph.json"),
+    join(repoRoot, ".agent", "graph", "graph.json"),
     join(repoRoot, ".blueprint", "index.jsonl"),
   ];
   for (const path of candidates) {

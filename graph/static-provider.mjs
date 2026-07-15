@@ -4,7 +4,6 @@ import {
   existsSync,
   mkdirSync,
   opendirSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -154,13 +153,10 @@ export function graphStatus(repoRoot, outDir, options = {}) {
       }
     }
     const recordedHashes = new Map();
-    const generationId = String(manifest.generationId ?? "");
-    const generationDirName = generationId.startsWith("sha256:") ? generationId.slice("sha256:".length) : generationId;
-    const generationDir = join(resolve(root, outDir), "graph", "generations", generationDirName);
-    const nodesPath = join(generationDir, "nodes.json");
-    if (existsSync(nodesPath)) {
-      const nodes = JSON.parse(readFileSync(nodesPath, "utf8"));
-      for (const node of nodes) {
+    const graphJsonPath = join(resolve(root, outDir), "graph", "graph.json");
+    if (existsSync(graphJsonPath)) {
+      const generation = JSON.parse(readFileSync(graphJsonPath, "utf8"));
+      for (const node of generation.nodes ?? []) {
         const evidence = node.evidence?.[0];
         if (evidence?.path && evidence?.contentHash) {
           recordedHashes.set(evidence.path, evidence.contentHash);
@@ -683,40 +679,35 @@ function pathPayload(generation, nodeIds) {
   };
 }
 
+// The generation is a SINGLE consolidated file at a STABLE path, `graph/graph.json`.
+//
+// The prior scheme wrote a content-addressed directory `generations/<hash>/` per
+// build and pruned the rest. That was designed for a multi-generation cache that no
+// longer exists (we keep exactly one), and its per-build hash-named directory was
+// un-deltable in git — committing the graph would add the whole generation on every
+// change instead of a small textual diff. A single stable file both fixes that and
+// removes the dir/marker/prune machinery.
+//
+// Atomicity is preserved by the same temp-then-rename that already publishes the
+// manifest: a reader opening graph.json sees the old file or the new file, never a
+// torn mixture, because a single-file rename is atomic (and renameSync-over-existing
+// is already relied on for manifest.json). COMPLETE markers and content-addressed
+// dirs are no longer needed to avoid torn reads.
 function writeGeneration(outDir, generation) {
   const graphDir = join(outDir, "graph");
-  const generationDir = join(graphDir, "generations", generation.manifest.generationId.replace("sha256:", ""));
-  mkdirSync(generationDir, { recursive: true });
-  writeJson(join(generationDir, "nodes.json"), generation.nodes);
-  writeJson(join(generationDir, "edges.json"), generation.edges);
-  writeJson(join(generationDir, "graph.json"), generation);
-  writeFileSync(join(generationDir, "COMPLETE"), "complete\n");
-  const tmpManifest = join(graphDir, `manifest.${process.pid}.${Date.now()}.tmp`);
-  mkdirSync(dirname(tmpManifest), { recursive: true });
-  writeJson(tmpManifest, generation.manifest);
-  renameSync(tmpManifest, join(graphDir, "manifest.json"));
-  // Exactly one generation on disk. The manifest now points at the current
-  // generation, so every other generation dir is unreachable derived state —
-  // prune it. This is content-addressed output, not a history log; keeping old
-  // generations was unbounded growth that also blocked committing the graph
-  // (each build minted a fresh, un-deltable directory). Publish-then-prune keeps
-  // a reader that already opened the current manifest safe; rmSync(force) ignores
-  // a dir a straggler reader still holds open.
-  pruneGenerations(graphDir, generation.manifest.generationId.replace("sha256:", ""));
-}
-
-function pruneGenerations(graphDir, keepId) {
-  const generationsDir = join(graphDir, "generations");
-  let entries;
-  try {
-    entries = readdirSync(generationsDir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === keepId) continue;
-    rmSync(join(generationsDir, entry.name), { recursive: true, force: true });
-  }
+  mkdirSync(graphDir, { recursive: true });
+  const stamp = `${process.pid}.${Date.now()}`;
+  const publishAtomic = (name, value) => {
+    const tmp = join(graphDir, `.${name}.${stamp}.tmp`);
+    writeJson(tmp, value);
+    renameSync(tmp, join(graphDir, name));
+  };
+  // Publish the generation body BEFORE the manifest, so once a reader sees a fresh
+  // manifest (its freshness gate) the graph.json it points at is already in place.
+  publishAtomic("graph.json", generation);
+  publishAtomic("manifest.json", generation.manifest);
+  // Drop any legacy content-addressed generations/ dir from an older build.
+  rmSync(join(graphDir, "generations"), { recursive: true, force: true });
 }
 
 function buildGenerationFromSources(root, source, options = {}) {

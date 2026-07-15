@@ -1510,7 +1510,7 @@ function readFreshGraph(root, outDir, options = {}) {
   if (status.state !== "fresh") {
     throw graphReadError("graph_rebuild_required", `Graph is ${status.state}; run blueprint build`, { state: status.state });
   }
-  const generationPath = join(root, outDir, "graph", "generations", status.manifest.generationId.replace("sha256:", ""), "graph.json");
+  const generationPath = join(root, outDir, "graph", "graph.json");
   const generation = readJson(generationPath, null);
   if (!generation) throw graphReadError("graph_corrupt", "Graph generation is missing or unreadable");
   return generation;

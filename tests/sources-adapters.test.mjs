@@ -232,13 +232,13 @@ test("rules-documents: never floods when many rules exist; respects maxRules", (
 
 test("live-overlay: emits candidates for files newer than the graph generation", () => {
   withTempRepo("overlay", (repo) => {
-    mkdirSync(path.join(repo, ".agent"), { recursive: true });
+    mkdirSync(path.join(repo, ".agent", "graph"), { recursive: true });
     mkdirSync(path.join(repo, "src"), { recursive: true });
     const generatedAt = new Date(Date.now() - 60_000).toISOString();
     writeFileSync(path.join(repo, "src/old.ts"), "export const x = 1;\n");
     const oldTs = new Date(Date.now() - 120_000).toISOString();
     const newTs = new Date(Date.now() + 5_000).toISOString();
-    writeFileSync(path.join(repo, ".agent/graph.json"), JSON.stringify({
+    writeFileSync(path.join(repo, ".agent/graph/graph.json"), JSON.stringify({
       manifest: { generatedAt, provider: { id: "test" } },
       nodes: [
         { id: "file:src/old.ts", kind: "file", evidence: [{ path: "src/old.ts", contentHash: "deadbeef".repeat(8) }] },

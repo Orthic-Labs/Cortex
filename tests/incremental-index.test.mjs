@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -187,9 +187,9 @@ test("emptyCache is a valid, empty starting point", () => {
   assert.equal(cache.records.size, 0);
 });
 
-// ---- Property 3: exactly one generation survives on disk ------------------------
+// ---- Property 3: the generation is a single stable file, not a growing dir ------
 
-test("two differing builds leave exactly one generation directory", () => {
+test("the generation is one stable file (graph/graph.json), no content-addressed dir", () => {
   const root = mkdtempSync(join(tmpdir(), "bp-prune-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd: root });
@@ -198,10 +198,15 @@ test("two differing builds leave exactly one generation directory", () => {
     execFileSync("git", ["add", "-A"], { cwd: root });
     buildGraphGeneration(root, { outDir: ".agent" });
     write("a.ts", "export function two() { return 2; }");
+    execFileSync("git", ["add", "-A"], { cwd: root });
     buildGraphGeneration(root, { outDir: ".agent" });
-    const generations = readdirSync(join(root, ".agent", "graph", "generations"), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory());
-    assert.equal(generations.length, 1, "pruning must keep exactly one generation");
+    const graphDir = join(root, ".agent", "graph");
+    // The stable file exists and holds the current generation…
+    assert.ok(existsSync(join(graphDir, "graph.json")), "graph/graph.json must exist");
+    const generation = JSON.parse(readFileSync(join(graphDir, "graph.json"), "utf8"));
+    assert.ok(generation.nodes.some((n) => n.id === "symbol:a.ts::two"), "graph.json holds the current generation");
+    // …and the legacy per-build content-addressed directory is gone.
+    assert.ok(!existsSync(join(graphDir, "generations")), "no content-addressed generations/ dir");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
