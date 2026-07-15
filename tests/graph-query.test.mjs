@@ -69,7 +69,12 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
 
     const planner = run(["graph", "planner-status", "--query", "placeOrder", "--out", ".agent", "--limit", "2"], repo);
     assert.equal(planner.provider, "blueprint-static");
-    assert.ok(["ready", "missing_command", "unavailable"].includes(planner.planner.state));
+    assert.ok(["ready", "missing_command", "unavailable", "broken"].includes(planner.planner.state));
+    // A "ready" verdict must be earned by actually round-tripping a ContextPacket
+    // through `memright plan-context`, not by grepping help text (the old probe).
+    if (planner.planner.state === "ready") {
+      assert.match(planner.planner.evidence, /round-tripped a ContextPacket/);
+    }
     assert.equal(planner.candidateSet.candidates[0].sourceKind, "repo_code");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });

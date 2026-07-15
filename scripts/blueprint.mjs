@@ -4,12 +4,15 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -1461,25 +1464,99 @@ function runGraphCommand(root, outDir, subcommand, args) {
   return 1;
 }
 
+// Candidate memright executables, in order. execFileSync does not resolve a
+// PATH shim on Windows (extensionless), so we also try the canonical binary and
+// the ~/bin shim location. MEMRIGHT_BIN overrides everything.
+function memrightBinCandidates() {
+  return [
+    process.env.MEMRIGHT_BIN,
+    join(homedir(), "bin", "memright.exe"),
+    join(homedir(), "bin", "memright"),
+    "D:/Claude/tools/bin/memright.exe",
+    join(homedir(), "claude", "tools", "bin", "memright"),
+    "memright",
+  ].filter(Boolean);
+}
+
+// A minimal, schema-valid ContextCandidateSet v1 — enough to make plan-context do
+// real admission work and return a packet. Graph-independent so the probe reflects
+// the JOIN, not the local graph's freshness.
+function plannerProbeCandidateSet() {
+  return {
+    schemaVersion: 1,
+    traceId: "blueprint-planner-probe",
+    task: "blueprint planner probe",
+    mode: "survey",
+    provider: "blueprint-static",
+    freshness: { revision: "sha256:probe", indexedAt: "gen:probe", stale: false },
+    providerCeiling: { maxCandidates: 1, maxEstimatedTokens: 2000 },
+    candidates: [{
+      id: "probe:1",
+      layer: 3,
+      sourceKind: "repo_code",
+      sourceRef: "probe.ts:1-1",
+      sourceHash: `sha256:${"0".repeat(64)}`,
+      trustClass: "workspace_tracked",
+      instructionPolicy: "data_only",
+      providerScore: 1,
+      scoreComponents: { structural: 1 },
+      estimatedTokens: 10,
+      protected: false,
+      exact: true,
+      recoverable: true,
+      resolver: "blueprint graph resolve --node probe:1",
+      text: "probe",
+    }],
+    omissions: [],
+  };
+}
+
+// Prove the Blueprint -> MemRight join is actually LIVE by round-tripping a real
+// candidate set through `memright plan-context` and validating the returned
+// ContextPacket. The old probe only grepped `memright help` for the string
+// "plan-context" — a check that could not fail while the join was, in fact, never
+// wired. It reported "ready" for a hand-off nothing exercised. This one runs it.
 function memrightPlannerStatus() {
+  const result = { service: "memright", command: "memright plan-context" };
+  let tmp;
   try {
-    const help = execFileSync("memright", ["help"], { encoding: "utf8", timeout: 5000 });
-    const hasPlanContext = /\bplan-context\b/.test(help);
-    return {
-      service: "memright",
-      command: "memright plan-context",
-      state: hasPlanContext ? "ready" : "missing_command",
-      evidence: hasPlanContext
-        ? "memright help lists plan-context"
-        : "memright help does not list plan-context; Blueprint can emit ContextCandidateSet but MemRight admission is not live",
-    };
+    tmp = mkdtempSync(join(tmpdir(), "bp-planner-"));
+    const csPath = join(tmp, "candidate-set.json");
+    writeFileSync(csPath, JSON.stringify(plannerProbeCandidateSet()));
+    let lastError = "no memright executable found on any known path";
+    for (const bin of memrightBinCandidates()) {
+      try {
+        const out = execFileSync(bin, ["plan-context", "--candidate-set", csPath, "--max-tokens", "2000"], {
+          encoding: "utf8",
+          timeout: 8000,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let parsed;
+        try {
+          parsed = JSON.parse(out);
+        } catch {
+          return { ...result, state: "broken", evidence: `plan-context returned non-JSON via ${bin}` };
+        }
+        if (parsed?.packet && Array.isArray(parsed?.receipts)) {
+          return { ...result, state: "ready", evidence: `plan-context round-tripped a ContextPacket (${parsed.receipts.length} receipt(s)) via ${bin}` };
+        }
+        return { ...result, state: "broken", evidence: `plan-context returned no packet/receipts via ${bin}: ${JSON.stringify(parsed).slice(0, 160)}` };
+      } catch (error) {
+        const stderr = String(error?.stderr ?? "");
+        // An "unknown/unrecognized subcommand" means the binary exists but this
+        // version predates the join — a distinct, honest state.
+        if (/unrecognized subcommand|unexpected argument|no such subcommand|invalid subcommand/i.test(stderr)) {
+          return { ...result, state: "missing_command", evidence: `${bin} has no plan-context subcommand` };
+        }
+        lastError = stderr ? stderr.slice(0, 200) : String(error?.message ?? error).slice(0, 200);
+        // ENOENT (this candidate path doesn't exist) → try the next candidate.
+      }
+    }
+    return { ...result, state: "unavailable", evidence: lastError };
   } catch (error) {
-    return {
-      service: "memright",
-      command: "memright plan-context",
-      state: "unavailable",
-      evidence: String(error?.message ?? error),
-    };
+    return { ...result, state: "unavailable", evidence: String(error?.message ?? error).slice(0, 200) };
+  } finally {
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
   }
 }
 
