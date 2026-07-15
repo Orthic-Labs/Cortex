@@ -228,9 +228,106 @@ export function queryGraph(generation, options = {}) {
   }));
 }
 
+// Build a ContextCandidateSet with REAL tiering, anchor reservation, and omission
+// receipts. The previous version hardcoded protected:false, exact:true, and
+// omissions:[] for every candidate — a schema-valid shape with no admission logic
+// behind it. Honest tiers, in priority order:
+//   protected — a file the caller explicitly anchored (options.anchors); reserved
+//   exact     — a symbol whose name equals a query term
+//   lexical   — a substring match (queryGraph's scoring)
+// There is deliberately NO structural or semantic tier: queryGraph is lexical, and
+// no embedding/graph-walk retrieval channel exists yet (B4-semantic), so labelling
+// candidates "structural" would be a hollow claim. That gap is tracked in the
+// inventory doc, not papered over here.
 export function createContextCandidateSet(generation, options = {}) {
   const maxCandidates = Number(options.maxCandidates ?? 40);
-  const queryResults = queryGraph(generation, { query: options.query ?? options.task ?? "", limit: maxCandidates });
+  const maxEstimatedTokens = Number(options.maxEstimatedTokens ?? 8000);
+  const anchors = new Set((options.anchors ?? []).map((path) => normalizePath(String(path))));
+  const query = options.query ?? options.task ?? "";
+  const terms = queryTerms(String(query).toLowerCase());
+  // Retrieve a wider pool than the ceiling so overflow becomes real omission
+  // receipts rather than a silently truncated list.
+  const pool = queryGraph(generation, { query, limit: Math.max(maxCandidates * 3, maxCandidates + 20) });
+
+  // Anchor reservation: an explicitly anchored file must be a candidate whether or
+  // not it matched the query — that is what "anchor" means. Inject the anchored
+  // files' nodes that the query pool missed, shaped like query results.
+  if (anchors.size > 0) {
+    const pooledIds = new Set(pool.map((result) => result.id));
+    let syntheticRank = pool.length;
+    for (const node of generation.nodes) {
+      const nodePath = normalizePath(node.evidence?.[0]?.path ?? node.path ?? "");
+      if (!anchors.has(nodePath) || pooledIds.has(node.id)) continue;
+      if (!node.evidence?.[0]) continue;
+      pooledIds.add(node.id);
+      pool.push({
+        id: node.id,
+        kind: node.kind,
+        name: node.name,
+        qualifiedName: node.qualifiedName,
+        provider: generation.provider.id,
+        confidence: node.confidence ?? 1,
+        evidence: node.evidence,
+        fresh: evidenceFresh(generation, node.evidence),
+        rank: ++syntheticRank,
+      });
+    }
+  }
+
+  const tierRank = { protected: 0, exact: 1, lexical: 2 };
+  const classified = pool.map((result) => {
+    const path = normalizePath(result.evidence[0]?.path ?? "");
+    const name = String(result.qualifiedName ?? result.name ?? "").toLowerCase();
+    const shortName = name.split(".").at(-1);
+    const isAnchor = anchors.has(path);
+    const isExact = terms.length > 0 && terms.some((term) => name === term || shortName === term);
+    const tier = isAnchor ? "protected" : isExact ? "exact" : "lexical";
+    return { result, isAnchor, isExact, tier };
+  }).sort((a, b) => {
+    const byTier = tierRank[a.tier] - tierRank[b.tier];
+    if (byTier !== 0) return byTier;
+    // Higher providerScore (lower rank) first; stable tiebreak on id.
+    return a.result.rank - b.result.rank || a.result.id.localeCompare(b.result.id);
+  });
+
+  const candidates = [];
+  const omissions = [];
+  let tokenBudget = maxEstimatedTokens;
+  for (const item of classified) {
+    const ev = item.result.evidence[0];
+    const estimatedTokens = estimateTokens(ev);
+    // Hard ceilings apply uniformly — including to anchors, so the set can never
+    // exceed the canonical provider ceiling. Anchors win their slots by sorting
+    // first, not by bypassing the cap; an anchor dropped past the cap is receipted.
+    if (candidates.length >= maxCandidates) {
+      omissions.push({ id: item.result.id, layer: 3, reason: item.isAnchor ? "anchor_over_candidate_ceiling" : "over_candidate_ceiling" });
+      continue;
+    }
+    if (estimatedTokens > tokenBudget) {
+      omissions.push({ id: item.result.id, layer: 3, reason: item.isAnchor ? "anchor_over_token_budget" : "over_token_budget" });
+      continue;
+    }
+    tokenBudget -= estimatedTokens;
+    const providerScore = Math.max(0, Math.min(1, 1 / item.result.rank));
+    candidates.push({
+      id: item.result.id,
+      layer: 3,
+      sourceKind: "repo_code",
+      sourceRef: `${ev.path}:${ev.startLine}-${ev.endLine}`,
+      sourceHash: `sha256:${ev.contentHash}`,
+      trustClass: "workspace_tracked",
+      instructionPolicy: "data_only",
+      providerScore,
+      scoreComponents: item.isExact ? { exact: 1 } : { lexical: providerScore },
+      estimatedTokens,
+      protected: item.isAnchor,
+      exact: item.isExact,
+      recoverable: true,
+      resolver: `blueprint graph resolve --node ${item.result.id}`,
+      text: item.result.qualifiedName || item.result.name,
+    });
+  }
+
   return {
     schemaVersion: 1,
     traceId: options.traceId ?? randomUUID(),
@@ -242,31 +339,9 @@ export function createContextCandidateSet(generation, options = {}) {
       indexedAt: generation.manifest.generatedAt,
       stale: false,
     },
-    providerCeiling: {
-      maxCandidates,
-      maxEstimatedTokens: Number(options.maxEstimatedTokens ?? 8000),
-    },
-    candidates: queryResults.map((result) => {
-      const ev = result.evidence[0];
-      return {
-        id: result.id,
-        layer: 3,
-        sourceKind: "repo_code",
-        sourceRef: `${ev.path}:${ev.startLine}-${ev.endLine}`,
-        sourceHash: `sha256:${ev.contentHash}`,
-        trustClass: "workspace_tracked",
-        instructionPolicy: "data_only",
-        providerScore: Math.max(0, Math.min(1, 1 / result.rank)),
-        scoreComponents: { structural: 1 },
-        estimatedTokens: estimateTokens(ev),
-        protected: false,
-        exact: true,
-        recoverable: true,
-        resolver: `blueprint graph resolve --node ${result.id}`,
-        text: result.qualifiedName || result.name,
-      };
-    }),
-    omissions: [],
+    providerCeiling: { maxCandidates, maxEstimatedTokens },
+    candidates,
+    omissions,
   };
 }
 

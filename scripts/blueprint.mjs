@@ -1388,6 +1388,7 @@ function runGraphCommand(root, outDir, subcommand, args) {
       task: String(args.task ?? query),
       query,
       maxCandidates: Number(args.limit ?? 40),
+      anchors: args.anchors ? String(args.anchors).split(",").map((path) => path.trim()).filter(Boolean) : [],
     }), null, 2));
     return 0;
   }
