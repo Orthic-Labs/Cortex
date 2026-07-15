@@ -137,8 +137,11 @@ truth map and the Blueprint-owned code graph:
 - `graph mermaid` emits a bounded deterministic Mermaid view for static visual inspection;
 - `graph flows --complete` asks for complete flow enumeration up to the explicit safety cap instead
   of the default bounded preview;
-- `doctor` (and `doctor --json`) emit typed JSON states (`ready`, `missing`, `stale`, `broken`,
-  `corrupt`) and include provider capability coverage, including the honest parsed-language list.
+- `doctor` (and `doctor --json`) emit typed JSON states (`ready`, `degraded`, `stale`, `broken`,
+  `corrupt`, `missing`) plus granular `reasons[]` codes, and include provider capability coverage,
+  including the honest parsed-language list. `broken` = provider-version incompatible with the
+  persisted graph; `corrupt` = artifacts present but unparseable; `degraded` = fresh but coverage
+  incomplete (unsupported languages / truncated scan).
 - the deterministic lexical provider parses the tracked first-party executable stack: JS/TS
   (including JSX/TSX/MJS/CJS/MTS/CTS and React arrow components), Python, Rust/Tauri, Swift,
   C/C++/Objective-C/Objective-C++, Vue/Astro script regions, NSIS installers, workspace

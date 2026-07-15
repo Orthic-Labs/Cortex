@@ -66,3 +66,34 @@ test("blueprint graph status exits distinctly when no generation exists", () => 
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("doctor reports 'corrupt' for a present-but-unparseable map (distinct from missing)", () => {
+  const repo = copyFixture();
+  try {
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+    fs.writeFileSync(path.join(repo, ".agent/map.json"), "{ not valid json");
+    const doctor = run(["doctor", "--out", ".agent"], repo);
+    const payload = JSON.parse(doctor.stdout);
+    assert.equal(payload.state, "corrupt");
+    assert.ok(payload.reasons.some((r) => r.code === "corrupt_map"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("doctor reports 'broken' when the graph provider version is incompatible", () => {
+  const repo = copyFixture();
+  try {
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+    const manifestPath = path.join(repo, ".agent/graph/manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.provider.version = "repo-local-deterministic-v1";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    const doctor = run(["doctor", "--json", "--out", ".agent"], repo);
+    const payload = JSON.parse(doctor.stdout);
+    assert.equal(payload.state, "broken");
+    assert.ok(payload.reasons.some((r) => r.providerMismatch === true));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

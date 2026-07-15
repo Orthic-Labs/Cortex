@@ -1208,9 +1208,12 @@ function doctor(root, outDir, options = {}) {
     map = readJson(mapPath, null);
     stale = readJson(stalePath, { missingReferences: [] });
   } catch (error) {
+    // The map is PRESENT but unparseable — distinct from "missing" (never built).
+    // A consumer treats corrupt as "rebuild, something wrote bad bytes", not "run
+    // build for the first time".
     console.log(JSON.stringify({
       schemaVersion: 1,
-      state: "missing",
+      state: "corrupt",
       generatedAt: startedAt,
       artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/manifest.json` },
       errors: [String(error?.message ?? error)],
@@ -1301,14 +1304,27 @@ function doctor(root, outDir, options = {}) {
   // missing -> missing.
   const fresh = graph.state === "fresh";
   const hasIncompleteCoverage = graph.state === "indeterminate" || (graph.capabilities?.unsupportedFileCount ?? 0) > 0;
+  // Six typed states, most-severe first:
+  //   missing  — map.json absent (never built)
+  //   corrupt  — map present but structurally invalid (dangling edges, dup ids)
+  //   broken   — graph provider version incompatible with the persisted graph
+  //   stale    — source tree changed since the graph was built
+  //   degraded — fresh but coverage is incomplete (unsupported languages / truncated scan)
+  //   ready    — fresh and complete
+  // corrupt/broken were previously folded into missing/stale; the granular reason
+  // codes always carried the detail, but the top-level state now names them too.
   const state =
-    errors.length || graph.state === "missing"
+    graph.state === "missing"
       ? "missing"
-      : graph.state === "stale"
-        ? "stale"
-        : graph.state === "indeterminate" || (fresh && hasIncompleteCoverage)
-          ? "degraded"
-          : "ready";
+      : errors.length
+        ? "corrupt"
+        : graph.providerMismatch
+          ? "broken"
+          : graph.state === "stale"
+            ? "stale"
+            : graph.state === "indeterminate" || (fresh && hasIncompleteCoverage)
+              ? "degraded"
+              : "ready";
   console.log(JSON.stringify({
     schemaVersion: 1,
     state,
