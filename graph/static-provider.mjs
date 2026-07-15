@@ -609,6 +609,13 @@ export function graphFlowInventory(generation, options = {}) {
   const outgoing = new Set(generation.edges.map((edge) => edge.source));
   const incoming = new Set(generation.edges.map((edge) => edge.target));
   const entryPoints = generation.nodes.filter((node) => node.kind === "symbol" && outgoing.has(node.id) && !incoming.has(node.id));
+  // NOTE: the spec's third flow status, "unsupported", is intentionally NOT emitted
+  // here. It is only honest once we can DETECT a flow crossing into untraceable
+  // territory — an HTTP route, a Tauri IPC boundary, or an unparsed-language hop —
+  // and those stack-specific boundary joins are not implemented yet (B3 partial).
+  // With only structural CALLS/IMPORTS/CONFIGURES edges, any reachable node is a
+  // terminal, so a flow is either complete or a genuine dangling "broken". Emitting
+  // an "unsupported" bucket that can never populate would be a false spec claim.
   const flows = [];
   let truncated = false;
   for (const entry of entryPoints) {
