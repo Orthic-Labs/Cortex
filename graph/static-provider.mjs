@@ -15,7 +15,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   CODE_EXTENSIONS,
   PARSED_LANGUAGE_EXTENSIONS,
-  containsCall,
+  extractCallNames,
   extractImports,
   extractSymbols,
 } from "./language-extractors.mjs";
@@ -1112,8 +1112,17 @@ function addCallEdges(files, nodes, edges) {
     if (!file) continue;
     const ev = source.evidence[0];
     const body = file.lines.slice(ev.startLine - 1, ev.endLine).join("\n");
+    // Harvest every called name from this body ONCE (extractCallNames is the proven
+    // inverse of containsCall, 302K-check equivalence), then test each candidate by
+    // set membership. Replaces an O(sources x distinct-call-names) regex scan with a
+    // single harvest + O(1) lookups, byte-identical to the old per-name regex.
+    const harvest = extractCallNames(file, body);
+    const calledNames = harvest.caseInsensitive
+      ? new Set(harvest.names.map((name) => name.toLowerCase()))
+      : new Set(harvest.names);
+    const isCalled = (callName) => calledNames.has(harvest.caseInsensitive ? callName.toLowerCase() : callName);
     for (const [callName, namedTargets] of targetsByName) {
-      if (!containsCall(file, body, callName)) continue;
+      if (!isCalled(callName)) continue;
       const sameFile = namedTargets.filter((target) => target.path === source.path && target.id !== source.id);
       const importedPaths = importsByPath.get(source.path) ?? new Set();
       const imported = namedTargets.filter((target) => importedPaths.has(target.path) && target.id !== source.id);
