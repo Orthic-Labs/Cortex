@@ -15,6 +15,12 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
   const repo = path.join(os.tmpdir(), `blueprint-live-build-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
+    assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "user.name", "Test"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["add", "-A"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: repo }).status, 0);
+    const baseCommit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
     const result = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--check"], { cwd: repo, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.ok(fs.existsSync(path.join(repo, ".agent/map.json")), "map.json must exist");
@@ -25,8 +31,16 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
     assert.equal(manifest.entrypoint, ".agent/");
     assert.equal(manifest.generation.provider ?? manifest.generation.toolVersions?.blueprint ?? null, "blueprint-static");
+    assert.equal(manifest.generation.baseCommit, baseCommit);
     const map = JSON.parse(fs.readFileSync(path.join(repo, ".agent/map.json"), "utf8"));
     assert.equal(map.entrypoint, ".blueprint/manifest.json");
+
+    fs.appendFileSync(path.join(repo, "src/service.ts"), "\n// dirty overlay\n", "utf8");
+    const dirtyBuild = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--check"], { cwd: repo, encoding: "utf8" });
+    assert.equal(dirtyBuild.status, 0, dirtyBuild.stderr || dirtyBuild.stdout);
+    const dirtyManifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
+    assert.equal(dirtyManifest.generation.baseCommit, null);
+    assert.equal(dirtyManifest.generation.sourceState, "dirty_overlay");
 
     fs.rmSync(path.join(repo, ".agent/graph"), { recursive: true, force: true });
     const rerun = spawnSync(process.execPath, [CLI], { cwd: repo, encoding: "utf8" });

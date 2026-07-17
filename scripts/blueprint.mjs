@@ -468,6 +468,7 @@ function classifyStatus(line) {
 function build(root, outDir, options = {}) {
   const config = loadConfig(root, outDir);
   const limit = Number(options.limit ?? 0);
+  const sourceObservation = gitSourceObservation(root);
   const files = repoFiles(root, config, limit);
   const allFiles = new Set(files);
   const docs = files.filter(isDoc).map((path) => extractDoc(root, path, allFiles, config));
@@ -551,6 +552,7 @@ function build(root, outDir, options = {}) {
     flows,
     docsResult,
     stats: { files: files.length, docs: docs.length, claims: claims.length, codeRefs: codeRefs.size },
+    sourceObservation,
   });
   return { map, stale, index, queue, graphGeneration, flows, docsResult, blueprintManifest };
 }
@@ -558,10 +560,63 @@ function build(root, outDir, options = {}) {
 // Write the portable Blueprint manifest at `.blueprint/manifest.json` —
 // the canonical machine entry point for downstream consumers. Repo-relative
 // paths only; no absolute Windows/Mac paths; safe to diff and digest.
-function writeBlueprintManifest(root, outDir, { map, index, graphGeneration, flows, docsResult, stats }) {
+function gitBaseCommit(root) {
+  try {
+    const value = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 5000,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return /^[0-9a-f]{40,64}$/i.test(value) ? value.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function gitSourceObservation(root) {
+  const head = gitBaseCommit(root);
+  if (!head) return null;
+  try {
+    const status = execFileSync("git", [
+      "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".",
+      ":(exclude).agent", ":(exclude).agent/**",
+      ":(exclude).blueprint", ":(exclude).blueprint/**",
+    ], {
+      cwd: root,
+      timeout: 5000,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return {
+      head,
+      dirty: status.length > 0,
+      statusDigest: createHash("sha256").update(status).digest("hex"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function finalizedSourceEpoch(root, before) {
+  const after = gitSourceObservation(root);
+  if (!before || !after) return { baseCommit: null, sourceState: "unversioned" };
+  if (before.head !== after.head || before.statusDigest !== after.statusDigest) {
+    return { baseCommit: null, sourceState: "concurrent_update" };
+  }
+  if (before.dirty) return { baseCommit: null, sourceState: "dirty_overlay" };
+  return { baseCommit: before.head, sourceState: "clean" };
+}
+
+function writeBlueprintManifest(root, outDir, {
+  map, index, graphGeneration, flows, docsResult, stats, sourceObservation,
+}) {
   const manifestDir = join(root, ".blueprint");
   mkdirSync(manifestDir, { recursive: true });
   const graphManifest = graphGeneration?.manifest ?? {};
+  const sourceEpoch = finalizedSourceEpoch(root, sourceObservation);
   const stableStamp = index?.sourceSignature
     ? `gen:${index.sourceSignature.slice(0, 16)}`
     : `gen:${Date.now().toString(16).padStart(16, "0")}`;
@@ -584,6 +639,8 @@ function writeBlueprintManifest(root, outDir, { map, index, graphGeneration, flo
       schemaVersion: 1,
       id: graphManifest.generationId ?? null,
       revision: graphManifest.generationId ?? null,
+      baseCommit: sourceEpoch.baseCommit,
+      sourceState: sourceEpoch.sourceState,
       indexedAt: graphManifest.generatedAt ?? null,
       stale: false,
       sourceKind: "blueprint",
@@ -1384,12 +1441,18 @@ function runGraphCommand(root, outDir, subcommand, args) {
   if (subcommand === "candidates") {
     const generation = readFreshGraph(root, outDir);
     const query = String(args.query ?? args.task ?? args._.join(" ")).trim();
-    console.log(JSON.stringify(createContextCandidateSet(generation, {
+    const repoCodeScanStarted = process.hrtime.bigint();
+    const candidateSet = createContextCandidateSet(generation, {
       task: String(args.task ?? query),
       query,
       maxCandidates: Number(args.limit ?? 40),
       anchors: args.anchors ? String(args.anchors).split(",").map((path) => path.trim()).filter(Boolean) : [],
-    }), null, 2));
+    });
+    const repoCodeScanMs = Number(process.hrtime.bigint() - repoCodeScanStarted) / 1_000_000;
+    candidateSet._rightcontext = {
+      stageElapsedMs: { repo_code_scan: Math.max(0, repoCodeScanMs) },
+    };
+    console.log(JSON.stringify(candidateSet, null, 2));
     return 0;
   }
   if (subcommand === "planner-status") {

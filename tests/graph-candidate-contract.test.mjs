@@ -28,6 +28,14 @@ test("graph candidates CLI validates as ContextCandidateSet v1", () => {
       encoding: "utf8",
     });
     assert.equal(generated.status, 0, generated.stderr || generated.stdout);
+    const generatedPayload = JSON.parse(generated.stdout);
+    assert.equal(generatedPayload.candidates.length > 0, true);
+    assert.equal(
+      Number.isFinite(generatedPayload?._rightcontext?.stageElapsedMs?.repo_code_scan),
+      true,
+      "candidate CLI must emit a content-free repo scan duration",
+    );
+    assert.equal(generatedPayload._rightcontext.stageElapsedMs.repo_code_scan >= 0, true);
     const validator = String.raw`
 import json, sys
 from jsonschema import Draft202012Validator
