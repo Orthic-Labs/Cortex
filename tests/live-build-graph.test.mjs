@@ -51,3 +51,45 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("build stays fresh when tracked generated docs are rewritten", () => {
+  const repo = path.join(os.tmpdir(), `blueprint-generated-docs-${process.pid}-${Date.now()}`);
+  fs.cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    fs.renameSync(path.join(repo, "docs/ARCHITECTURE.md"), path.join(repo, "docs/design.md"));
+    assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "user.name", "Test"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["add", "-A"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: repo }).status, 0);
+
+    const first = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.equal(spawnSync("git", [
+      "add", "-f", ".agent", ".blueprint", "docs/product.md", "docs/architecture.md",
+    ], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "track generated docs"], { cwd: repo }).status, 0);
+
+    fs.appendFileSync(path.join(repo, "src/service.ts"), "\nexport const changed = true;\n", "utf8");
+    assert.equal(spawnSync("git", ["add", "src/service.ts"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "change source"], { cwd: repo }).status, 0);
+
+    const second = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    const status = spawnSync(process.execPath, [CLI, "graph", "status", "--out", ".agent"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
+    assert.equal(manifest.generation.sourceState, "clean");
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

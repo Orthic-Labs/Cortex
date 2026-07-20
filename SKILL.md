@@ -181,6 +181,23 @@ blueprint hygiene status --json
 blueprint hygiene refresh --json  # targeted reusable facts; network-backed checks are timestamped
 ```
 
+### Freshness checks and recovery
+
+Canonical state definitions, diagnosis, recovery, safeguards, and incident evidence live in
+`docs/BLUEPRINT-FRESHNESS.md`.
+
+- RightContext's resident `/freshness` verdict is the sole prompt-time authority. The provider
+  passes that exact generation to `graph candidates`; Node verifies manifest/body identity without
+  rescanning the repository. Standalone commands retain the full fail-closed source-hash check.
+- `dirty_overlay` is healthy: RightContext uses the verified committed snapshot plus tracked
+  working-tree context from the live overlay. A standalone `blueprint doctor --json` result of
+  `stale_graph` on a dirty tree does not by itself mean prompt-time Blueprint is unusable.
+- Every build runs its freshness postcondition. Workspace setup installs the reconcile hook as
+  `post-commit`, `post-merge`, and `post-checkout`; failures are recorded without repository content
+  in `.git/blueprint-reconcile.log`.
+- `concurrent_update`, `partial_reindex`, `missing_snapshot`, or a generation mismatch fail closed.
+  Follow the canonical runbook instead of rebuilding inside the prompt path.
+
 The bare `blueprint` command runs **Phase 1 only** — it exits after writing the map, so an agent that just runs the command naturally stops there. That is the right stopping point ONLY for a quick task-scoped brief (read `TASK-BRIEF.md` and go).
 
 **If the intent is to UNDERSTAND / inherit / audit / onboard the repo, Phase 1 is not the deliverable — continue to Phase 2.** Do not report the repo as "mapped" or "understood" after Phase 1 alone; that only produced the deterministic skeleton, with claims still UNVERIFIED. Either run Phase 2 now, or explicitly tell the user you stopped at the cheap Phase-1 map and offer Phase 2.

@@ -206,6 +206,36 @@ test("standalone: graph candidates never rebuilds a stale legacy manifest", () =
   }
 });
 
+test("federated graph candidates trust only the exact freshness generation", () => {
+  const repo = makeCleanRepo();
+  try {
+    runCli(repo, ["build", "--out", ".agent"]);
+    const manifest = JSON.parse(readFileSync(join(repo, ".agent/graph/manifest.json"), "utf8"));
+    writeFileSync(join(repo, "src/handler.ts"), "export function changedHandler() { return 'changed'; }\n");
+
+    const trusted = spawnSync(process.execPath, [
+      CLI,
+      "graph", "candidates",
+      "--task", "handler",
+      "--expected-generation", manifest.generationId,
+    ], { cwd: repo, encoding: "utf8", timeout: 2000 });
+    assert.equal(trusted.status, 0, trusted.stderr || trusted.stdout);
+    const candidateSet = JSON.parse(trusted.stdout);
+    assert.equal(candidateSet.freshness.revision, manifest.generationId);
+
+    const rejected = spawnSync(process.execPath, [
+      CLI,
+      "graph", "candidates",
+      "--task", "handler",
+      "--expected-generation", `sha256:${"0".repeat(64)}`,
+    ], { cwd: repo, encoding: "utf8", timeout: 2000 });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /graph_generation_changed/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // 5) Same-slug file paths get stable unique IDs.
 test("standalone: same-slug paths receive collision-safe IDs", () => {
   const repo = makeRepo();

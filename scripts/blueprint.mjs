@@ -580,9 +580,10 @@ function gitSourceObservation(root) {
   if (!head) return null;
   try {
     const status = execFileSync("git", [
-      "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".",
+      "status", "--porcelain=v1", "-z", "--untracked-files=no", "--", ".",
       ":(exclude).agent", ":(exclude).agent/**",
       ":(exclude).blueprint", ":(exclude).blueprint/**",
+      ":(exclude)docs/product.md", ":(exclude)docs/architecture.md",
     ], {
       cwd: root,
       timeout: 5000,
@@ -1439,7 +1440,9 @@ function runGraphCommand(root, outDir, subcommand, args) {
     return 0;
   }
   if (subcommand === "candidates") {
-    const generation = readFreshGraph(root, outDir);
+    const generation = readFreshGraph(root, outDir, {
+      expectedGeneration: args["expected-generation"],
+    });
     const query = String(args.query ?? args.task ?? args._.join(" ")).trim();
     const repoCodeScanStarted = process.hrtime.bigint();
     const candidateSet = createContextCandidateSet(generation, {
@@ -1663,6 +1666,29 @@ function readFreshGraph(root, outDir, options = {}) {
   const fileLimit = options.fileLimit != null && options.fileLimit > 0
     ? options.fileLimit
     : manifestFileLimit || 0;
+  const expectedGeneration = String(options.expectedGeneration ?? "").trim();
+  if (expectedGeneration) {
+    if (!/^sha256:[a-f0-9]{64}$/.test(expectedGeneration)) {
+      throw graphReadError("graph_generation_invalid", "Expected graph generation is invalid");
+    }
+    if (!persisted.complete || persisted.generationId !== expectedGeneration) {
+      throw graphReadError(
+        "graph_generation_changed",
+        "Graph generation changed after the central freshness verdict",
+        { expectedGeneration, observedGeneration: persisted.generationId ?? null },
+      );
+    }
+    const generation = readJson(join(root, outDir, "graph", "graph.json"), null);
+    const bodyGeneration = generation?.manifest?.generationId ?? null;
+    if (!generation || bodyGeneration !== expectedGeneration) {
+      throw graphReadError(
+        "graph_generation_changed",
+        "Graph body does not match the central freshness verdict",
+        { expectedGeneration, observedGeneration: bodyGeneration },
+      );
+    }
+    return generation;
+  }
   let status = graphStatus(root, outDir, { fileLimit });
   if (status.state !== "fresh") {
     throw graphReadError("graph_rebuild_required", `Graph is ${status.state}; run blueprint build`, { state: status.state });
@@ -1907,11 +1933,9 @@ function main() {
   }
   if (command === "build") {
     const result = build(root, outDir, args);
-    if (args.check) {
-      const config = loadConfig(root, outDir);
-      const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
-      if (!fresh) throw new Error("generated graph is stale immediately after build");
-    }
+    const config = loadConfig(root, outDir);
+    const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
+    if (!fresh) throw new Error("generated graph is stale immediately after build");
     console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md`);
     if (result.docsResult?.mode === "docs_conflict") {
       console.warn(`docs_conflict: ${result.docsResult.conflicts.join(", ")} — wrote fallback to .agent/docs/`);
