@@ -37,11 +37,13 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
 
     fs.appendFileSync(path.join(repo, "src/service.ts"), "\n// dirty overlay\n", "utf8");
     const dirtyBuild = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--check"], { cwd: repo, encoding: "utf8" });
-    assert.equal(dirtyBuild.status, 0, dirtyBuild.stderr || dirtyBuild.stdout);
+    assert.notEqual(dirtyBuild.status, 0);
+    assert.match(dirtyBuild.stderr, /graph_build_deferred_dirty/);
     const dirtyManifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
-    assert.equal(dirtyManifest.generation.baseCommit, null);
-    assert.equal(dirtyManifest.generation.sourceState, "dirty_overlay");
+    assert.equal(dirtyManifest.generation.baseCommit, baseCommit);
+    assert.equal(dirtyManifest.generation.sourceState, "clean");
 
+    assert.equal(spawnSync("git", ["restore", "src/service.ts"], { cwd: repo }).status, 0);
     fs.rmSync(path.join(repo, ".agent/graph"), { recursive: true, force: true });
     const rerun = spawnSync(process.execPath, [CLI], { cwd: repo, encoding: "utf8" });
     assert.equal(rerun.status, 0, rerun.stderr || rerun.stdout);

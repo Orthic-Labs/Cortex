@@ -469,6 +469,12 @@ function build(root, outDir, options = {}) {
   const config = loadConfig(root, outDir);
   const limit = Number(options.limit ?? 0);
   const sourceObservation = gitSourceObservation(root);
+  if (sourceObservation?.dirty) {
+    throw graphReadError(
+      "graph_build_deferred_dirty",
+      "Tracked source changes are present; commit or restore them before rebuilding the committed graph",
+    );
+  }
   const files = repoFiles(root, config, limit);
   const allFiles = new Set(files);
   const docs = files.filter(isDoc).map((path) => extractDoc(root, path, allFiles, config));

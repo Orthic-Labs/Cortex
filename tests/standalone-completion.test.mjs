@@ -236,6 +236,31 @@ test("federated graph candidates trust only the exact freshness generation", () 
   }
 });
 
+test("build rejects tracked dirty source before replacing the committed graph", () => {
+  const repo = makeCleanRepo();
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["config", "user.name", "Test"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["add", "-A"], { cwd: repo }).status, 0);
+    assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: repo }).status, 0);
+    runCli(repo, ["build", "--out", ".agent"]);
+    const graphPath = join(repo, ".agent/graph/graph.json");
+    const before = readFileSync(graphPath, "utf8");
+    writeFileSync(join(repo, "src/handler.ts"), "export function dirtyHandler() { return 'dirty'; }\n");
+
+    const rejected = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /graph_build_deferred_dirty/);
+    assert.equal(readFileSync(graphPath, "utf8"), before);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // 5) Same-slug file paths get stable unique IDs.
 test("standalone: same-slug paths receive collision-safe IDs", () => {
   const repo = makeRepo();
