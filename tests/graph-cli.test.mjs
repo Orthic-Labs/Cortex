@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
 const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
+const SKILL = path.join(BLUEPRINT, "SKILL.md");
 const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
 
 function copyFixture() {
@@ -93,6 +94,186 @@ test("doctor reports 'broken' when the graph provider version is incompatible", 
     const payload = JSON.parse(doctor.stdout);
     assert.equal(payload.state, "broken");
     assert.ok(payload.reasons.some((r) => r.providerMismatch === true));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("doctor --full rejects Phase 1 alone and accepts current complete understanding", () => {
+  const repo = copyFixture();
+  try {
+    const goDir = path.join(repo, "go-src");
+    fs.mkdirSync(goDir, { recursive: true });
+    fs.writeFileSync(path.join(goDir, "thing.go"), "package thing\n\nfunc hello() string { return \"world\" }\n");
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+
+    const phase1Only = run(["doctor", "--full", "--json", "--out", ".agent"], repo);
+    assert.equal(phase1Only.status, 2, phase1Only.stderr || phase1Only.stdout);
+    const incomplete = JSON.parse(phase1Only.stdout);
+    assert.equal(incomplete.completion.state, "incomplete");
+    assert.ok(incomplete.reasons.some((reason) => reason.code === "missing_understanding"));
+
+    const coldPlanResult = run(["phase2", "plan", "--json", "--out", ".agent"], repo);
+    assert.equal(coldPlanResult.status, 0, coldPlanResult.stderr || coldPlanResult.stdout);
+    const coldPlan = JSON.parse(coldPlanResult.stdout);
+    assert.equal(coldPlan.complete, false);
+    assert.deepEqual(
+      coldPlan.dimensions.synthesize.map((item) => item.dimension),
+      ["architecture", "interfaces", "health", "contract", "security", "solid"],
+    );
+    assert.ok(fs.existsSync(path.join(repo, ".agent/phase2-plan.json")));
+
+    const graphManifest = JSON.parse(
+      fs.readFileSync(path.join(repo, ".agent/graph/manifest.json"), "utf8"),
+    );
+    fs.writeFileSync(
+      path.join(repo, ".agent/understanding.json"),
+      JSON.stringify({
+        sourceGenerationId: graphManifest.generationId,
+        architecture: {
+          summary: "Fixture commerce flow.",
+          stack: [],
+          components: [
+            { name: "API", evidence: "src/service.ts:1" },
+            { name: "Store", evidence: "src/service.ts:10" },
+          ],
+          dataFlow: ["Request -> API -> Store -> Response"],
+          entryPoints: [],
+          stateStores: [],
+          externalDeps: [],
+          deployableUnits: [],
+          externalServices: [],
+          infrastructure: [],
+          crossCutting: [],
+          flows: [],
+          coverageGaps: [],
+          capabilityCoverage: [],
+        },
+        interfaces: {
+          publicApi: [], moduleInterfaces: [], dataContracts: [], configKeys: [],
+          extensionPoints: [], fragileContracts: [],
+        },
+        health: {
+          oversized: [], slop: [], hotspots: [], duplication: [], coupling: [],
+          untested: [], deadWeight: [], top10: [],
+        },
+        contract: {
+          invariants: [], constraints: [], assumptions: [], entropy: [], decisions: [],
+        },
+        security: {
+          trustBoundaries: [], secrets: [], injectionSurface: [], authz: [],
+          dataProtection: [], dangerousPatterns: [], posture: [],
+        },
+        solid: { dimensions: [], scorecard: [], top5: [] },
+        incremental: {
+          dimensions: Object.fromEntries(
+            ["architecture", "interfaces", "health", "contract", "security", "solid"].map((dimension) => [
+              dimension,
+              { inputFiles: ["src/service.ts"], inputVerdictIds: [] },
+            ]),
+          ),
+        },
+      }, null, 2),
+    );
+    fs.writeFileSync(
+      path.join(repo, ".agent/verdicts.json"),
+      JSON.stringify({ sourceGenerationId: "sha256:stale-generation", verdicts: [] }, null, 2),
+    );
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+
+    const staleVerdicts = run(["doctor", "--full", "--json", "--out", ".agent"], repo);
+    assert.equal(staleVerdicts.status, 2, staleVerdicts.stderr || staleVerdicts.stdout);
+    assert.ok(JSON.parse(staleVerdicts.stdout).reasons.some((reason) => reason.code === "stale_verdicts"));
+
+    const sealResult = run(["phase2", "seal", "--json", "--out", ".agent"], repo);
+    assert.equal(sealResult.status, 0, sealResult.stderr || sealResult.stdout);
+    const sealed = JSON.parse(sealResult.stdout);
+    assert.equal(sealed.state, "sealed");
+    assert.equal(sealed.sourceGenerationId, graphManifest.generationId);
+
+    const full = run(["doctor", "--full", "--json", "--out", ".agent"], repo);
+    assert.equal(full.status, 0, full.stderr || full.stdout);
+    const complete = JSON.parse(full.stdout);
+    assert.equal(complete.state, "degraded");
+    assert.equal(complete.completion.state, "complete");
+    assert.deepEqual(complete.completion.phases, {
+      phase1: "complete",
+      phase2: "complete",
+      phase3: "complete",
+      phase4: "not_required",
+    });
+
+    const currentDocGeneration = graphManifest.generationId.replace(/^sha256:/, "");
+    const architecturePath = [
+      path.join(repo, "docs/architecture.md"),
+      path.join(repo, ".agent/docs/architecture.md"),
+    ].find((candidate) =>
+      fs.existsSync(candidate)
+      && fs.readFileSync(candidate, "utf8").includes(`gen:${currentDocGeneration}`),
+    );
+    assert.ok(architecturePath, "no generated architecture doc matched the current graph generation");
+    const currentArchitecture = fs.readFileSync(architecturePath, "utf8");
+    fs.writeFileSync(
+      architecturePath,
+      currentArchitecture.replace(`gen:${currentDocGeneration}`, "gen:stale-generation"),
+    );
+    const staleDocs = run(["doctor", "--full", "--json", "--out", ".agent"], repo);
+    assert.equal(staleDocs.status, 2, staleDocs.stderr || staleDocs.stdout);
+    assert.ok(JSON.parse(staleDocs.stdout).reasons.some((reason) => reason.code === "stale_human_docs"));
+
+    fs.writeFileSync(architecturePath, currentArchitecture);
+    assert.equal(run(["doctor", "--full", "--json", "--out", ".agent"], repo).status, 0);
+
+    fs.appendFileSync(path.join(repo, "go-src/thing.go"), "\n// unrelated implementation detail\n");
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+    const incrementalPlanResult = run(["phase2", "plan", "--json", "--out", ".agent"], repo);
+    assert.equal(incrementalPlanResult.status, 0, incrementalPlanResult.stderr || incrementalPlanResult.stdout);
+    const incrementalPlan = JSON.parse(incrementalPlanResult.stdout);
+    assert.equal(incrementalPlan.complete, true);
+    assert.deepEqual(incrementalPlan.verdicts.verify, []);
+    assert.deepEqual(
+      incrementalPlan.dimensions.reuse,
+      ["architecture", "interfaces", "health", "contract", "security", "solid"],
+    );
+    assert.equal(run(["phase2", "seal", "--json", "--out", ".agent"], repo).status, 0);
+    assert.equal(run(["doctor", "--full", "--json", "--out", ".agent"], repo).status, 0);
+
+    fs.appendFileSync(path.join(repo, "src/service.ts"), "\nexport const changedEvidence = true;\n");
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+    const affectedPlan = JSON.parse(run(["phase2", "plan", "--json", "--out", ".agent"], repo).stdout);
+    assert.equal(affectedPlan.complete, false);
+    assert.ok(affectedPlan.dimensions.synthesize.length > 0);
+    const affectedDoctor = run(["doctor", "--full", "--json", "--out", ".agent"], repo);
+    assert.equal(affectedDoctor.status, 2, affectedDoctor.stderr || affectedDoctor.stdout);
+    assert.ok(JSON.parse(affectedDoctor.stdout).reasons.some((reason) => reason.code === "incremental_phase2_pending"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("Blueprint invocation contract always continues through Phase 2-4", () => {
+  const skill = fs.readFileSync(SKILL, "utf8");
+  assert.match(skill, /run Blueprint[\s\S]{0,300}complete Phase 1–4 workflow/i);
+  assert.match(skill, /automatic maintenance[\s\S]{0,500}Phase 1 only/i);
+  assert.match(skill, /post-commit[\s\S]{0,300}must not start Phase 2/i);
+  assert.match(skill, /doctor --full/);
+  assert.doesNotMatch(skill, /offer Phase 2/i);
+  assert.match(skill, /Never ask whether to run Phase 2/i);
+});
+
+test("Phase 1 and phase2 plan recover from corrupt semantic cache artifacts", () => {
+  const repo = copyFixture();
+  try {
+    assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
+    fs.writeFileSync(path.join(repo, ".agent/verdicts.json"), "{broken");
+    fs.writeFileSync(path.join(repo, ".agent/understanding.json"), "{broken");
+    const rebuild = run(["build", "--out", ".agent"], repo);
+    assert.equal(rebuild.status, 0, rebuild.stderr || rebuild.stdout);
+    const planResult = run(["phase2", "plan", "--json", "--out", ".agent"], repo);
+    assert.equal(planResult.status, 0, planResult.stderr || planResult.stdout);
+    const plan = JSON.parse(planResult.stdout);
+    assert.equal(plan.complete, false);
+    assert.deepEqual(plan.dimensions.reuse, []);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

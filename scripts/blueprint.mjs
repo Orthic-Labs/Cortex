@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -31,6 +32,11 @@ import {
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
 import { generateDocs } from "../lib/generated-docs.mjs";
+import {
+  buildIncrementalPhase2Plan,
+  isReconciliationDecisionCurrent,
+  sealPhase2Artifacts,
+} from "../lib/incremental-phase2.mjs";
 import { CODE_EXTENSIONS } from "../graph/language-extractors.mjs";
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
 
@@ -53,6 +59,18 @@ const NETWORK_ONLY_HYGIENE_CHECKS = new Set(["outdated", "cargo_outdated"]);
 
 const DEFAULT_OUT = ".agent";
 const SCHEMA_VERSION = 1;
+const FULL_UNDERSTANDING_SHAPE = Object.freeze({
+  architecture: [
+    "stack", "components", "dataFlow", "entryPoints", "stateStores", "externalDeps",
+    "deployableUnits", "externalServices", "infrastructure", "crossCutting",
+    "capabilityCoverage", "flows", "coverageGaps",
+  ],
+  interfaces: ["publicApi", "moduleInterfaces", "dataContracts", "configKeys", "extensionPoints", "fragileContracts"],
+  health: ["oversized", "slop", "hotspots", "duplication", "coupling", "untested", "deadWeight", "top10"],
+  contract: ["invariants", "constraints", "assumptions", "entropy", "decisions"],
+  security: ["trustBoundaries", "secrets", "injectionSurface", "authz", "dataProtection", "dangerousPatterns", "posture"],
+  solid: ["dimensions", "scorecard", "top5"],
+});
 const STATUS_RE =
   /\b(done|complete|implemented|partial|pending|planned|stale|drift|contradict|missing|not implemented|not shipped|not built|gap|gotcha|decision|canonical|supersedes)\b/i;
 const GOTCHA_RE = /\b(do not|don't|never|missing|not implemented|not shipped|not built|stale|drift|contradict|gotcha|warning)\b/i;
@@ -119,7 +137,8 @@ function usage() {
   ${command} "task to orient around"
   ${command} build [--out .agent] [--limit N] [--check] [--no-readme-link]
   ${command} brief --task "..." [--out .agent] [--refresh] [--limit N]
-  ${command} doctor [--out .agent] [--json] [--limit N]
+  ${command} doctor [--out .agent] [--json] [--full] [--limit N]
+  ${command} phase2 plan|seal [--out .agent] [--json] [--no-readme-link]
   ${command} hygiene status|refresh [--out .agent] [--only check,...] [--offline] [--json]
   ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N]
 `);
@@ -140,7 +159,7 @@ function parseArgs(argv) {
     const [key, inline] = arg.slice(2).split("=", 2);
     if (inline !== undefined) {
       args[key] = inline;
-    } else if (["check", "refresh", "complete", "json", "offline", "no-readme-link"].includes(key)) {
+    } else if (["check", "refresh", "complete", "json", "full", "offline", "no-readme-link"].includes(key)) {
       args[key] = true;
     } else {
       args[key] = argv[++i];
@@ -161,6 +180,13 @@ function readJson(path, fallback) {
 function writeJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  renameSync(tmp, path);
 }
 
 function slug(input) {
@@ -550,17 +576,25 @@ function build(root, outDir, options = {}) {
   const graphGeneration = buildGraphGeneration(root, { outDir, fileLimit: limit || 0 });
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
+  const phase2Plan = buildIncrementalPhase2Plan({
+    graph: graphGeneration,
+    queue,
+    verdictEnvelope: optionalJson(join(root, outDir, "verdicts.json")).value,
+    understanding: optionalJson(join(root, outDir, "understanding.json")).value,
+  });
+  writeJsonAtomic(join(root, outDir, "phase2-plan.json"), phase2Plan);
   const docsResult = generateDocs(root, { noReadmeLink: Boolean(options.noReadmeLink) });
   const blueprintManifest = writeBlueprintManifest(root, outDir, {
     map,
     index,
     graphGeneration,
     flows,
+    phase2Plan,
     docsResult,
     stats: { files: files.length, docs: docs.length, claims: claims.length, codeRefs: codeRefs.size },
     sourceObservation,
   });
-  return { map, stale, index, queue, graphGeneration, flows, docsResult, blueprintManifest };
+  return { map, stale, index, queue, graphGeneration, flows, phase2Plan, docsResult, blueprintManifest };
 }
 
 // Write the portable Blueprint manifest at `.blueprint/manifest.json` —
@@ -618,7 +652,7 @@ function finalizedSourceEpoch(root, before) {
 }
 
 function writeBlueprintManifest(root, outDir, {
-  map, index, graphGeneration, flows, docsResult, stats, sourceObservation,
+  map, index, graphGeneration, flows, phase2Plan, docsResult, stats, sourceObservation,
 }) {
   const manifestDir = join(root, ".blueprint");
   mkdirSync(manifestDir, { recursive: true });
@@ -640,6 +674,7 @@ function writeBlueprintManifest(root, outDir, {
       index: `${outDir}/index.json`,
       queue: `${outDir}/queue.json`,
       flows: `${outDir}/flows.json`,
+      phase2Plan: `${outDir}/phase2-plan.json`,
       graph: `${outDir}/graph/manifest.json`,
     },
     generation: {
@@ -676,6 +711,11 @@ function writeBlueprintManifest(root, outDir, {
     },
     docs: docsResult?.mode ?? "wrote",
     docsConflict: docsResult?.conflicts ?? [],
+    phase2: {
+      complete: Boolean(phase2Plan?.complete),
+      verify: phase2Plan?.verdicts?.verify?.length ?? 0,
+      synthesize: phase2Plan?.dimensions?.synthesize?.length ?? 0,
+    },
     sourceSignature: index?.sourceSignature ?? null,
   };
   const manifestPath = join(manifestDir, "manifest.json");
@@ -1239,9 +1279,202 @@ function countTaskTermHits(taskTerms, text) {
   return hits;
 }
 
+function optionalJson(path) {
+  if (!existsSync(path)) return { state: "missing", value: null };
+  try {
+    return { state: "present", value: JSON.parse(readFileSync(path, "utf8")) };
+  } catch (error) {
+    return { state: "corrupt", value: null, error: String(error?.message ?? error) };
+  }
+}
+
+function fullCompletionStatus(root, outDir, graph) {
+  const reasons = [];
+  const graphGenerationId = graph.manifest?.generationId ?? null;
+  const portableResult = optionalJson(join(root, ".blueprint/manifest.json"));
+  const portable = portableResult.value;
+  const portableCurrent = portableResult.state === "present"
+    && portable?.generation?.id === graphGenerationId
+    && portable?.generation?.sourceState !== "concurrent_update"
+    && portable?.generation?.stale !== true;
+  if (portableResult.state === "missing") {
+    reasons.push({ code: "missing_portable_manifest", severity: "blocker", message: ".blueprint/manifest.json is missing." });
+  } else if (portableResult.state === "corrupt") {
+    reasons.push({ code: "corrupt_portable_manifest", severity: "blocker", message: portableResult.error });
+  } else if (portable?.generation?.id !== graphGenerationId) {
+    reasons.push({
+      code: "manifest_generation_mismatch",
+      severity: "blocker",
+      message: "portable and graph manifests name different generations; run the complete build to reseal them together.",
+    });
+  } else if (portable?.generation?.sourceState === "concurrent_update") {
+    reasons.push({
+      code: "concurrent_update",
+      severity: "blocker",
+      message: "source changed while Blueprint was publishing; preserve the previous complete generation and rerun.",
+    });
+  } else if (portable?.generation?.stale === true) {
+    reasons.push({
+      code: "stale_portable_manifest",
+      severity: "blocker",
+      message: "portable Blueprint manifest is marked stale; rebuild and reseal before completion.",
+    });
+  }
+
+  const understandingResult = optionalJson(join(root, outDir, "understanding.json"));
+  const understanding = understandingResult.value;
+  let phase2Complete = understandingResult.state === "present";
+  if (understandingResult.state === "missing") {
+    reasons.push({ code: "missing_understanding", severity: "blocker", message: "Phase 2 understanding.json is missing; continue automatically with verification and synthesis." });
+  } else if (understandingResult.state === "corrupt") {
+    reasons.push({ code: "corrupt_understanding", severity: "blocker", message: understandingResult.error });
+  } else if (understanding?.sourceGenerationId !== graphGenerationId) {
+    phase2Complete = false;
+    reasons.push({ code: "stale_understanding", severity: "blocker", message: "understanding.json was synthesized from a different graph generation; rerun Phase 2." });
+  }
+
+  const missingUnderstandingFields = [];
+  if (phase2Complete) {
+    for (const [dimension, fields] of Object.entries(FULL_UNDERSTANDING_SHAPE)) {
+      const section = understanding?.[dimension];
+      if (!section || typeof section !== "object" || Array.isArray(section)) {
+        missingUnderstandingFields.push(dimension);
+        continue;
+      }
+      for (const field of fields) {
+        if (!Array.isArray(section[field])) missingUnderstandingFields.push(`${dimension}.${field}`);
+      }
+    }
+    if (!(understanding.architecture.components?.length > 0)) missingUnderstandingFields.push("architecture.components(non-empty)");
+    if (!(understanding.architecture.dataFlow?.length > 0)) missingUnderstandingFields.push("architecture.dataFlow(non-empty)");
+    if (JSON.stringify(understanding).includes('"pending":true')) missingUnderstandingFields.push("pending stubs");
+    if (missingUnderstandingFields.length) {
+      phase2Complete = false;
+      reasons.push({
+        code: "incomplete_understanding",
+        severity: "blocker",
+        fields: missingUnderstandingFields,
+        message: "Phase 2 synthesis is incomplete; all six dimensions and a real component flow are mandatory.",
+      });
+    }
+  }
+
+  const verdictsResult = optionalJson(join(root, outDir, "verdicts.json"));
+  const verdictsEnvelope = verdictsResult.value
+    && typeof verdictsResult.value === "object"
+    && !Array.isArray(verdictsResult.value)
+    ? verdictsResult.value
+    : null;
+  const verdicts = Array.isArray(verdictsResult.value)
+    ? verdictsResult.value
+    : Array.isArray(verdictsEnvelope?.verdicts)
+      ? verdictsEnvelope.verdicts
+      : null;
+  if (!verdicts) {
+    phase2Complete = false;
+    reasons.push({
+      code: verdictsResult.state === "corrupt" ? "corrupt_verdicts" : "missing_verdicts",
+      severity: "blocker",
+      message: "Phase 2 verdicts.json is missing or invalid; claim verification has not completed.",
+    });
+  } else if (verdictsEnvelope?.sourceGenerationId !== graphGenerationId) {
+    phase2Complete = false;
+    reasons.push({
+      code: "stale_verdicts",
+      severity: "blocker",
+      message: "verdicts.json is not bound to the current graph generation; rerun claim verification.",
+    });
+  }
+
+  const graphBodyResult = optionalJson(join(root, outDir, "graph/graph.json"));
+  const queueResult = optionalJson(join(root, outDir, "queue.json"));
+  if (graphBodyResult.state === "present" && queueResult.state === "present") {
+    const incrementalPlan = buildIncrementalPhase2Plan({
+      graph: graphBodyResult.value,
+      queue: queueResult.value,
+      verdictEnvelope: verdictsEnvelope,
+      understanding,
+    });
+    if (!incrementalPlan.complete) {
+      phase2Complete = false;
+      reasons.push({
+        code: "incremental_phase2_pending",
+        severity: "blocker",
+        verify: incrementalPlan.verdicts.verify.length,
+        synthesize: incrementalPlan.dimensions.synthesize.length,
+        message: "Phase 2 has evidence-dependent verification or synthesis misses; process phase2-plan.json and seal the result.",
+      });
+    }
+  } else {
+    phase2Complete = false;
+    reasons.push({
+      code: "incremental_phase2_unavailable",
+      severity: "blocker",
+      message: "Phase 2 dependency inputs are missing or corrupt; rebuild Phase 1 before semantic work.",
+    });
+  }
+
+  const generatedDoc = (...paths) => {
+    for (const path of paths) {
+      if (!existsSync(path)) continue;
+      const text = readFileSync(path, "utf8");
+      if (text.includes("<!-- generated by blueprint")) return text;
+    }
+    return "";
+  };
+  const product = generatedDoc(join(root, "docs/product.md"), join(root, outDir, "docs/product.md"));
+  const architecture = generatedDoc(join(root, "docs/architecture.md"), join(root, outDir, "docs/architecture.md"));
+  const docsPresent = Boolean(product && architecture);
+  const expectedDocGeneration = graphGenerationId
+    ? `gen:${graphGenerationId.replace(/^sha256:/, "")}`
+    : null;
+  const docsCurrent = docsPresent
+    && expectedDocGeneration
+    && product.includes(expectedDocGeneration)
+    && architecture.includes(expectedDocGeneration);
+  const workflowPresent = architecture.includes("## System workflow") && architecture.includes("```mermaid");
+  const phase3Complete = Boolean(docsPresent && docsCurrent && workflowPresent);
+  if (!docsPresent) {
+    reasons.push({ code: "missing_human_docs", severity: "blocker", message: "current generated docs/product.md and docs/architecture.md are required." });
+  } else if (!docsCurrent) {
+    reasons.push({ code: "stale_human_docs", severity: "blocker", message: "generated human docs do not match the current graph generation; regenerate them after Phase 2." });
+  } else if (!workflowPresent) {
+    reasons.push({ code: "missing_workflow_diagram", severity: "blocker", message: "docs/architecture.md lacks the synthesized component Mermaid; regenerate after Phase 2." });
+  }
+
+  const divergences = (verdicts ?? []).filter((item) => ["contradicted", "stale"].includes(item?.verdict));
+  let phase4 = "not_required";
+  if (divergences.length) {
+    const reconcileResult = optionalJson(join(root, outDir, "reconcile.json"));
+    const reconcile = Array.isArray(reconcileResult.value)
+      ? reconcileResult.value
+      : Array.isArray(reconcileResult.value?.entries)
+        ? reconcileResult.value.entries
+        : [];
+    const decisions = new Map(reconcile.map((item) => [item.claimId, item]));
+    phase4 = divergences.every((item) => isReconciliationDecisionCurrent(item, decisions.get(item.claimId)))
+      ? "complete"
+      : "pending";
+    if (phase4 === "pending") {
+      reasons.push({ code: "pending_reconciliation", severity: "blocker", count: divergences.length, message: "Phase 4 has unresolved code↔doc decisions requiring the user's call." });
+    }
+  }
+
+  const phase1Complete = graph.state === "fresh" && portableCurrent;
+  const phases = {
+    phase1: phase1Complete ? "complete" : "incomplete",
+    phase2: phase2Complete ? "complete" : "incomplete",
+    phase3: phase3Complete ? "complete" : "incomplete",
+    phase4,
+  };
+  const complete = phase1Complete && phase2Complete && phase3Complete && phase4 !== "pending";
+  return { state: complete ? "complete" : "incomplete", phases, reasons };
+}
+
 function doctor(root, outDir, options = {}) {
   const startedAt = new Date().toISOString();
   const jsonMode = Boolean(options.json);
+  const fullMode = Boolean(options.full);
   const out = jsonMode
     ? (line) => process.stdout.write(`${line}\n`)
     : (line) => process.stdout.write(`${line}\n`);
@@ -1324,6 +1557,8 @@ function doctor(root, outDir, options = {}) {
     });
   }
   const graph = graphStatus(root, outDir);
+  const completion = fullMode ? fullCompletionStatus(root, outDir, graph) : null;
+  if (completion) reasons.push(...completion.reasons);
   if (graph.state === "stale") {
     warnings.push(graph.providerMismatch
       ? "graph manifest was built by an older Blueprint provider and must be rebuilt"
@@ -1418,7 +1653,9 @@ function doctor(root, outDir, options = {}) {
       unsupportedFileCount: graph.capabilities?.unsupportedFileCount ?? 0,
       dirtyOverlayFileCount: graph.capabilities?.dirtyOverlayFileCount ?? 0,
     },
+    ...(completion ? { completion: { state: completion.state, phases: completion.phases } } : {}),
   }, null, 2));
+  if (fullMode && completion?.state !== "complete") return 2;
   return state === "ready" || state === "stale" || state === "degraded" ? 0 : 1;
 }
 
@@ -1718,10 +1955,16 @@ function runBriefAndPrint(root, outDir, args) {
   return result.missingExpected.length ? 2 : 0;
 }
 
+function phase1CompletionMarker(args = {}) {
+  return args.check
+    ? "phase1_maintenance=complete full_blueprint=not_requested"
+    : "phase1_ready full_blueprint=incomplete next=phase2";
+}
+
 function runMapAndPrint(root, outDir, args = {}) {
   const { rebuilt } = ensureFresh(root, outDir, args);
   const map = readJson(join(root, outDir, "map.json"), null);
-  console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md`);
+  console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md ${phase1CompletionMarker(args)}`);
   return 0;
 }
 
@@ -1899,6 +2142,65 @@ function runHygieneCommand(root, outDir, subcommand, args) {
   return result.state === "fresh" ? 0 : 2;
 }
 
+function loadPhase2Inputs(root, outDir) {
+  const graph = readJson(join(root, outDir, "graph/graph.json"), null);
+  const queue = readJson(join(root, outDir, "queue.json"), null);
+  if (!graph?.manifest?.generationId) {
+    throw new Error(`phase2_invalid: ${outDir}/graph/graph.json is missing a generation; run blueprint build first`);
+  }
+  if (!Array.isArray(queue?.claims)) {
+    throw new Error(`phase2_invalid: ${outDir}/queue.json is missing or invalid; run blueprint build first`);
+  }
+  return {
+    graph,
+    queue,
+    verdictEnvelope: optionalJson(join(root, outDir, "verdicts.json")).value,
+    understanding: optionalJson(join(root, outDir, "understanding.json")).value,
+  };
+}
+
+function writePhase2Plan(root, outDir, inputs = loadPhase2Inputs(root, outDir)) {
+  const plan = buildIncrementalPhase2Plan(inputs);
+  writeJsonAtomic(join(root, outDir, "phase2-plan.json"), plan);
+  return plan;
+}
+
+function runPhase2Command(root, outDir, subcommand, args) {
+  if (subcommand === "plan") {
+    const plan = writePhase2Plan(root, outDir);
+    if (args.json) console.log(JSON.stringify(plan, null, 2));
+    else console.log(`phase2 ${plan.complete ? "reusable" : "pending"} verify=${plan.verdicts.verify.length} synthesize=${plan.dimensions.synthesize.length}`);
+    return 0;
+  }
+  if (subcommand === "seal") {
+    const inputs = loadPhase2Inputs(root, outDir);
+    const sealed = sealPhase2Artifacts(inputs);
+    writeJsonAtomic(join(root, outDir, "verdicts.json"), sealed.verdicts);
+    writeJsonAtomic(join(root, outDir, "understanding.json"), sealed.understanding);
+    const docs = generateDocs(root, { noReadmeLink: Boolean(args.noReadmeLink) });
+    const plan = writePhase2Plan(root, outDir, {
+      graph: inputs.graph,
+      queue: inputs.queue,
+      verdictEnvelope: sealed.verdicts,
+      understanding: sealed.understanding,
+    });
+    const result = {
+      schemaVersion: 1,
+      state: plan.complete ? "sealed" : "incomplete",
+      sourceGenerationId: inputs.graph.manifest.generationId,
+      verdicts: sealed.verdicts.verdicts.length,
+      dimensions: Object.keys(sealed.understanding.incremental.dimensions).length,
+      complete: plan.complete,
+      docs: docs.mode,
+    };
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`phase2 ${result.state} generation=${result.sourceGenerationId} verdicts=${result.verdicts} dimensions=${result.dimensions}`);
+    return plan.complete ? 0 : 2;
+  }
+  usage();
+  return 1;
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const [command, ...rest] = argv;
@@ -1911,7 +2213,7 @@ function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -1937,12 +2239,17 @@ function main() {
     const hygieneArgs = parseArgs(hygieneRest);
     return runHygieneCommand(root, outDir, subcommand, hygieneArgs);
   }
+  if (command === "phase2") {
+    const [subcommand, ...phase2Rest] = rest;
+    const phase2Args = parseArgs(phase2Rest);
+    return runPhase2Command(root, outDir, subcommand, phase2Args);
+  }
   if (command === "build") {
     const result = build(root, outDir, args);
     const config = loadConfig(root, outDir);
     const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
     if (!fresh) throw new Error("generated graph is stale immediately after build");
-    console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md`);
+    console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md ${phase1CompletionMarker(args)}`);
     if (result.docsResult?.mode === "docs_conflict") {
       console.warn(`docs_conflict: ${result.docsResult.conflicts.join(", ")} — wrote fallback to .agent/docs/`);
     }
@@ -1952,7 +2259,7 @@ function main() {
   if (command === "brief") {
     return runBriefAndPrint(root, outDir, args);
   }
-  if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json) });
+  if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json), full: Boolean(args.full) });
   usage();
   return 1;
 }

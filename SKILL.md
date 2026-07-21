@@ -12,6 +12,31 @@ Canonical ownership and workflow boundary: `docs/BLUEPRINT-AUDIT-ARCHITECT-WORKF
 
 The deterministic layer cannot lie (it only reports what files/claims exist) but cannot judge. The agent layer judges but is fenced to the real files the map handed it, so it cannot hallucinate structure. That pairing is the whole design.
 
+## User invocation contract — Blueprint always means the full workflow
+
+When the user says **run Blueprint**, **use Blueprint**, **analyze this repo with Blueprint**, or asks
+for a Blueprint codebase understanding, execute the complete Phase 1–4 workflow in the current task.
+Continue from mapping to verification, synthesis, generated human docs, conditional reconciliation,
+OKF emission, final reseal, and `blueprint doctor --full --json` without asking permission between
+phases. The user request already authorizes every non-destructive phase.
+
+**Automatic maintenance is different.** A post-code-change refresh initiated by `post-commit`,
+`post-merge`, `post-checkout`, setup/reconcile automation, or an agent's routine maintenance step
+runs **Phase 1 only** via `blueprint build --out .agent --check`. It refreshes deterministic artifacts
+and then stops; it must not start Phase 2, launch synthesis workers, emit OKF, or run the full doctor.
+This is maintenance, not a user request for renewed codebase understanding. If the user explicitly
+asks to run Blueprint after the code change, that user invocation still runs the complete workflow.
+
+The `blueprint` executable itself is the deterministic Phase-1 mapper; invoking that executable is
+the first step of a Blueprint run, not completion of the user request. Stop after Phase 1 only when
+the user explicitly asks for **Phase 1 only**, a **quick map**, or a **task brief only**. In that case,
+call the result a Phase-1 map/brief, never a completed Blueprint. Never ask whether to run Phase 2.
+
+Before reporting a full run complete, `blueprint doctor --full --json` must exit zero and return
+`completion.state: "complete"`. Any other result is work remaining, not a status to hand back. The
+only legitimate user blocker is an unresolved Phase-4 reconciliation decision that the skill already
+reserves for the user.
+
 ## Artifacts
 
 Machine entry point (portable, content-hashable):
@@ -25,9 +50,16 @@ Machine entry point (portable, content-hashable):
 Machine, for agents (under `<repo>/.agent/`):
 - `map.json` · `claims.json` · `stale.json` · `index.json` — the deterministic graph (Phase 1).
 - `queue.json` — the grounded Phase-2 worklist: each claim paired with the code files its own doc references, plus the largest implementation files as `anchors`.
-- `verdicts.json` — per-claim verification (Phase 2).
+- `phase2-plan.json` — the deterministic incremental Phase-2 plan. `verdicts.verify[]` and
+  `dimensions.synthesize[]` are the only semantic misses to process; `verdicts.reuse[]` and
+  `dimensions.reuse[]` remain valid because their exact evidence fingerprints are unchanged.
+- `verdicts.json` — generation-bound per-claim verification (Phase 2):
+  `{ "sourceGenerationId": "<exact graph generationId>", "verdicts": [...] }`.
 - `understanding.json` — the synthesized understanding layer across 6 dimensions (Phase 2), including
   `architecture.flows[]` and `architecture.coverageGaps[]` so missing paths are first-class evidence.
+  Its top-level `sourceGenerationId` MUST exactly equal `.agent/graph/manifest.json.generationId` from
+  the graph the synthesis read. Generated human docs fail closed and ignore synthesis when this field
+  is missing or mismatched; never relabel stale understanding with a newer generation ID.
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
 - `graph/manifest.json` + `graph/generations/<generationId>/{nodes,edges,graph}.json` — the structural graph (deterministic Blueprint-owned provider, current name `blueprint-static`).
 - `flows.json` — classified product-flow inventory (complete / broken / unsupported).
@@ -198,27 +230,55 @@ Canonical state definitions, diagnosis, recovery, safeguards, and incident evide
 - `concurrent_update`, `partial_reindex`, `missing_snapshot`, or a generation mismatch fail closed.
   Follow the canonical runbook instead of rebuilding inside the prompt path.
 
-The bare `blueprint` command runs **Phase 1 only** — it exits after writing the map, so an agent that just runs the command naturally stops there. That is the right stopping point ONLY for a quick task-scoped brief (read `TASK-BRIEF.md` and go).
-
-**If the intent is to UNDERSTAND / inherit / audit / onboard the repo, Phase 1 is not the deliverable — continue to Phase 2.** Do not report the repo as "mapped" or "understood" after Phase 1 alone; that only produced the deterministic skeleton, with claims still UNVERIFIED. Either run Phase 2 now, or explicitly tell the user you stopped at the cheap Phase-1 map and offer Phase 2.
+The command above produces the Phase-1 substrate. In every ordinary user-requested Blueprint run,
+continue immediately to Phase 2 under the invocation contract; do not pause, report an interim
+deliverable as complete, or request another authorization. Only the user's explicit “Phase 1 only,”
+“quick map,” or “task brief only” scope permits stopping here.
 
 ## Phase 2 — verify + synthesize (parallel workers)
 
-Drive this as a pipeline (Claude: the Workflow tool; Codex/other: an equivalent batch loop) so verification and synthesis flow together. Read `queue.json` and `map.json` first; pass file paths/excerpts, never whole-file dumps.
+Start with `blueprint phase2 plan --out .agent --json`. Drive only its misses as a pipeline (Claude:
+the Workflow tool; Codex/other: an equivalent batch loop) so verification and synthesis flow
+together. A first run is a cold miss and schedules everything. Later runs reuse still-valid verdicts
+and dimensions across graph generations and schedule only evidence-dependent misses. This is always
+incremental after a sealed run; it never means skipping Phase 2 or asking whether to run it. Read
+`phase2-plan.json`, `queue.json`, and `map.json` first; pass file paths/excerpts, never whole-file dumps.
+Edits to existing files invalidate only declared dependents. A source-file addition or deletion
+invalidates all six synthesis dimensions because a prior run cannot have declared a dependency on a
+file that did not exist; claim verdict reuse remains independently fingerprinted.
 
 **Worker routing (hard) — native workers only, no external APIs.** Use the current client's native parallel-worker mechanism. Route mechanical verification to a low-cost worker and synthesis to a judgment-capable worker when the client supports tier selection; otherwise use its default native worker. Never put client-specific model names into a tool call on a client that does not support them. The old `/coder` HTTP-worker path is retired for this skill because provider limits and registration repeatedly hung runs. The main agent owns completion, merging, reconciliation, and every fallback.
 
-**2a. Verification (parallel mechanical workers; inline fallback).** Take the claims worth checking — `status` in `implemented|stale|contradict|decision|canonical`, or any claim with `candidateFiles` — and split into ~6–10 batches. Spawn one worker per batch in one fan-out (structured task body: the claim texts + their `candidateFiles` paths), each returning one verdict per claim as JSON. If a worker returns no schema-valid JSON, launch one fresh replacement from scratch; do not repeatedly resume the stalled worker. If the replacement fails or workers are unavailable, verify that batch inline in the main session. Never stop with a recoverable batch pending and never substitute an external API. Each batch reads only its claim texts and their `candidateFiles`. **Read the FULL files here — never `skel` a file you're verifying; confirming a claim needs the actual body.** Schema:
+**2a. Verification (parallel mechanical workers; inline fallback).** Take only
+`phase2-plan.json.verdicts.verify[]` and split it into ~6–10 batches. Spawn one worker per batch in one
+fan-out (structured task body: the claim texts + their `candidateFiles` paths), each returning one
+verdict per claim as JSON. If a worker returns no schema-valid JSON, launch one fresh replacement from
+scratch; do not repeatedly resume the stalled worker. If the replacement fails or workers are
+unavailable, verify that batch inline in the main session. Never stop with a recoverable batch pending
+and never substitute an external API. Each batch reads only its claim texts and their `candidateFiles`.
+**Read the FULL files here — never `skel` a file you're verifying; confirming a claim needs the actual
+body.** Schema:
 
 ```json
 [{"claimId":"...","source":"path","line":12,"verdict":"verified|contradicted|stale|unverifiable","evidence":"path:line","note":"<=160 chars"}]
 ```
 
-The MAIN agent merges to `verdicts.json` (reconciliation is never delegated). A `contradicted` verdict is the highest-value output — it means a doc claim the next agent would have trusted is false. For high-stakes claims (`decision`/`canonical`/`contradict`, or any "DONE / shipped / verified-on-prod" assertion), use **≥2 verifiers** and take the worst verdict if they disagree — single-verifier judgments on nuanced completion claims are noisy (observed in testing: two verifiers split verified-vs-stale on the same claim).
+The MAIN agent merges the new arrays with `phase2-plan.json.verdicts.reuse[]` into `verdicts.json`
+(reconciliation is never delegated). Do not blindly relabel old verdicts: reuse is legal only when the
+planner returned it. `blueprint phase2 seal` computes and stores each verdict's exact evidence
+fingerprint and binds the merged envelope to the current generation. A `contradicted` verdict is the
+highest-value output — it means a doc claim the next agent would have trusted is false. For high-stakes claims (`decision`/`canonical`/`contradict`, or any "DONE / shipped / verified-on-prod" assertion), use **≥2 verifiers** and take the worst verdict if they disagree — single-verifier judgments on nuanced completion claims are noisy (observed in testing: two verifiers split verified-vs-stale on the same claim).
 
-**2b. Synthesis (judgment-tier, 6 items in one fan-out).** Use native judgment-capable workers, never an external API. One item per dimension, each grounded in `anchors` + `map.json` + `verdicts.json`. **Feed each worker `prep-context`'d anchors — `memright prep <tmp> <anchors...>` (same flags `--rate`/`--min-bytes`; binary `tools/bin/memright.exe`, `memright` shim on PATH) routes code→`skel` (~78% fewer tokens) and prose→`compress` (structure-safe) and returns a manifest; hand workers the prepared copies, not raw files. Synthesis needs structure, not every body; workers pull the full body only for a specific span they must read closely. SURVEY/SYNTHESIS reads only — verification (2a) reads FULL. Stack map: `tools/lib/CONTEXT-ENGINEERING.md`.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. If a dimension returns no schema-valid JSON, launch one fresh replacement from scratch. If that replacement fails or workers are unavailable, the main agent synthesizes that dimension inline under the same evidence and schema rules. The delegation preference never overrides the completion goal: do not leave `pending:true`, emit a stub, or stop while an inline fallback is possible. Merge all 6 dimensions into `understanding.json`:
+**2b. Synthesis (judgment-tier, affected items in one fan-out).** Use native judgment-capable
+workers, never an external API. Run one item per dimension listed in
+`phase2-plan.json.dimensions.synthesize[]`; preserve the sections named in `dimensions.reuse[]`. Each
+new or affected section is grounded in `anchors` + `map.json` + the merged `verdicts.json`. **Feed each worker `prep-context`'d anchors — `memright prep <tmp> <anchors...>` (same flags `--rate`/`--min-bytes`; binary `tools/bin/memright.exe`, `memright` shim on PATH) routes code→`skel` (~78% fewer tokens) and prose→`compress` (structure-safe) and returns a manifest; hand workers the prepared copies, not raw files. Synthesis needs structure, not every body; workers pull the full body only for a specific span they must read closely. SURVEY/SYNTHESIS reads only — verification (2a) reads FULL. Stack map: `tools/lib/CONTEXT-ENGINEERING.md`.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. If a dimension returns no schema-valid JSON, launch one fresh replacement from scratch. If that replacement fails or workers are unavailable, the main agent synthesizes that dimension inline under the same evidence and schema rules. The delegation preference never overrides the completion goal: do not leave `pending:true`, emit a stub, or stop while an inline fallback is possible. Merge all 6 dimensions into `understanding.json`. For each synthesized dimension, record its exact source paths and verdict dependencies under
+`incremental.dimensions.<name>.inputFiles[]` and `inputVerdictIds[]`; keep reused metadata unchanged.
+Then run `blueprint phase2 seal --out .agent --json`. Seal recomputes fingerprints, binds both
+artifacts to the current graph generation, regenerates the human docs, and fails closed on missing
+dependencies:
 
-- `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `deployableUnits[]`, `externalServices[]`, `infrastructure[]`, `crossCutting[]`, `capabilityCoverage[]`, `flows[]`, `coverageGaps[]`. Trace one real request/command end to end. Inventory each material user/agent/data flow from source → transforms/stores → consumer and classify it `covered|partial|missing|undetermined` with `file:line` evidence, **explicitly noting when a flow crosses a boundary into an `externalService` or `infrastructure` component**. Every non-covered flow becomes `{flow,status,evidence,impact,existingPrimitives[],handoff:"architect"}` in `coverageGaps[]`. Include negative space: a flow named by product/docs/user intent that has no implementation is evidence, not something to omit because no file exists. Populate `capabilityCoverage[]` from the whole-repository completeness contract above; scanned-file count and Phase-2 prose are not substitutes for code-symbol/relationship coverage.
+- `architecture` — `summary`, `stack[]`, `components[]`, `dataFlow[]`, `entryPoints[]`, `stateStores[]`, `externalDeps[]`, `deployableUnits[]`, `externalServices[]`, `infrastructure[]`, `crossCutting[]`, `capabilityCoverage[]`, `flows[]`, `coverageGaps[]`. Trace one real request/command end to end. `dataFlow[]` is the human workflow source: write concise component-level chains in exact `Trigger -> Component -> Component -> Outcome` form, beginning with the primary user flow; keep file paths, symbol names, and evidence in `components[]`/`flows[]`, not in diagram labels. The generated `docs/architecture.md` renders these chains directly as Mermaid. Inventory each material user/agent/data flow from source → transforms/stores → consumer and classify it `covered|partial|missing|undetermined` with `file:line` evidence, **explicitly noting when a flow crosses a boundary into an `externalService` or `infrastructure` component**. Every non-covered flow becomes `{flow,status,evidence,impact,existingPrimitives[],handoff:"architect"}` in `coverageGaps[]`. Include negative space: a flow named by product/docs/user intent that has no implementation is evidence, not something to omit because no file exists. Populate `capabilityCoverage[]` from the whole-repository completeness contract above; scanned-file count and Phase-2 prose are not substitutes for code-symbol/relationship coverage.
     - **`deployableUnits[]`** (monorepo/polyrepo awareness — do NOT fuse independent targets into one incoherent flow): detect workspace roots (`pnpm-workspace.yaml`, Cargo `[workspace]`, Turborepo/NX config, multiple `src-tauri/`) and emit one `{name, entryPoint, type:web|api|mobile|desktop|library|worker, components[]}` per deployable target. A React app and an API in the same repo are separate units with separate flows. If the repo is a single unit, emit one.
     - **`externalServices[]`** (third-party integrations, distinct from `externalDeps[]` package deps): `{name, evidence}` for each SDK/API integration discovered via env vars or SDK imports (Stripe, Cloudflare R2/Workers, Groq, Sentry, Twilio, Auth0, …).
     - **`infrastructure[]`** (where this code RUNS): `{target, evidence}` parsed from what actually exists — Dockerfiles, `wrangler.toml`, pm2 configs, Tauri bundle/updater config, systemd/launchd. Do NOT invent a Terraform/Pulumi layer that isn't in the repo; `"Undetermined — no deploy config found"` when absent.
@@ -230,7 +290,13 @@ The MAIN agent merges to `verdicts.json` (reconciliation is never delegated). A 
 
 ## Phase 3 — fold into the generated human docs (main session)
 
-Append to `docs/architecture.md` (the technical doc is the natural home): a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted` claim — these are the traps), a Coverage Gaps table from `architecture.coverageGaps`, top health + security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The Phase-4 RECONCILE block (below) goes at the **very top** of `docs/architecture.md`, above everything else — it is the one thing the user must act on. Then open it:
+The generator folds the current `understanding.json` component workflow, component evidence, classified
+flows, and capability coverage into `docs/architecture.md`. Append the remaining Phase-2 synthesis:
+a Verified-Facts section (claims marked `verified`), a Contradictions section (every `contradicted`
+claim — these are the traps), a Coverage Gaps table from `architecture.coverageGaps`, top health +
+security findings, and the maturity verdict. Leave the JSON as the machine source of truth. The
+Phase-4 RECONCILE block (below) goes at the **very top** of `docs/architecture.md`, above everything
+else — it is the one thing the user must act on. Then open it:
 
 ```bash
 open-for-review "<repo>/docs/architecture.md"
@@ -267,12 +333,15 @@ recent decision doc beats an old plan; nothing beats a passing test/command.
      Do not let it read as a stale doc; it is a delivery gap.
    - **`SUPERSEDED-BY x`** — a newer doc already changed the plan (from step 1); the old doc just needs marking.
 
-3. **Emit `reconcile.json`** (machine) — one entry per divergence:
+3. **Emit `reconcile.json`** (machine) — one entry per divergence. Copy `inputFingerprint` from the
+   sealed verdict's `reconciliationFingerprint`; a prior decision is current only while this
+   fingerprint still matches:
    ```json
    {"claimId":"...","doc":"path","line":42,"claim":"<what the doc says>",
     "codeReality":"<what the code actually does> [path:line]",
     "verdict":"CODE-IS-BETTER|CODE-FELL-SHORT|SUPERSEDED-BY",
-    "supersededBy":"path|null","proposedReconciliation":"<one line>","decision":null}
+    "supersededBy":"path|null","proposedReconciliation":"<one line>",
+    "inputFingerprint":"sha256:...","decision":null}
    ```
 
 ### The RECONCILE block — the ONE hard blocker, never buried
@@ -307,7 +376,21 @@ convert it into a doc edit.
 
 ## Finalization — reseal after emission
 
-Phase 2–4 writes understanding artifacts and documentation after the initial graph snapshot. Before reporting completion, run `blueprint` once more to refresh the graph, then run `blueprint doctor --json`. Preserve the folded `docs/architecture.md`; a typed `docs_conflict` fallback is acceptable when the fold intentionally made it human-maintained. Completion requires all 6 synthesis dimensions (architecture, interfaces, health, contract, security, solid), no pending stubs, and a fresh graph. Doctor may report `degraded` for honest repository warnings, but never report completion in `stale`, `missing`, or `broken` state. If the final rebuild itself changes an indexed artifact, rebuild and check once more instead of handing the user a known-stale graph.
+Phase 2–4, OKF emission, or approved doc reconciliation may change indexed artifacts after the initial
+snapshot. Before reporting completion, run `blueprint build --out .agent`, then
+`blueprint phase2 plan --out .agent --json`. Process every remaining verification/synthesis miss and
+run `blueprint phase2 seal --out .agent --json`; when the plan is already complete, sealing only
+rebases the still-valid artifacts and regenerates docs. Finish with
+`blueprint doctor --full --json`. Preserve the folded `docs/architecture.md`; a typed
+`docs_conflict` fallback is acceptable when the fold intentionally made it human-maintained.
+Completion requires `completion.state: "complete"`, which enforces all 6 synthesis dimensions
+(architecture, interfaces, health, contract, security, solid), current evidence fingerprints,
+current verdicts, no pending stubs, generation-bound understanding, the generated component Mermaid,
+matching portable/graph manifests, and resolved-or-not-required Phase 4. Doctor may report structural
+`degraded` for honest repository coverage warnings while full completion remains complete, but never
+report completion in `stale`, `missing`, `broken`, or full `incomplete` state. If the final rebuild
+changes another indexed artifact, repeat this incremental plan → misses → seal → doctor loop instead
+of handing the user a known-stale graph.
 
 ## Tuning
 
@@ -330,4 +413,9 @@ Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. ra
   anyone makes an optimality claim.
 - Never reduce a multi-family product to the subsystem currently under inspection. For MemRight,
   explicitly verify all three families and eight layers before describing its purpose or coverage.
+- A user-requested Blueprint run never pauses for phase permission. Phase 1 is an internal checkpoint;
+  continue through Phase 2–4 and the full doctor gate automatically unless the user explicitly scoped
+  the request to a Phase-1-only map/brief.
+- Automatic post-code-change maintenance is Phase 1 only: use `blueprint build --out .agent --check`
+  and stop. Do not reinterpret a hook/reconcile refresh as a user-requested full Blueprint run.
 - **Phase 4 reconciles DOCS, never code.** A code↔doc divergence is surfaced as a user decision in the loud RECONCILE block (the only hard blocker); blueprint proposes the doc edit (incl. "superseded by") and applies it ONLY on the user's call. `CODE-FELL-SHORT` (an agent didn't do what the plan expected) must be surfaced loudly, not softened into "stale doc."

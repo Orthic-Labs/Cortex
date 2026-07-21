@@ -80,6 +80,93 @@ it("B6.5.4 fixture build emits both docs with generation headers + provenance", 
   }
 });
 
+it("architecture.md renders the synthesized component workflow as Mermaid", async () => {
+  const root = makeFixture();
+  try {
+    const { execFileSync } = await import("node:child_process");
+    execFileSync("node", [SCRIPT, "build", "--out", ".agent"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const sourceGenerationId = JSON.parse(
+      readFileSync(join(root, ".agent/graph/manifest.json"), "utf8"),
+    ).generationId;
+    writeFileSync(
+      join(root, ".agent/understanding.json"),
+      `${JSON.stringify({
+        sourceGenerationId,
+        architecture: {
+          summary: "A desktop shell sends dictation work to a resident engine.",
+          components: [
+            { name: "Tauri shell", evidence: "src-tauri/src/lib.rs:20", note: "Owns desktop state and IPC." },
+            { name: "Engine sidecar", evidence: "engine/src/main.rs:12", note: "Owns recording and transcription." },
+            { name: "ASR", evidence: "engine/src/asr.rs:44", note: "Decodes conditioned audio." },
+          ],
+          dataFlow: ["User hotkey -> Tauri shell -> Engine sidecar -> ASR -> Delivery"],
+          flows: [
+            {
+              name: "Hotkey to delivered transcript",
+              status: "covered",
+              evidence: "src-tauri/src/lib.rs:20 -> engine/src/asr.rs:44",
+              impact: "Primary dictation path.",
+            },
+          ],
+        },
+      }, null, 2)}\n`,
+    );
+
+    generateDocs(root);
+    const arch = readFileSync(join(root, DOC_PATHS.architecture), "utf8");
+    const mermaid = arch.match(/```mermaid\n([\s\S]*?)\n```/)?.[1] ?? "";
+
+    assert.ok(arch.includes("## System workflow"), "architecture.md missing workflow section");
+    assert.match(mermaid, /^flowchart LR/);
+    assert.match(mermaid, /\["User hotkey"\]/);
+    assert.match(mermaid, /\["Tauri shell"\]/);
+    assert.match(mermaid, /\["Engine sidecar"\]/);
+    assert.match(mermaid, /\["ASR"\]/);
+    assert.match(mermaid, /\["Delivery"\]/);
+    assert.match(mermaid, /c0 --> c1/);
+    assert.ok(!/code_ref|symbol:|\.agent\/map\.json/.test(mermaid), "workflow leaked raw graph nodes");
+    assert.ok(arch.includes("src-tauri/src/lib.rs:20"), "component evidence missing");
+    assert.ok(arch.includes("Hotkey to delivered transcript"), "classified flow missing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("architecture.md rejects understanding from a different graph generation", async () => {
+  const root = makeFixture();
+  try {
+    const { execFileSync } = await import("node:child_process");
+    execFileSync("node", [SCRIPT, "build", "--out", ".agent"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    writeFileSync(
+      join(root, ".agent/understanding.json"),
+      `${JSON.stringify({
+        sourceGenerationId: "sha256:stale-generation",
+        architecture: {
+          components: [{ name: "Stale component", evidence: "old.rs:1" }],
+          dataFlow: ["Stale input -> Stale component -> Stale output"],
+        },
+      }, null, 2)}\n`,
+    );
+
+    generateDocs(root);
+    const arch = readFileSync(join(root, DOC_PATHS.architecture), "utf8");
+
+    assert.ok(!arch.includes("```mermaid"), "stale understanding produced a Mermaid diagram");
+    assert.ok(!arch.includes("Stale component"), "stale understanding leaked into components");
+    assert.ok(arch.includes("No synthesized component workflow yet"), "fresh synthesis guidance missing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("B6.5.4 unchanged rebuild is byte-identical", async () => {
   const root = makeFixture();
   try {

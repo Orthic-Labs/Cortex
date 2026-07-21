@@ -23,6 +23,9 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     const baseCommit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
     const result = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--check"], { cwd: repo, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /phase1_maintenance=complete/);
+    assert.match(result.stdout, /full_blueprint=not_requested/);
+    assert.doesNotMatch(result.stdout, /next=phase2/);
     assert.ok(fs.existsSync(path.join(repo, ".agent/map.json")), "map.json must exist");
     assert.ok(fs.existsSync(path.join(repo, ".agent/graph/manifest.json")), "graph manifest must exist");
     assert.ok(fs.existsSync(path.join(repo, ".agent/flows.json")), "flows.json must exist");
@@ -48,6 +51,9 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     const rerun = spawnSync(process.execPath, [CLI], { cwd: repo, encoding: "utf8" });
     assert.equal(rerun.status, 0, rerun.stderr || rerun.stdout);
     assert.match(rerun.stdout, /built .agent\/map.json/);
+    assert.match(rerun.stdout, /phase1_ready/);
+    assert.match(rerun.stdout, /full_blueprint=incomplete/);
+    assert.match(rerun.stdout, /next=phase2/);
     assert.ok(fs.existsSync(path.join(repo, ".agent/graph/manifest.json")), "graph manifest must be rebuilt by bare command");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
