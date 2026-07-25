@@ -2428,8 +2428,20 @@ async function main() {
   if (command === "build") {
     const result = await build(root, outDir, args);
     const config = loadConfig(root, outDir);
+    // A build takes ~60s on a large repo, and a source file edited by the user
+    // (or a concurrent session) during that window makes the graph legitimately
+    // stale the moment it lands. That is a normal, recoverable race — `graph
+    // status` reports it accurately and every query already refuses on it — so
+    // it must not be a FATAL build error that leaves the repo unqueryable.
+    //
+    // The bug class this guard was written for (a build inconsistent with its
+    // OWN outputs) is now handled upstream: generated docs are excluded from
+    // the source hash, so a build can no longer invalidate itself. Anything
+    // still mismatching is by definition a file the build did not write.
     const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
-    if (!fresh) throw new Error("generated graph is stale immediately after build");
+    if (!fresh) {
+      console.warn("stale_after_build: source files changed while the graph was building; run `blueprint build` again once the tree settles.");
+    }
     console.log(`built ${outDir}/map.json docs=${result.map.stats.docs} claims=${result.map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md ${phase1CompletionMarker(args)}`);
     if (result.docsResult?.mode === "docs_conflict") {
       console.warn(`docs_conflict: ${result.docsResult.conflicts.join(", ")} — wrote fallback to .agent/docs/`);
