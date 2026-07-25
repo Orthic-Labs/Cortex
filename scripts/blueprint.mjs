@@ -1718,7 +1718,7 @@ async function runGraphCommand(root, outDir, subcommand, args) {
   if (subcommand === "status") {
     const status = graphStatus(root, outDir);
     if (status.state === "missing") {
-      console.log(`graph missing ${outDir}/graph/manifest.json`);
+      console.log(`graph missing ${outDir}/graph/graph.db — run: blueprint build`);
       return 2;
     }
     const provider = status.manifest?.provider?.id ?? "unknown";

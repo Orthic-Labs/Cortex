@@ -1445,7 +1445,7 @@ function normalizePath(value) {
 // dedup only (file bytes, source-tree fingerprint, generation id). No trust
 // boundary depends on collision resistance here: the blueprint→MemRight
 // federation provider reads only the generation identity, never validates it
-// cryptographically (rightcontext/engine/federation/providers/blueprint.py).
+// cryptographically (membrane/engine/federation/providers/blueprint.py).
 // The hasher's construction is async (WASM init); init()/update()/digest()
 // are synchronous once it exists, so the async cost is paid exactly once at
 // module load (top-level await) and every call site below stays synchronous
