@@ -1021,3 +1021,69 @@ export function graphCapabilities() {
     edgeKinds: ["CONTAINS", "DEFINES", "IMPORTS", "CALLS", "TESTS"],
   };
 }
+
+/**
+ * Enrich a lexical graph generation with tree-sitter AST nodes/edges.
+ *
+ * UNION merge, never replacement: tree-sitter ids live in their own namespace
+ * (`symbol:<path>::<name>` vs the lexical provider's `<path>::<name>`), so
+ * nothing that references an existing lexical node — doc-code joins, verdict
+ * evidence, candidate sets — can break. The AST layer is added alongside, with
+ * per-file parse quality recorded honestly. Id unification is a listed
+ * follow-up, not smuggled into this merge.
+ *
+ * The generation's identity (manifest.generationId) is computed from SOURCE
+ * hashes, which augmentation does not change — so freshness semantics are
+ * untouched.
+ */
+export async function augmentGeneration(generation, repoRoot) {
+  const fileNodes = (generation?.nodes ?? []).filter((node) => node.kind === "file");
+  const candidates = [];
+  for (const node of fileNodes) {
+    const path = node.path ?? node.name;
+    if (!path) continue;
+    const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
+    if (!LANGUAGES[ext]) continue;
+    try {
+      candidates.push({ path, text: readFileSync(join(repoRoot, path), "utf8") });
+    } catch {
+      // File listed in the generation but unreadable now — skip; the lexical
+      // layer still carries it and the summary records the miss.
+      candidates.push({ path, text: null });
+    }
+  }
+  const readable = candidates.filter((file) => typeof file.text === "string");
+  const summary = {
+    provider: PROVIDER.id,
+    grammarPackage: GRAMMAR_PACKAGE,
+    candidateFiles: candidates.length,
+    parsedFiles: 0,
+    parseStatus: { ok: 0, partial: 0, failed: 0, unsupported: 0 },
+    unreadableFiles: candidates.length - readable.length,
+    nodesAdded: 0,
+    edgesAdded: 0,
+  };
+  if (readable.length === 0) return { generation, summary };
+
+  const graph = await buildTreeSitterGraph(readable);
+  const existingIds = new Set((generation.nodes ?? []).map((node) => node.id));
+  const existingEdgeIds = new Set((generation.edges ?? []).map((edge) => edge.id));
+  for (const node of graph.nodes) {
+    if (existingIds.has(node.id)) continue;
+    existingIds.add(node.id);
+    generation.nodes.push(node);
+    summary.nodesAdded += 1;
+  }
+  for (const edge of graph.edges) {
+    if (edge.id && existingEdgeIds.has(edge.id)) continue;
+    if (edge.id) existingEdgeIds.add(edge.id);
+    generation.edges.push(edge);
+    summary.edgesAdded += 1;
+  }
+  for (const report of graph.fileReports ?? []) {
+    summary.parsedFiles += 1;
+    if (report.parseStatus in summary.parseStatus) summary.parseStatus[report.parseStatus] += 1;
+  }
+  generation.augmentation = { treesitter: summary };
+  return { generation, summary };
+}

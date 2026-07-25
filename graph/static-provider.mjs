@@ -123,6 +123,36 @@ export function buildGraphGeneration(repoRoot, options = {}) {
   return generation;
 }
 
+/**
+ * Tree-sitter AST layer, unioned onto a lexical generation and re-persisted.
+ *
+ * Kept SEPARATE from buildGraphGeneration on purpose. Tree-sitter's WASM API is
+ * async, but buildGraphGeneration has 30+ synchronous callers (including test
+ * helpers that take sync callbacks). Making a widely-called leaf async to serve
+ * one top-level caller forces `await` through the entire tree for no benefit —
+ * the async belongs at the build boundary, which is the only place that needs it.
+ *
+ * Degrades to lexical-only on any failure: the lexical graph is a correct, if
+ * shallower, result, and `blueprint build` must not become dependent on a WASM
+ * grammar load succeeding. Opt out with BLUEPRINT_TREESITTER=0.
+ */
+export async function augmentGenerationWithTreeSitter(generation, repoRoot, options = {}) {
+  if (options.treesitter === false || process.env.BLUEPRINT_TREESITTER === "0") {
+    return { state: "disabled" };
+  }
+  const root = resolve(repoRoot);
+  try {
+    const { augmentGeneration } = await import("./treesitter-provider.mjs");
+    const { summary } = await augmentGeneration(generation, root);
+    if (options.outDir) writeGeneration(resolve(root, options.outDir), generation);
+    return { state: "ok", summary };
+  } catch (err) {
+    const failure = { provider: "blueprint-treesitter", state: "unavailable", reason: String(err?.message ?? err) };
+    generation.augmentation = { treesitter: failure };
+    return failure;
+  }
+}
+
 export function graphStatus(repoRoot, outDir, options = {}) {
   const root = resolve(repoRoot);
   const manifestPath = join(resolve(root, outDir), "graph", "manifest.json");

@@ -18,6 +18,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildDocCodeJoins,
+  augmentGenerationWithTreeSitter,
   buildGraphGeneration,
   createContextCandidateSet,
   graphArchitecture,
@@ -491,7 +492,7 @@ function classifyStatus(line) {
   return "claim";
 }
 
-function build(root, outDir, options = {}) {
+async function build(root, outDir, options = {}) {
   const config = loadConfig(root, outDir);
   const limit = Number(options.limit ?? 0);
   const sourceObservation = gitSourceObservation(root);
@@ -574,6 +575,9 @@ function build(root, outDir, options = {}) {
   writeJson(join(root, outDir, "index.json"), index);
   writeJson(join(root, outDir, "queue.json"), queue);
   const graphGeneration = buildGraphGeneration(root, { outDir, fileLimit: limit || 0 });
+  // AST layer on top of the lexical graph; re-persists the generation. Never
+  // fails the build — see augmentGenerationWithTreeSitter.
+  await augmentGenerationWithTreeSitter(graphGeneration, root, { outDir });
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
   const phase2Plan = buildIncrementalPhase2Plan({
@@ -827,12 +831,12 @@ function warnUncommitted(root, outDir) {
   );
 }
 
-function ensureFresh(root, outDir, options) {
+async function ensureFresh(root, outDir, options) {
   const config = loadConfig(root, outDir);
   if (!options.refresh && isFresh(root, outDir, config, Number(options.limit ?? 0))) {
     return { rebuilt: false, config };
   }
-  build(root, outDir, options);
+  await build(root, outDir, options);
   return { rebuilt: true, config };
 }
 
@@ -910,10 +914,10 @@ function claimIsRelevant(taskTerms, claim) {
   return orderedTermScore(taskTerms, directText) > 0 || (directHits >= 1 && claim.score >= 5);
 }
 
-function brief(root, outDir, options) {
+async function brief(root, outDir, options) {
   const task = options.task;
   if (!task) throw new Error("brief requires --task");
-  const { rebuilt, config } = ensureFresh(root, outDir, options);
+  const { rebuilt, config } = await ensureFresh(root, outDir, options);
   const contextBudget = plannedContextBudget(task, root);
   const map = readJson(join(root, outDir, "map.json"), null);
   const taskTerms = taskKeywords(task);
@@ -1659,7 +1663,7 @@ function doctor(root, outDir, options = {}) {
   return state === "ready" || state === "stale" || state === "degraded" ? 0 : 1;
 }
 
-function runGraphCommand(root, outDir, subcommand, args) {
+async function runGraphCommand(root, outDir, subcommand, args) {
   if (subcommand === "build") {
     const generation = buildGraphGeneration(root, { outDir });
     console.log(`graph built ${outDir}/graph/manifest.json provider=${generation.provider.id} nodes=${generation.nodes.length} edges=${generation.edges.length}`);
@@ -1952,8 +1956,8 @@ function graphReadError(code, message, details = {}) {
   return error;
 }
 
-function runBriefAndPrint(root, outDir, args) {
-  const result = brief(root, outDir, args);
+async function runBriefAndPrint(root, outDir, args) {
+  const result = await brief(root, outDir, args);
   console.log(`brief ${result.runDir}/TASK-BRIEF.md readFirst=${result.readFirst.length} sources=${result.sources.length} rebuilt=${result.rebuilt}`);
   return result.missingExpected.length ? 2 : 0;
 }
@@ -1964,8 +1968,8 @@ function phase1CompletionMarker(args = {}) {
     : "phase1_ready full_blueprint=incomplete next=phase2";
 }
 
-function runMapAndPrint(root, outDir, args = {}) {
-  const { rebuilt } = ensureFresh(root, outDir, args);
+async function runMapAndPrint(root, outDir, args = {}) {
+  const { rebuilt } = await ensureFresh(root, outDir, args);
   const map = readJson(join(root, outDir, "map.json"), null);
   console.log(`${rebuilt ? "built" : "fresh"} ${outDir}/map.json docs=${map.stats.docs} claims=${map.stats.claims} manifest=.blueprint/manifest.json product=docs/product.md architecture=docs/architecture.md ${phase1CompletionMarker(args)}`);
   return 0;
@@ -2204,13 +2208,13 @@ function runPhase2Command(root, outDir, subcommand, args) {
   return 1;
 }
 
-function main() {
+async function main() {
   const argv = process.argv.slice(2);
   const [command, ...rest] = argv;
   if (!command) {
     const root = process.cwd();
     const outDir = DEFAULT_OUT;
-    return runMapAndPrint(root, outDir);
+    return await runMapAndPrint(root, outDir);
   }
   if (command === "--help" || command === "-h") {
     usage();
@@ -2227,7 +2231,7 @@ function main() {
     args.task = task;
     const root = process.cwd();
     const outDir = normalizePath(args.out ?? DEFAULT_OUT);
-    return runBriefAndPrint(root, outDir, args);
+    return await runBriefAndPrint(root, outDir, args);
   }
   const args = parseArgs(rest);
   const root = process.cwd();
@@ -2235,7 +2239,7 @@ function main() {
   if (command === "graph") {
     const [subcommand, ...graphRest] = rest;
     const graphArgs = parseArgs(graphRest);
-    return runGraphCommand(root, outDir, subcommand, graphArgs);
+    return await runGraphCommand(root, outDir, subcommand, graphArgs);
   }
   if (command === "hygiene") {
     const [subcommand, ...hygieneRest] = rest;
@@ -2248,7 +2252,7 @@ function main() {
     return runPhase2Command(root, outDir, subcommand, phase2Args);
   }
   if (command === "build") {
-    const result = build(root, outDir, args);
+    const result = await build(root, outDir, args);
     const config = loadConfig(root, outDir);
     const fresh = isFresh(root, outDir, config, Number(args.limit ?? 0));
     if (!fresh) throw new Error("generated graph is stale immediately after build");
@@ -2260,7 +2264,7 @@ function main() {
     return 0;
   }
   if (command === "brief") {
-    return runBriefAndPrint(root, outDir, args);
+    return await runBriefAndPrint(root, outDir, args);
   }
   if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json), full: Boolean(args.full) });
   usage();
@@ -2269,7 +2273,7 @@ function main() {
 
 try {
   process.on("uncaughtException", e => { console.error("STACK:", e.stack); process.exit(1); });
-  process.exitCode = main();
+  process.exitCode = await main();
 } catch (error) {
   if (error?.code?.startsWith("graph_")) {
     console.error(JSON.stringify({ schemaVersion: 1, error: { code: error.code, message: error.message, ...error.details } }));
