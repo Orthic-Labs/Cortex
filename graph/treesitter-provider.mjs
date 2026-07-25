@@ -93,6 +93,7 @@ import { Parser, Language } from "web-tree-sitter";
 import { createXXHash128, xxhash128 } from "hash-wasm";
 import { EDGE_CONFIDENCE_TIERS, tierConfidence } from "./confidence-tiers.mjs";
 import { PRECISION_TIERS } from "./precision-tiers.mjs";
+import { TREESITTER_PROVIDER } from "./provider-identity.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // graph/ -> blueprint/ -> skills/ -> tools/ -> node_modules/
@@ -100,12 +101,9 @@ const TOOLS_ROOT = join(HERE, "..", "..", "..");
 const WASM_DIR = join(TOOLS_ROOT, "node_modules", "tree-sitter-wasms", "out");
 const GRAMMAR_PACKAGE_JSON = join(TOOLS_ROOT, "node_modules", "tree-sitter-wasms", "package.json");
 
-export const PROVIDER = {
-  id: "blueprint-treesitter",
-  version: "standalone-v1",
-  license: "workspace-owned",
-  precisionTier: PRECISION_TIERS.AST,
-};
+// Identity lives in provider-identity.mjs so static-provider can read it for the
+// staleness check without importing this module (and with it web-tree-sitter).
+export const PROVIDER = TREESITTER_PROVIDER;
 
 // Extension -> language descriptor. `dialect` selects which extractor runs;
 // `tier` documents the spec's tier-1 set (JS/TS/TSX, Python, Rust) — anything

@@ -100,7 +100,7 @@ Machine, for agents (under `<repo>/.agent/`):
   the graph the synthesis read. Generated human docs fail closed and ignore synthesis when this field
   is missing or mismatched; never relabel stale understanding with a newer generation ID.
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
-- `graph/manifest.json` + `graph/generations/<generationId>/{nodes,edges,graph}.json` — the structural graph (deterministic Blueprint-owned provider, current name `blueprint-static`).
+- `graph/manifest.json` + `graph/generations/<generationId>/{nodes,edges,graph}.json` — the structural graph (deterministic Blueprint-owned providers: `blueprint-treesitter` selected, `blueprint-static` as the lexical fallback layer).
 - `flows.json` — classified product-flow inventory (complete / broken / unsupported).
 - `hygiene/manifest.json` + `hygiene/facts.json` — optional generation-bound reusable hygiene
   evidence. `blueprint hygiene refresh` runs the targeted deterministic/expensive probes once;
@@ -205,15 +205,27 @@ a stale entry there is the `CODE-FELL-SHORT` class Blueprint exists to catch.
 
 The two constraints that must not drift out of this file:
 
-- The provider is **deterministic lexical extraction, not compiler/AST coverage.** Confirmed
-  2026-07-25: no Tree-sitter dependency exists in the workspace, and there is no SQLite graph store.
-  Never describe Blueprint's code substrate as AST- or compiler-grade.
-- The **qualification harness is built and gated; `blueprint-static` (lexical) is the passing,
-  selected provider.** `evals/run-qualification.mjs` enforces six mandatory gates; the
-  `rg/skel-baseline` fallback fails by design. The tested tree-sitter provider
-  (`graph/treesitter-provider.mjs`) is **not yet registered or wired** — swapping it in goes through
-  this harness's gates, never through prose. Do not add new metrics before there is a provider that
-  can produce them.
+- **`blueprint-treesitter` (AST) is the SELECTED provider; `blueprint-static` (lexical) is the
+  fallback layer.** Promoted 2026-07-26 after it cleared every gate the incumbent has — 12/12 tasks
+  and 6/6 gates on darwin *and* win32, versus the union-augmentation role it previously shipped in.
+  `manifest.provider` names tree-sitter, `manifest.lexicalProvider` preserves the lexical identity,
+  and `manifest.providerComposition` records both layers with the extensions each owns.
+- **It is selected, not sole, and the difference is load-bearing.** Tree-sitter has registered
+  extractors for 10 extensions (`ts/tsx/mts/cts, js/jsx/mjs/cjs, py, rs`); the lexical layer parses
+  30. Dropping lexical would blind Blueprint to Swift, C/C++/headers, shell, SQL, PowerShell, batch,
+  NSIS, Vue and Astro — i.e. every iOS app in the suite and every Windows installer script. So the
+  lexical layer remains as the fallback for exactly the 20 extensions tree-sitter cannot parse.
+  Making tree-sitter literally sole requires registering grammars *and writing extractors*; the
+  installed `tree-sitter-wasms` ships 36 grammars including swift/c/cpp/bash/vue/objc, but 7 of the
+  20 (`sql, gql/graphql, astro, ps1, bat, nsi/nsh, vbs`) have no grammar in that package at all.
+- **A version bump in EITHER layer invalidates a persisted graph.** `graphStatus` validates the
+  lexical identity and, on promoted manifests, the AST identity too — a fixed extractor must never
+  leave existing graphs silently stale. Identities live in `graph/provider-identity.mjs` so this
+  check costs no wasm load.
+- The **qualification harness is built and gated.** `evals/run-qualification.mjs` enforces six
+  mandatory gates; the `rg/skel-baseline` fallback fails by design. Any future provider swap goes
+  through this harness's gates, never through prose. Do not add new metrics before there is a
+  provider that can produce them.
 
 Summary of what Phase 1 writes: `build` produces `.agent/{map,claims,stale,index,queue,flows}.json`,
 the `.agent/graph/` tree (manifest + immutable generation files), the portable

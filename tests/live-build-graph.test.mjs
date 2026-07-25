@@ -33,7 +33,10 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     assert.equal(fs.existsSync(path.join(repo, ".agent/START-HERE.md")), false, "START-HERE.md must NOT exist (retired)");
     const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
     assert.equal(manifest.entrypoint, ".agent/");
-    assert.equal(manifest.generation.provider ?? manifest.generation.toolVersions?.blueprint ?? null, "blueprint-static");
+    // Tree-sitter is the SELECTED provider once it parses anything in the repo
+    // (it cleared every qualification gate the lexical incumbent has). The
+    // lexical layer stays as the fallback for the extensions it cannot parse.
+    assert.equal(manifest.generation.provider ?? manifest.generation.toolVersions?.blueprint ?? null, "blueprint-treesitter");
     assert.equal(manifest.generation.baseCommit, baseCommit);
     const map = JSON.parse(fs.readFileSync(path.join(repo, ".agent/map.json"), "utf8"));
     assert.equal(map.entrypoint, ".blueprint/manifest.json");

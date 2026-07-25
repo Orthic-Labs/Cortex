@@ -30,18 +30,14 @@ import {
   tierConfidence,
 } from "./confidence-tiers.mjs";
 import { PRECISION_TIERS, PRECISION_TIER_ORDER } from "./precision-tiers.mjs";
+import { STATIC_PROVIDER, TREESITTER_PROVIDER } from "./provider-identity.mjs";
 import { probeScip } from "./scip-provider.mjs";
 
 export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
 export { PRECISION_TIERS, PRECISION_TIER_ORDER };
 export { augmentGenerationWithScip } from "./scip-provider.mjs";
 
-const PROVIDER = {
-  id: "blueprint-static",
-  version: "repo-local-deterministic-v3",
-  license: "workspace-owned",
-  precisionTier: PRECISION_TIERS.LEXICAL,
-};
+const PROVIDER = STATIC_PROVIDER;
 
 const IGNORED = new Set([
   // VCS internals — git refs, codex checkpoints, branch metadata. Walking
@@ -156,8 +152,43 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
   }
   const root = resolve(repoRoot);
   try {
-    const { augmentGeneration } = await import("./treesitter-provider.mjs");
+    const tsModule = await import("./treesitter-provider.mjs");
+    const { augmentGeneration, PROVIDER: TS_PROVIDER, SUPPORTED_EXTENSIONS: TS_EXTENSIONS } = tsModule;
     const { summary } = await augmentGeneration(generation, root);
+    // PROVIDER SELECTION. Tree-sitter cleared every qualification gate the
+    // lexical incumbent has (12/12 tasks, 6/6 gates on darwin AND win32), so it
+    // is the SELECTED provider — `manifest.provider` names it, and every
+    // consumer reading that field now sees AST precision rather than LEXICAL.
+    //
+    // It is not the ONLY provider, and cannot be today: tree-sitter has
+    // registered extractors for 10 extensions, while the lexical layer parses
+    // 30. Dropping the lexical layer would blind Blueprint to Swift, C/C++,
+    // shell, SQL, PowerShell, Vue and Astro — i.e. to every iOS app in the
+    // suite and every Windows installer script. So the lexical layer remains,
+    // demoted to fallback for exactly the extensions tree-sitter cannot parse.
+    //
+    // `lexicalProvider` preserves the identity of the persisted lexical nodes.
+    // That, not the selected provider, is what decides whether an existing
+    // graph.json can still be trusted — see graphStatus's providerMismatch.
+    if (summary?.parsedFiles > 0) {
+      const astExtensions = [...TS_EXTENSIONS];
+      const astSet = new Set(astExtensions);
+      generation.manifest.lexicalProvider = generation.manifest.provider;
+      generation.manifest.provider = TS_PROVIDER;
+      generation.manifest.providerComposition = {
+        selected: TS_PROVIDER.id,
+        layers: [
+          { id: TS_PROVIDER.id, precisionTier: TS_PROVIDER.precisionTier, role: "primary", extensions: astExtensions },
+          {
+            id: PROVIDER.id,
+            precisionTier: PROVIDER.precisionTier,
+            role: "fallback",
+            extensions: PARSED_LANGUAGE_EXTENSIONS.filter((ext) => !astSet.has(ext)),
+          },
+        ],
+      };
+      generation.provider = TS_PROVIDER;
+    }
     if (options.outDir) writeGeneration(resolve(root, options.outDir), generation);
     return { state: "ok", summary };
   } catch (err) {
@@ -215,7 +246,17 @@ export function graphStatus(repoRoot, outDir, options = {}) {
       }
     }
   }
-  const providerMismatch = manifest.provider?.id !== PROVIDER.id || manifest.provider?.version !== PROVIDER.version;
+  // A promoted graph carries TWO layers, and a version bump in either one must
+  // force a rebuild — otherwise a fixed extractor leaves every existing graph
+  // silently stale. Pre-promotion manifests have no `lexicalProvider`, and their
+  // `provider` IS the lexical record, so the fallback evaluates them exactly as
+  // before.
+  const lexical = manifest.lexicalProvider ?? manifest.provider;
+  const lexicalMismatch = lexical?.id !== PROVIDER.id || lexical?.version !== PROVIDER.version;
+  const astMismatch = manifest.lexicalProvider
+    ? manifest.provider?.id !== TREESITTER_PROVIDER.id || manifest.provider?.version !== TREESITTER_PROVIDER.version
+    : false;
+  const providerMismatch = lexicalMismatch || astMismatch;
   const fresh = !providerMismatch && (scanned && !scanTruncated ? manifest.repo?.sourceHash === currentHash : true);
   return {
     state: scanTruncated ? "indeterminate" : fresh ? "fresh" : "stale",

@@ -68,7 +68,7 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     assert.match(mermaid.stdout, /OrderService\.placeOrder/);
 
     const planner = run(["graph", "planner-status", "--query", "placeOrder", "--out", ".agent", "--limit", "2"], repo);
-    assert.equal(planner.provider, "blueprint-static");
+    assert.equal(planner.provider, "blueprint-treesitter");
     assert.ok(["ready", "missing_command", "unavailable", "broken"].includes(planner.planner.state));
     // A "ready" verdict must be earned by actually round-tripping a ContextPacket
     // through `memright plan-context`, not by grepping help text (the old probe).
