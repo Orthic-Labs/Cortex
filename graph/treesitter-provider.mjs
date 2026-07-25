@@ -86,12 +86,11 @@
 //   about the discount; "failed" files still emit a file node (confidence 0)
 //   but zero symbol nodes.
 
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Parser, Language } from "web-tree-sitter";
-import { xxhash128 } from "hash-wasm";
+import { createXXHash128, xxhash128 } from "hash-wasm";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // graph/ -> blueprint/ -> skills/ -> tools/ -> node_modules/
@@ -306,20 +305,31 @@ function normalizePath(value) {
   return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-function sha256(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
+// Sync XXH3-128, matching static-provider's `xxh128` exactly (raw hex, no
+// prefix, over the UTF-8 bytes of the normalized text). `ensureContentHash` is
+// called from synchronous evidence builders, so the streaming hasher is
+// instantiated once here rather than using hash-wasm's async one-shot.
+const xxhasher = await createXXHash128();
+
+function xxh128(bytes) {
+  xxhasher.init();
+  xxhasher.update(bytes);
+  return xxhasher.digest("hex");
 }
 
 // A `file` input is expected to look like static-provider's internal file
 // record: { path, text, contentHash }. `contentHash` is accepted as given
 // (callers already computing it their own way, e.g. the repo scanner) but if
 // absent we derive it ourselves with the SAME algorithm static-provider uses
-// (sha256 of the UTF-8 bytes) so evidence.contentHash values are directly
-// comparable across providers — this is the one place hash algorithm choice
-// actually matters for drop-in compatibility.
+// (XXH3-128 raw hex over the UTF-8 bytes) so evidence.contentHash values are
+// directly comparable across providers — this is the one place hash algorithm
+// choice actually matters for drop-in compatibility. It was sha256 here after
+// static-provider moved to XXH3, which silently broke exactly the comparability
+// this comment promises: the two providers emitted different digests for
+// identical bytes, so cross-provider evidence matching never hit.
 function ensureContentHash(file) {
   if (file.contentHash) return file.contentHash;
-  return sha256(Buffer.from(file.text ?? "", "utf8"));
+  return xxh128(Buffer.from(file.text ?? "", "utf8"));
 }
 
 function fileEvidence(file, startLine, endLine) {

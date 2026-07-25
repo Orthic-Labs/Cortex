@@ -17,6 +17,7 @@ import {
 } from "../sources/index.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+import os from "node:os";
 import path from "node:path";
 
 const ROOT = path.resolve(HERE, "../../../..");
@@ -48,7 +49,12 @@ function validateCandidates(candidates) {
 }
 
 function withTempRepo(label, fn) {
-  const tmp = path.join(process.env.TEMP || "/tmp", `sources-${label}-${process.pid}-${Date.now()}`);
+  // os.tmpdir() honours TMPDIR/TEMP/TMP per platform. The previous
+  // `process.env.TEMP || "/tmp"` only ever worked on Windows: TEMP is unset on
+  // macOS and Linux, so every run fell through to a hardcoded /tmp — which a
+  // sandboxed or read-only-/tmp environment refuses, failing the test for
+  // reasons that have nothing to do with the code under test.
+  const tmp = path.join(os.tmpdir(), `sources-${label}-${process.pid}-${Date.now()}`);
   mkdirSync(tmp, { recursive: true });
   try {
     fn(tmp);
