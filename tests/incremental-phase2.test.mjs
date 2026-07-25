@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
 import {
@@ -228,7 +229,52 @@ test("reconciliation decisions are reusable only for an unchanged verdict result
     inputFingerprint: reconcileInputFingerprint(verified),
   };
   assert.equal(isReconciliationDecisionCurrent(verified, decision), true);
-  assert.equal(isReconciliationDecisionCurrent(verified, { ...decision, inputFingerprint: "sha256:stale" }), false);
+  assert.equal(isReconciliationDecisionCurrent(verified, { ...decision, inputFingerprint: "xxh128:stale" }), false);
   assert.equal(isReconciliationDecisionCurrent({ ...verified, note: "different reality" }, decision), false);
   assert.equal(isReconciliationDecisionCurrent(verified, { ...decision, decision: null }), false);
+  assert.match(decision.inputFingerprint, /^xxh128:[a-f0-9]{32}$/, "fresh fingerprints must be minted in the xxh128 form");
+});
+
+// Migration guard (locked 2026-07-25): a Phase-4 user decision sealed BEFORE
+// the sha256 -> xxh3 algorithm switch must still be honoured after the
+// switch. isReconciliationDecisionCurrent gates a STORED USER DECISION, so
+// silently invalidating it on an algorithm change would re-open every
+// already-settled reconciliation the next time Phase 2 runs.
+test("a legacy sha256-prefixed reconciliation decision is still honoured after the xxh3 migration", () => {
+  const verified = { claimId: "claim-a", verdict: "contradicted", evidence: "src/a.ts:1", note: "A" };
+
+  // Recreate the pre-migration algorithm inline: sha256 over the identical
+  // stable-sorted payload shape reconcileInputFingerprint builds today.
+  function stableValue(value) {
+    if (Array.isArray(value)) return value.map(stableValue);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, stableValue(value[key])]),
+    );
+  }
+  const legacyPayload = {
+    schemaVersion: 1,
+    kind: "reconciliation",
+    verdict: (() => {
+      const { inputFiles: _a, inputFingerprint: _b, reconciliationFingerprint: _c, sourceGenerationId: _d, ...semantic } = verified;
+      return semantic;
+    })(),
+  };
+  const legacyFingerprint = `sha256:${crypto.createHash("sha256").update(JSON.stringify(stableValue(legacyPayload))).digest("hex")}`;
+
+  const legacyDecision = {
+    claimId: "claim-a",
+    decision: "update-doc",
+    inputFingerprint: legacyFingerprint,
+  };
+  assert.match(legacyDecision.inputFingerprint, /^sha256:[a-f0-9]{64}$/, "legacy fixture must actually be sha256-shaped");
+  assert.equal(isReconciliationDecisionCurrent(verified, legacyDecision), true, "legacy sha256 decision must still validate for an unchanged verdict");
+
+  // A legacy decision whose verdict content genuinely changed must still be
+  // rejected — the transition compatibility must not become a blanket bypass.
+  assert.equal(
+    isReconciliationDecisionCurrent({ ...verified, note: "different reality" }, legacyDecision),
+    false,
+    "legacy sha256 decision must NOT validate once the verdict content actually changed",
+  );
 });

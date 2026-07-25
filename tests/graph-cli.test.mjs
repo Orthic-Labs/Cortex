@@ -177,7 +177,7 @@ test("doctor --full rejects Phase 1 alone and accepts current complete understan
     );
     fs.writeFileSync(
       path.join(repo, ".agent/verdicts.json"),
-      JSON.stringify({ sourceGenerationId: "sha256:stale-generation", verdicts: [] }, null, 2),
+      JSON.stringify({ sourceGenerationId: "xxh128:stale-generation", verdicts: [] }, null, 2),
     );
     assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
 
@@ -203,7 +203,7 @@ test("doctor --full rejects Phase 1 alone and accepts current complete understan
       phase4: "not_required",
     });
 
-    const currentDocGeneration = graphManifest.generationId.replace(/^sha256:/, "");
+    const currentDocGeneration = graphManifest.generationId.replace(/^xxh128:/, "");
     const architecturePath = [
       path.join(repo, "docs/architecture.md"),
       path.join(repo, ".agent/docs/architecture.md"),

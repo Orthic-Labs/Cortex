@@ -170,7 +170,7 @@ test("standalone: graph candidates emits schema-valid ContextCandidateSet with r
       for (const field of required) {
         assert.ok(field in c, `candidate missing required field: ${field}`);
       }
-      assert.match(c.sourceHash, /^sha256:[a-f0-9]{64}$/, `sourceHash must be sha256:<hex>: ${c.id}`);
+      assert.match(c.sourceHash, /^xxh128:[a-f0-9]{32}$/, `sourceHash must be xxh128:<hex>: ${c.id}`);
       assert.match(c.sourceRef, /:\d+-\d+$/, `sourceRef must include path:startLine-endLine: ${c.id}`);
     }
     const manifest = JSON.parse(readFileSync(join(repo, ".blueprint/manifest.json"), "utf8"));
@@ -227,7 +227,7 @@ test("federated graph candidates trust only the exact freshness generation", () 
       CLI,
       "graph", "candidates",
       "--task", "handler",
-      "--expected-generation", `sha256:${"0".repeat(64)}`,
+      "--expected-generation", `xxh128:${"0".repeat(32)}`,
     ], { cwd: repo, encoding: "utf8", timeout: 2000 });
     assert.notEqual(rejected.status, 0);
     assert.match(rejected.stderr, /graph_generation_changed/);

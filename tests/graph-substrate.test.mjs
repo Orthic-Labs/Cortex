@@ -24,7 +24,7 @@ test("static graph substrate builds a complete generation with exact evidence", 
   const generation = buildGraphGeneration(REPO);
 
   assert.equal(generation.provider.id, "blueprint-static");
-  assert.match(generation.manifest.generationId, /^sha256:[a-f0-9]{64}$/);
+  assert.match(generation.manifest.generationId, /^xxh128:[a-f0-9]{32}$/);
   assert.equal(generation.manifest.complete, true);
   assert.ok(generation.nodes.some((node) => node.kind === "symbol" && node.qualifiedName === "OrderService.placeOrder"));
   assert.ok(generation.edges.some((edge) => edge.kind === "CALLS" && edge.source.includes("registerOrderRoute") && edge.target.includes("OrderService.placeOrder")));
@@ -56,7 +56,7 @@ test("static graph candidate set conforms to ContextCandidateSet v1 shape", () =
   assert.deepEqual(candidates.providerCeiling, { maxCandidates: 3, maxEstimatedTokens: 8000 });
   assert.equal(candidates.candidates[0].layer, 3);
   assert.equal(candidates.candidates[0].sourceKind, "repo_code");
-  assert.match(candidates.candidates[0].sourceHash, /^sha256:[a-f0-9]{64}$/);
+  assert.match(candidates.candidates[0].sourceHash, /^xxh128:[a-f0-9]{32}$/);
 });
 
 test("graph status distinguishes missing, fresh, and stale generations", () => {
@@ -72,7 +72,7 @@ test("graph status distinguishes missing, fresh, and stale generations", () => {
 
   const manifestPath = path.join(outDir, "graph", "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  manifest.repo.sourceHash = "sha256:stale";
+  manifest.repo.sourceHash = "xxh128:stale";
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   assert.equal(graphStatus(REPO, outDir).state, "stale");
 

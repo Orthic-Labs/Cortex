@@ -52,7 +52,7 @@ test("Blueprint hygiene facts are cached, generation-bound, and become stale wit
     const refreshed = JSON.parse(refresh.stdout);
     assert.equal(refreshed.state, "fresh");
     assert.deepEqual(refreshed.selectedChecks, ["decomposition", "debt_markers"]);
-    assert.match(refreshed.sourceGenerationId, /^sha256:[a-f0-9]{64}$/);
+    assert.match(refreshed.sourceGenerationId, /^xxh128:[a-f0-9]{32}$/);
     assert.ok(fs.existsSync(path.join(repo, ".agent", "hygiene", "facts.json")));
     const decomposition = refreshed.checks.find((check) => check.check === "decomposition");
     assert.equal(decomposition.findings_count, 0);

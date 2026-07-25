@@ -193,7 +193,7 @@ test("bootstrap returns stale when the tracked manifest does not match the sourc
       provider: "blueprint-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
-      repo: { rootName: "typescript-commerce", sourceHash: "sha256:" + "0".repeat(64), fileCount: 0 },
+      repo: { rootName: "typescript-commerce", sourceHash: "xxh128:" + "0".repeat(32), fileCount: 0 },
       frozen: true,
     };
     writeJson(path.join(repo, BLUEPRINT_DIR_NAME, MANIFEST_NAME), manifest);
@@ -248,7 +248,7 @@ test("bootstrap rejects manifests with unsupported schemaVersion", () => {
       provider: "blueprint-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
-      repo: { rootName: "typescript-commerce", sourceHash: "sha256:" + "0".repeat(64) },
+      repo: { rootName: "typescript-commerce", sourceHash: "xxh128:" + "0".repeat(32) },
     };
     writeJson(path.join(repo, BLUEPRINT_DIR_NAME, MANIFEST_NAME), manifest);
     const result = bootstrapFromTracked(repo);

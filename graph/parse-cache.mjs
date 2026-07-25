@@ -13,7 +13,7 @@
 // contentHash equals the current file's contentHash. It is machine-local
 // regenerable state (.agent/graph/parse-cache/), never a source of truth.
 
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -22,8 +22,17 @@ import { dirname, join } from "node:path";
 // not a slow path, so we fail closed to a full reparse.
 export const PARSE_CACHE_VERSION = 1;
 
-function sha256(text) {
-  return createHash("sha256").update(text).digest("hex");
+// XXH3-128 (via hash-wasm) — used only for a temp-filename salt here, not for
+// integrity. The WASM hasher's own constructor is async, but init()/update()/
+// digest() are synchronous once it exists, so we pay the async cost exactly
+// once at module load (top-level await) and every call site stays sync — no
+// per-call Promise, no blocking busy-wait.
+const xxhasher = await createXXHash128();
+
+function xxh128(text) {
+  xxhasher.init();
+  xxhasher.update(text);
+  return xxhasher.digest("hex");
 }
 
 // One deterministic file per repo, holding all records. A single file (vs one per
@@ -58,7 +67,7 @@ export function writeParseCache(outDir, cache) {
   const path = cachePath(outDir);
   mkdirSync(dirname(path), { recursive: true });
   const serializable = { version: PARSE_CACHE_VERSION, records: Object.fromEntries(cache.records) };
-  const tmp = `${path}.${process.pid}.${sha256(path).slice(0, 8)}.tmp`;
+  const tmp = `${path}.${process.pid}.${xxh128(path).slice(0, 8)}.tmp`;
   writeFileSync(tmp, JSON.stringify(serializable));
   renameSync(tmp, path);
 }

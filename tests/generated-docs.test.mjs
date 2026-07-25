@@ -148,7 +148,7 @@ it("architecture.md rejects understanding from a different graph generation", as
     writeFileSync(
       join(root, ".agent/understanding.json"),
       `${JSON.stringify({
-        sourceGenerationId: "sha256:stale-generation",
+        sourceGenerationId: "xxh128:stale-generation",
         architecture: {
           components: [{ name: "Stale component", evidence: "old.rs:1" }],
           dataFlow: ["Stale input -> Stale component -> Stale output"],

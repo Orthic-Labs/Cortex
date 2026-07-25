@@ -12,7 +12,8 @@
 // refuse out-of-scope paths so the planner's `ScopeGrant` denial test
 // cannot be defeated by an adapter that smuggles a foreign root in.
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
@@ -103,8 +104,28 @@ export function isSupportedPath(path) {
   return SUPPORTED_EXTENSIONS.has(ext);
 }
 
+// XXH3-128 (via hash-wasm) — content hashing for candidate dedup/provenance
+// only, not integrity. hash-wasm's own constructor is async (WASM init), but
+// init()/update()/digest() are synchronous once the hasher exists, so the
+// async cost is paid exactly once at module load (top-level await) and every
+// call site below stays synchronous — no per-call Promise, no blocking
+// busy-wait.
+//
+// NOTE: the exported name `sha256Hex` and the `bodySha256` field name below
+// are kept as-is even though the algorithm underneath is now XXH3-128 — five
+// sibling files under sources/ (dirty-files.mjs, git-metadata.mjs,
+// graph-resolve.mjs, live-overlay.mjs, task-anchor.mjs) import `sha256Hex`
+// by name and pass results through as `bodySha256`; this task's ownership
+// scope covers only _shared.mjs, so renaming here without updating those
+// call sites would break them. The `sha256:` PREFIX on the value actually
+// written into the artifact (the self-describing tag, `sourceHash` below)
+// is what changes.
+const xxhasher = await createXXHash128();
+
 export function sha256Hex(value) {
-  return createHash("sha256").update(String(value ?? "")).digest("hex");
+  xxhasher.init();
+  xxhasher.update(String(value ?? ""));
+  return xxhasher.digest("hex");
 }
 
 export function traceId() {
@@ -146,7 +167,7 @@ export function makeCandidate({
     sourceRef: sourcePath
       ? `${sourcePath}:${startLine}-${computedEndLine}`
       : sourceRef,
-    sourceHash: `sha256:${computedBodySha}`,
+    sourceHash: `xxh128:${computedBodySha}`,
     trustClass,
     instructionPolicy,
     providerScore: Math.max(0, Math.min(1, Number(providerScore ?? 0))),

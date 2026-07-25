@@ -1426,7 +1426,7 @@ function fullCompletionStatus(root, outDir, graph) {
   const architecture = generatedDoc(join(root, "docs/architecture.md"), join(root, outDir, "docs/architecture.md"));
   const docsPresent = Boolean(product && architecture);
   const expectedDocGeneration = graphGenerationId
-    ? `gen:${graphGenerationId.replace(/^sha256:/, "")}`
+    ? `gen:${graphGenerationId.replace(/^(?:sha256|xxh128):/, "")}`
     : null;
   const docsCurrent = docsPresent
     && expectedDocGeneration
@@ -1911,7 +1911,10 @@ function readFreshGraph(root, outDir, options = {}) {
     : manifestFileLimit || 0;
   const expectedGeneration = String(options.expectedGeneration ?? "").trim();
   if (expectedGeneration) {
-    if (!/^sha256:[a-f0-9]{64}$/.test(expectedGeneration)) {
+    // Accept either hash form: xxh128 is current, sha256 remains valid for a
+    // generation minted before the 2026-07-25 migration.
+    if (!/^sha256:[a-f0-9]{64}$/.test(expectedGeneration)
+      && !/^xxh128:[a-f0-9]{32}$/.test(expectedGeneration)) {
       throw graphReadError("graph_generation_invalid", "Expected graph generation is invalid");
     }
     if (!persisted.complete || persisted.generationId !== expectedGeneration) {

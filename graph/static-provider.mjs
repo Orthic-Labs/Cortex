@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -314,7 +315,7 @@ export function createContextCandidateSet(generation, options = {}) {
       layer: 3,
       sourceKind: "repo_code",
       sourceRef: `${ev.path}:${ev.startLine}-${ev.endLine}`,
-      sourceHash: `sha256:${ev.contentHash}`,
+      sourceHash: `xxh128:${ev.contentHash}`,
       trustClass: "workspace_tracked",
       instructionPolicy: "data_only",
       providerScore,
@@ -718,7 +719,7 @@ export function graphFlowInventory(generation, options = {}) {
   return {
     schemaVersion: 1,
     provider: generation.provider.id,
-    generatedAt: generation.manifest?.generatedAt ?? `gen:${generation.manifest?.generationId?.replace(/^sha256:/, "").slice(0, 16) ?? "0"}`,
+    generatedAt: generation.manifest?.generatedAt ?? `gen:${generation.manifest?.generationId?.replace(/^xxh128:/, "").slice(0, 16) ?? "0"}`,
     mode: complete ? "complete" : "bounded",
     maxFlows,
     entryPoints: entryPoints.length,
@@ -863,7 +864,7 @@ function buildGenerationFromSources(root, source, options = {}) {
     provider: PROVIDER,
     // Stable generation stamp derived from the generation id, so byte-identity
     // on unchanged rebuilds is preserved.
-    generatedAt: `gen:${generationId(cleanNodes, cleanEdges, source.files).replace(/^sha256:/, "").slice(0, 16)}`,
+    generatedAt: `gen:${generationId(cleanNodes, cleanEdges, source.files).replace(/^xxh128:/, "").slice(0, 16)}`,
     generationId: generationId(cleanNodes, cleanEdges, source.files),
     complete: true,
     // The fileLimit the build was run with (0 = unlimited). graphStatus and
@@ -944,7 +945,7 @@ function scanSources(root, fileLimit = 0, walkOptions = {}) {
       path,
       text: normalizedText,
       lines: normalizedText.split(/\r?\n/),
-      contentHash: sha256(normalizedBytes),
+      contentHash: xxh128(normalizedBytes),
       size: bytes.length,
     });
     if (fileLimit > 0 && files.length >= fileLimit) {
@@ -1187,11 +1188,11 @@ function queryTerms(query) {
 }
 
 function generationId(nodes, edges, files) {
-  return `sha256:${sha256(JSON.stringify({ nodes, edges, sourceHash: sourceHash(files) }))}`;
+  return `xxh128:${xxh128(JSON.stringify({ nodes, edges, sourceHash: sourceHash(files) }))}`;
 }
 
 function sourceHash(files) {
-  return `sha256:${sha256(files.map((file) => `${file.path}:${file.contentHash}`).join("\n"))}`;
+  return `xxh128:${xxh128(files.map((file) => `${file.path}:${file.contentHash}`).join("\n"))}`;
 }
 
 function estimateTokens(evidence) {
@@ -1206,8 +1207,23 @@ function normalizePath(value) {
   return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
+// XXH3-128 (via hash-wasm) — content hashing for change detection and
+// dedup only (file bytes, source-tree fingerprint, generation id). No trust
+// boundary depends on collision resistance here: the blueprint→MemRight
+// federation provider reads only the generation identity, never validates it
+// cryptographically (tools/memright/federation/providers/blueprint.py).
+// The hasher's construction is async (WASM init); init()/update()/digest()
+// are synchronous once it exists, so the async cost is paid exactly once at
+// module load (top-level await) and every call site below stays synchronous
+// — no per-call Promise, no blocking busy-wait. Kept as a local copy (not a
+// shared import) to match this file's existing "manually kept in sync"
+// duplication pattern (see the IGNORED_DIRS comment in sources/_shared.mjs).
+const xxhasher = await createXXHash128();
+
+function xxh128(value) {
+  xxhasher.init();
+  xxhasher.update(value);
+  return xxhasher.digest("hex");
 }
 
 function writeJson(path, value) {
