@@ -330,6 +330,11 @@ function repoFiles(root, config, limit = 0) {
     const raw = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
       cwd: root,
       stdio: ["ignore", "pipe", "ignore"],
+      // Large repos can exceed Node's 1 MiB default before the tracked-file
+      // path is returned. Falling back to the recursive filesystem walker then
+      // traverses ignored caches and can overflow on a large directory.
+      maxBuffer: 512 * 1024 * 1024,
+      windowsHide: true,
     });
     files = raw
       .toString("utf8")
