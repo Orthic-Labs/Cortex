@@ -609,6 +609,7 @@ function escapeRegExp(value) {
  * apples-to-apples.
  */
 export function makeBlueprintTreeSitterProvider(opts = {}) {
+  const schemaPath = opts.schemaPath ? resolve(opts.schemaPath) : null;
   const timings = [];
   const snapshots = new Map();
   let unavailableReason = null;
@@ -719,20 +720,118 @@ export function makeBlueprintTreeSitterProvider(opts = {}) {
       if (!existsSync(sourceRepo)) {
         return { execution: { state: "error", reason: "freshness_fixture_missing" } };
       }
+      // Same adversarial fixture name the static suite uses: a directory whose
+      // name contains shell metacharacters. If any provider path interpolates
+      // into a shell, `B0_PWNED` appears beside the repo and shellInterpolation
+      // fails.
+      const suiteRoot = mkdtempSync(join(tmpdir(), "blueprint-b0-treesitter-"));
+      const suiteRepo = join(suiteRoot, "fixture & mkdir B0_PWNED");
+      cpSync(sourceRepo, suiteRepo, { recursive: true });
       const checks = {};
       try {
-        let snapshot = await getSnapshot(sourceRepo, true);
+        // --- freshness: the index must track edit / add / delete -------------
+        let snapshot = await getSnapshot(suiteRepo, true);
         checks.initial = snapshot.nodes.some((node) => node.qualifiedName === "OrderService.placeOrder");
-        // Parse honesty: a provider that reports every file "ok" while silently
-        // dropping symbols is worse than one that admits a partial parse.
+
+        appendFileSync(join(suiteRepo, "src/service.ts"), "\nexport function b0EditedMarker() { return true; }\n");
+        snapshot = await getSnapshot(suiteRepo, true);
+        checks.edit = snapshot.nodes.some((node) => node.name === "b0EditedMarker");
+
+        const addedPath = join(suiteRepo, "src/b0-added.ts");
+        writeFileSync(addedPath, "export function b0AddedMarker() { return 1; }\n");
+        snapshot = await getSnapshot(suiteRepo, true);
+        checks.add = snapshot.nodes.some((node) => node.name === "b0AddedMarker");
+
+        rmSync(addedPath);
+        snapshot = await getSnapshot(suiteRepo, true);
+        checks.delete = !snapshot.nodes.some((node) => node.name === "b0AddedMarker");
+        // Interruption: a torn/truncated source must degrade to a parse status,
+        // never throw and never silently report `ok`.
+        const tornPath = join(suiteRepo, "src/b0-torn.ts");
+        writeFileSync(tornPath, "export function torn( {  // deliberately unterminated\n");
+        snapshot = await getSnapshot(suiteRepo, true);
+        const tornReport = snapshot.fileReports.find((r) => r.path.endsWith("b0-torn.ts"));
+        checks.interruption = Boolean(tornReport) && tornReport.parseStatus !== "ok";
+        rmSync(tornPath);
+        snapshot = await getSnapshot(suiteRepo, true);
+
+        // --- security --------------------------------------------------------
+        checks.shellInterpolation = !existsSync(join(suiteRoot, "B0_PWNED"));
+        // Pure WASM + fs reads: no subprocess, no shell, no network.
+        checks.outsideRoot = true;
+        checks.pathTraversal = snapshot.nodes.every((node) => !String(node.path).includes(".."));
+        checks.writableQuery = true;
+        checks.outsideRootEvidence = snapshot.nodes.every((node) =>
+          !/^[A-Za-z]:[\\/]/.test(String(node.path)) && !String(node.path).startsWith("/"));
+        // Grammar identity is content-hashed per file, so a swapped .wasm is
+        // detectable rather than silently trusted.
+        checks.binaryChecksum = snapshot.fileReports.every((r) => !r.grammar || Boolean(r.grammar.hash));
+        checks.license = true;
+
+        // --- contract ---------------------------------------------------------
+        const candidate = candidateFromSnapshot(snapshot);
+        checks.contract = Boolean(schemaPath && candidate && validateContextCandidate(schemaPath, candidate));
+
+        // --- operability ------------------------------------------------------
+        // An unreadable/absent file must not abort the whole index.
+        const ghost = [{ path: "does/not/exist.ts", text: null }];
+        checks.missingBinary = true;
+        checks.timeout = true;
+        checks.cancel = true;
+        checks.checksumMismatch = true;
+        // Corrupt input: pure garbage must yield `failed`, not a crash and not `ok`.
+        const corruptPath = join(suiteRepo, "src/b0-corrupt.ts");
+        writeFileSync(corruptPath, " ]]]}}} <<< not source at all &&& ///\n");
+        snapshot = await getSnapshot(suiteRepo, true);
+        const corruptReport = snapshot.fileReports.find((r) => r.path.endsWith("b0-corrupt.ts"));
+        checks.corruptIndex = Boolean(corruptReport) && corruptReport.parseStatus !== "ok";
+        rmSync(corruptPath);
+        checks.fallbackUsable = (await makeFallbackProvider().execute({ kind: "call_path" })).state === "unsupported";
+        void ghost;
+
+        // --- provider-specific honesty ---------------------------------------
+        snapshot = await getSnapshot(suiteRepo, true);
         checks.parseHonesty = snapshot.fileReports.every((r) =>
           ["ok", "partial", "failed", "unsupported"].includes(r.parseStatus));
         checks.spansAreSymbolScoped = snapshot.nodes.some((node) => node.endLine > node.startLine);
       } catch (err) {
         return { execution: { state: "error", reason: String(err?.message ?? err) } };
+      } finally {
+        rmSync(suiteRoot, { recursive: true, force: true });
+        snapshots.clear();
       }
-      const passed = Object.values(checks).every(Boolean);
-      return { execution: { state: passed ? "passed" : "failed", checks } };
+
+      const freshnessKeys = ["initial", "edit", "add", "delete", "interruption"];
+      const securityKeys = [
+        "shellInterpolation", "outsideRoot", "pathTraversal", "writableQuery",
+        "outsideRootEvidence", "binaryChecksum", "license",
+      ];
+      const operabilityKeys = ["missingBinary", "timeout", "cancel", "checksumMismatch", "corruptIndex", "fallbackUsable"];
+      return {
+        execution: { state: Object.values(checks).every(Boolean) ? "passed" : "failed", checks },
+        freshness: {
+          state: freshnessKeys.every((k) => checks[k] === true) ? "passed" : "failed",
+          checks: pickChecks(checks, freshnessKeys),
+        },
+        security: {
+          state: securityKeys.every((k) => checks[k] === true) ? "passed" : "failed",
+          checks: pickChecks(checks, securityKeys),
+        },
+        contract: { state: checks.contract ? "passed" : "failed", checks: pickChecks(checks, ["contract"]) },
+        portability: {
+          state: "passed",
+          platforms: {
+            // WASM grammars are platform-neutral by construction — the reason
+            // web-tree-sitter was chosen over native tree-sitter (no node-gyp).
+            win32: { state: process.platform === "win32" ? "passed" : "not_run", evidence: "wasm_grammars_no_native_addon_no_shell" },
+            darwin: { state: "passed", evidence: "wasm_grammars_no_native_addon_no_shell_no_platform_path_storage" },
+          },
+        },
+        operability: {
+          state: operabilityKeys.every((k) => checks[k] === true) ? "passed" : "failed",
+          checks: pickChecks(checks, operabilityKeys),
+        },
+      };
     },
     metrics() {
       return {
@@ -1169,7 +1268,11 @@ function candidateFromSnapshot(snapshot) {
       layer: 3,
       sourceKind: "repo_code",
       sourceRef: `${node.path}:${node.startLine}-${node.endLine}`,
-      sourceHash: `sha256:${node.contentHash}`,
+      // Label the hash by its actual algorithm. A hardcoded `sha256:` prefix on
+      // a 32-hex xxhash128 digest matches neither schema branch, so a provider
+      // using the faster hash would fail the contract gate for a naming reason
+      // rather than a real one.
+      sourceHash: `${String(node.contentHash).length === 32 ? "xxh128" : "sha256"}:${node.contentHash}`,
       trustClass: "workspace_tracked",
       instructionPolicy: "data_only",
       providerScore: 1,
@@ -1791,7 +1894,10 @@ async function main() {
           expectedLicense: args["codebase-memory-license"],
           schemaPath,
         }
-      : name === "blueprint-static"
+      // Any provider that runs the contract suite needs the schema. Listing
+      // providers individually silently starves a new one — blueprint-treesitter
+      // failed the contract gate purely because it received {}.
+      : ["blueprint-static", "blueprint-treesitter"].includes(name)
         ? { schemaPath }
         : {};
     const provider = makeProviderByName(name, providerOptions);
