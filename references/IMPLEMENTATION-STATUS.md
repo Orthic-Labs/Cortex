@@ -89,5 +89,26 @@ letting the gates decide the swap, not prose.
 *(Correction 2026-07-25: an earlier revision of this file claimed only the fallback was registered.
 That came from a truncated read of the qualification JSON and was wrong.)*
 
+**Update (2026-07-25, evening): `blueprint-treesitter` is now registered and measured.** Result of
+`node tools/skills/blueprint/evals/run-qualification.mjs --providers blueprint-static,blueprint-treesitter`:
+
+- tasks **12/12 passed** (initially 6/12 — registration exposed and fixed three real provider
+  defects: unmapped edge endpoints, missing `labels` on endpoints, and no module-level constant
+  extraction, which had made the whole config-resource class invisible);
+- gates **1/6**: `correctness` TRUE; freshness/security/contract/portability/operability FALSE
+  because the provider does not yet implement those qualification suites. That is the concrete,
+  measured remaining work for promotion — suite implementations plus a two-platform (win32+darwin)
+  portability run.
+- `blueprint-static` remains the selected provider; the canonical baseline at
+  `docs/baselines/2026-07-10-blueprint-graph/` is deliberately NOT regenerated from a Mac-only run,
+  because its recorded portability evidence spans both platforms and a single-platform rerun would
+  degrade it.
+
+Measurement discipline note: three intermediate qualification runs showed a phantom
+`ts-config-resource` failure that disappeared in a quiet environment and could not be reproduced in
+isolation, solo, either provider order, or against a pristine fixture copy. Cause: the runs shared
+the machine with parallel test suites/agents. **Do not diagnose a qualification failure observed
+while other workloads run on the workspace; re-verify quiet first.**
+
 Plan of record: `docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`.
 Qualification evidence: `docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
