@@ -27,7 +27,7 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     assert.match(result.stdout, /full_blueprint=not_requested/);
     assert.doesNotMatch(result.stdout, /next=phase2/);
     assert.ok(fs.existsSync(path.join(repo, ".agent/map.json")), "map.json must exist");
-    assert.ok(fs.existsSync(path.join(repo, ".agent/graph/manifest.json")), "graph manifest must exist");
+    assert.ok(fs.existsSync(path.join(repo, ".agent/graph/graph.db")), "graph store must exist");
     assert.ok(fs.existsSync(path.join(repo, ".agent/flows.json")), "flows.json must exist");
     assert.ok(fs.existsSync(path.join(repo, ".blueprint/manifest.json")), ".blueprint/manifest.json must exist");
     assert.equal(fs.existsSync(path.join(repo, ".agent/START-HERE.md")), false, "START-HERE.md must NOT exist (retired)");
@@ -41,13 +41,18 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     const map = JSON.parse(fs.readFileSync(path.join(repo, ".agent/map.json"), "utf8"));
     assert.equal(map.entrypoint, ".blueprint/manifest.json");
 
+    // A dirty tree no longer defers the build — the graph is a local index, not
+    // a committed artifact — so the build succeeds and indexes what is on disk.
     fs.appendFileSync(path.join(repo, "src/service.ts"), "\n// dirty overlay\n", "utf8");
     const dirtyBuild = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--check"], { cwd: repo, encoding: "utf8" });
-    assert.notEqual(dirtyBuild.status, 0);
-    assert.match(dirtyBuild.stderr, /graph_build_deferred_dirty/);
+    assert.equal(dirtyBuild.status, 0, dirtyBuild.stderr || dirtyBuild.stdout);
+    assert.doesNotMatch(dirtyBuild.stderr ?? "", /graph_build_deferred_dirty/);
+    // …and it says so honestly: a graph built from uncommitted content does not
+    // correspond to any commit, so baseCommit is null and the state is recorded
+    // as a dirty overlay rather than silently claiming the last commit.
     const dirtyManifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
-    assert.equal(dirtyManifest.generation.baseCommit, baseCommit);
-    assert.equal(dirtyManifest.generation.sourceState, "clean");
+    assert.equal(dirtyManifest.generation.baseCommit, null);
+    assert.equal(dirtyManifest.generation.sourceState, "dirty_overlay");
 
     assert.equal(spawnSync("git", ["restore", "src/service.ts"], { cwd: repo }).status, 0);
     fs.rmSync(path.join(repo, ".agent/graph"), { recursive: true, force: true });
@@ -57,7 +62,7 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     assert.match(rerun.stdout, /phase1_ready/);
     assert.match(rerun.stdout, /full_blueprint=incomplete/);
     assert.match(rerun.stdout, /next=phase2/);
-    assert.ok(fs.existsSync(path.join(repo, ".agent/graph/manifest.json")), "graph manifest must be rebuilt by bare command");
+    assert.ok(fs.existsSync(path.join(repo, ".agent/graph/graph.db")), "graph store must be rebuilt by bare command");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

@@ -22,6 +22,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { openStore, closeStore, loadGeneration as loadStoredGeneration } from "../graph/store-sqlite.mjs";
 import {
   SCOPE_PROVIDER,
   isSupportedPath,
@@ -40,9 +41,23 @@ const PATH_LIKE_RE =
 const RANGE_RE = /^(\d+)-(\d+)$/;
 
 function loadGeneration(repoRoot) {
-  // Try Blueprint's native generation under .agent/ first (its default outDir).
+  // Blueprint's native generation lives in the store. (The previous path here,
+  // `.agent/graph.json`, was wrong even before the migration — the generation
+  // was always at `.agent/graph/graph.json` — so this branch never fired and
+  // every caller silently fell through to the bootstrap index.)
+  const dbPath = join(repoRoot, ".agent", "graph", "graph.db");
+  if (existsSync(dbPath)) {
+    try {
+      const db = openStore(dbPath);
+      try {
+        const generation = loadStoredGeneration(db);
+        if (generation?.nodes && generation?.manifest) return generation;
+      } finally {
+        closeStore(db);
+      }
+    } catch { /* unreadable store — fall through to the bootstrap index */ }
+  }
   const candidates = [
-    join(repoRoot, ".agent", "graph.json"),
     join(repoRoot, ".blueprint", "index.jsonl"),
   ];
   for (const path of candidates) {

@@ -31,7 +31,7 @@ import {
   extractCallNames,
   extractSymbols,
 } from "../graph/language-extractors.mjs";
-import { buildGraphGeneration } from "../graph/static-provider.mjs";
+import { buildGraphGeneration, readGeneration } from "../graph/static-provider.mjs";
 import {
   PARSE_CACHE_VERSION,
   emptyCache,
@@ -197,7 +197,7 @@ test("emptyCache is a valid, empty starting point", () => {
 
 // ---- Property 3: the generation is a single stable file, not a growing dir ------
 
-test("the generation is one stable file (graph/graph.json), no content-addressed dir", () => {
+test("the generation is one store (graph/graph.db), with no JSON twin and no content-addressed dir", () => {
   const root = mkdtempSync(join(tmpdir(), "bp-prune-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd: root });
@@ -209,10 +209,13 @@ test("the generation is one stable file (graph/graph.json), no content-addressed
     execFileSync("git", ["add", "-A"], { cwd: root });
     buildGraphGeneration(root, { outDir: ".agent" });
     const graphDir = join(root, ".agent", "graph");
-    // The stable file exists and holds the current generation…
-    assert.ok(existsSync(join(graphDir, "graph.json")), "graph/graph.json must exist");
-    const generation = JSON.parse(readFileSync(join(graphDir, "graph.json"), "utf8"));
-    assert.ok(generation.nodes.some((n) => n.id === "symbol:a.ts::two"), "graph.json holds the current generation");
+    // The one store exists and holds the current generation…
+    assert.ok(existsSync(join(graphDir, "graph.db")), "graph/graph.db must exist");
+    const generation = readGeneration(root, ".agent");
+    assert.ok(generation.nodes.some((n) => n.id === "symbol:a.ts::two"), "the store holds the current generation");
+    // …with no second copy of the same data in any other format…
+    assert.ok(!existsSync(join(graphDir, "graph.json")), "no JSON twin of the generation");
+    assert.ok(!existsSync(join(graphDir, "manifest.json")), "no JSON twin of the manifest");
     // …and the legacy per-build content-addressed directory is gone.
     assert.ok(!existsSync(join(graphDir, "generations")), "no content-addressed generations/ dir");
   } finally {

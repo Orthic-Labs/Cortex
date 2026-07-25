@@ -19,6 +19,7 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 import os from "node:os";
 import path from "node:path";
+import { seedStore } from "./_store-helpers.mjs";
 
 const ROOT = path.resolve(HERE, "../../../..");
 const SCHEMA = path.join(ROOT, "tools/lib/context-contracts.schema.json");
@@ -158,9 +159,17 @@ test("graph-resolve: emits file and symbol candidates when graph is available", 
   withTempRepo("resolve", (repo) => {
     cpSync(fixture, repo, { recursive: true });
     spawnSync(process.execPath, [path.join(ROOT, "tools/skills/blueprint/scripts/blueprint.mjs"), "graph", "build", "--out", ".agent"], { cwd: repo, stdio: "pipe" });
-    const task = "investigate placeOrder in src/services/checkout.ts";
+    // The path must exist IN THE FIXTURE. This previously read
+    // "src/services/checkout.ts", which the fixture does not contain — and the
+    // test still passed, because graph-resolve was looking for the generation at
+    // `.agent/graph.json` (a path the builder never wrote), so every run hit the
+    // `graph_unavailable` early return below and asserted nothing at all.
+    // Fixing the adapter's path exposed the vacuum.
+    const task = "investigate placeOrder in src/service.ts";
     const result = graphResolve.produce(task, { repoRoot: repo });
-    if (result.omissions.length && result.omissions.every((o) => o.reason === "graph_unavailable")) return;
+    if (result.omissions.length && result.omissions.every((o) => o.reason === "graph_unavailable")) {
+      throw new Error("graph must be available here — the build above writes .agent/graph/graph.db");
+    }
     assert.ok(result.candidates.length > 0, "expected at least one graph-resolved candidate");
     validateCandidates(result.candidates);
     for (const c of result.candidates) {
@@ -244,12 +253,17 @@ test("live-overlay: emits candidates for files newer than the graph generation",
     writeFileSync(path.join(repo, "src/old.ts"), "export const x = 1;\n");
     const oldTs = new Date(Date.now() - 120_000).toISOString();
     const newTs = new Date(Date.now() + 5_000).toISOString();
-    writeFileSync(path.join(repo, ".agent/graph/graph.json"), JSON.stringify({
+    seedStore(repo, {
       manifest: { generatedAt, provider: { id: "test" } },
       nodes: [
-        { id: "file:src/old.ts", kind: "file", evidence: [{ path: "src/old.ts", contentHash: "deadbeef".repeat(8) }] },
+        {
+          id: "file:src/old.ts",
+          kind: "file",
+          path: "src/old.ts",
+          evidence: [{ path: "src/old.ts", contentHash: "deadbeef".repeat(8) }],
+        },
       ],
-    }));
+    });
     writeFileSync(path.join(repo, "src/new.ts"), "export const y = 2;\n");
     const result = liveOverlay.produce("", { repoRoot: repo });
     const newCandidate = result.candidates.find((c) => c.sourceRef.startsWith("src/new.ts"));
@@ -289,9 +303,8 @@ test("index: produceCandidatesWithTelemetry runs every adapter once and dedupes"
 test("index: an adapter that throws still leaves the rest of the fan-out intact", () => {
   withTempRepo("throw", (repo) => {
     writeFileSync(path.join(repo, "AGENTS.md"), "agents\n");
-    // Force graphResolve to think a graph is present by faking a tiny .agent/graph.json
-    mkdirSync(path.join(repo, ".agent"), { recursive: true });
-    writeFileSync(path.join(repo, ".agent/graph.json"), JSON.stringify({ manifest: { generatedAt: null }, nodes: [] }));
+    // Force graphResolve to think a graph is present by seeding a tiny store.
+    seedStore(repo, { manifest: { generatedAt: null }, nodes: [] });
     const result = produceCandidatesWithTelemetry("", { repoRoot: repo });
     // AGENTS.md should still surface from rules-documents even if graph-resolve misbehaves.
     const ids = result.candidates.map((c) => c.id);

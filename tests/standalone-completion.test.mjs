@@ -32,6 +32,8 @@ function xxh3Hex(value) {
   return xxhasher.digest("hex");
 }
 import { fileURLToPath } from "node:url";
+import { readEnvelope, mutateManifest } from "./_store-helpers.mjs";
+import { readGeneration } from "../graph/static-provider.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const BLUEPRINT = join(HERE, "..");
@@ -106,7 +108,7 @@ test("standalone: every artifact agrees on generation identity", () => {
     runCli(repo, ["build", "--out", ".agent"]);
     const map = JSON.parse(readFileSync(join(repo, ".agent/map.json"), "utf8"));
     const manifest = JSON.parse(readFileSync(join(repo, ".blueprint/manifest.json"), "utf8"));
-    const graphManifest = JSON.parse(readFileSync(join(repo, ".agent/graph/manifest.json"), "utf8"));
+    const graphManifest = readEnvelope(repo);
     const product = readFileSync(join(repo, "docs/product.md"), "utf8");
     const arch = readFileSync(join(repo, "docs/architecture.md"), "utf8");
     const index = JSON.parse(readFileSync(join(repo, ".agent/index.json"), "utf8"));
@@ -190,10 +192,7 @@ test("standalone: graph candidates never rebuilds a stale legacy manifest", () =
   const repo = makeCleanRepo();
   try {
     runCli(repo, ["build", "--out", ".agent"]);
-    const manifestPath = join(repo, ".agent/graph/manifest.json");
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    delete manifest.fileLimit;
-    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    mutateManifest(repo, (manifest) => { delete manifest.fileLimit; });
     writeFileSync(join(repo, "src/handler.ts"), "export function changedHandler() { return 'changed'; }\n");
 
     const result = spawnSync(process.execPath, [CLI, "graph", "candidates", "--task", "handler"], {
@@ -204,7 +203,7 @@ test("standalone: graph candidates never rebuilds a stale legacy manifest", () =
     assert.notEqual(result.status, 0, "query must fail fast instead of rebuilding");
     assert.equal(result.signal, null, "query must return before timeout");
     assert.match(result.stderr, /graph_rebuild_required/);
-    const after = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const after = readEnvelope(repo);
     assert.equal("fileLimit" in after, false, "query must not mutate the legacy manifest");
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -215,7 +214,7 @@ test("federated graph candidates trust only the exact freshness generation", () 
   const repo = makeCleanRepo();
   try {
     runCli(repo, ["build", "--out", ".agent"]);
-    const manifest = JSON.parse(readFileSync(join(repo, ".agent/graph/manifest.json"), "utf8"));
+    const manifest = readEnvelope(repo);
     writeFileSync(join(repo, "src/handler.ts"), "export function changedHandler() { return 'changed'; }\n");
 
     const trusted = spawnSync(process.execPath, [
@@ -241,7 +240,12 @@ test("federated graph candidates trust only the exact freshness generation", () 
   }
 });
 
-test("build rejects tracked dirty source before replacing the committed graph", () => {
+// The graph is a local, gitignored index — not a committed artifact — so a
+// dirty tree is a normal state to build from, and the build must include the
+// working-tree content rather than refusing. The old `graph_build_deferred_dirty`
+// refusal existed only because graph.json was tracked in git, which made the
+// graph structurally stale during exactly the period a developer needs it fresh.
+test("build indexes a dirty working tree instead of refusing", () => {
   const repo = makeCleanRepo();
   try {
     assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
@@ -250,17 +254,19 @@ test("build rejects tracked dirty source before replacing the committed graph", 
     assert.equal(spawnSync("git", ["add", "-A"], { cwd: repo }).status, 0);
     assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: repo }).status, 0);
     runCli(repo, ["build", "--out", ".agent"]);
-    const graphPath = join(repo, ".agent/graph/graph.json");
-    const before = readFileSync(graphPath, "utf8");
     writeFileSync(join(repo, "src/handler.ts"), "export function dirtyHandler() { return 'dirty'; }\n");
 
-    const rejected = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], {
+    const rebuilt = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], {
       cwd: repo,
       encoding: "utf8",
     });
-    assert.notEqual(rejected.status, 0);
-    assert.match(rejected.stderr, /graph_build_deferred_dirty/);
-    assert.equal(readFileSync(graphPath, "utf8"), before);
+    assert.equal(rebuilt.status, 0, rebuilt.stderr || rebuilt.stdout);
+    assert.doesNotMatch(rebuilt.stderr ?? "", /graph_build_deferred_dirty/);
+    const generation = readGeneration(repo, ".agent");
+    assert.ok(
+      generation.nodes.some((node) => node.id === "symbol:src/handler.ts::dirtyHandler"),
+      "the uncommitted symbol must be in the graph",
+    );
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -326,14 +332,15 @@ test("standalone: unchanged rebuild is byte-identical at every artifact", () => 
       ".agent/index.json",
       ".agent/queue.json",
       ".agent/flows.json",
-      ".agent/graph/manifest.json",
       ".blueprint/manifest.json",
       "docs/product.md",
       "docs/architecture.md",
     ];
+    const generationId = () => readEnvelope(repo).generationId;
     const hashes1 = Object.fromEntries(
       artifactPaths.map((rel) => [rel, xxh3Hex(readFileSync(join(repo, rel), "utf8"))]),
     );
+    const generation1 = generationId();
     runCli(repo, ["build", "--out", ".agent"]);
     const hashes2 = Object.fromEntries(
       artifactPaths.map((rel) => [rel, xxh3Hex(readFileSync(join(repo, rel), "utf8"))]),
@@ -341,6 +348,11 @@ test("standalone: unchanged rebuild is byte-identical at every artifact", () => 
     for (const rel of artifactPaths) {
       assert.equal(hashes2[rel], hashes1[rel], `${rel} must be byte-identical across unchanged rebuilds`);
     }
+    // The graph store is a SQLite file, where byte-identity is not a meaningful
+    // property (page layout, freelists and WAL state vary independently of
+    // content). The determinism that actually matters is that an unchanged
+    // rebuild yields the same generation, so assert that directly.
+    assert.equal(generationId(), generation1, "graph store must yield the same generation across unchanged rebuilds");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

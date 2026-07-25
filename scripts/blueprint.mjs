@@ -40,6 +40,7 @@ import {
   graphNeighbors,
   graphPath,
   graphStatus,
+  readGeneration,
   queryGraph,
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
@@ -530,13 +531,14 @@ function classifyStatus(line) {
 async function build(root, outDir, options = {}) {
   const config = loadConfig(root, outDir);
   const limit = Number(options.limit ?? 0);
+  // The dirty-tree refusal is gone with the committed artifact that caused it.
+  // It existed because graph.json was tracked in git, so a graph built from an
+  // uncommitted tree would have been committed as if it described a commit. The
+  // store is a local, gitignored index: it describes the working tree it was
+  // built from, and the manifest's sourceHash already reports staleness. The
+  // old gate made the graph structurally stale during exactly the period a
+  // developer most needs it fresh.
   const sourceObservation = gitSourceObservation(root);
-  if (sourceObservation?.dirty) {
-    throw graphReadError(
-      "graph_build_deferred_dirty",
-      "Tracked source changes are present; commit or restore them before rebuilding the committed graph",
-    );
-  }
   const files = repoFiles(root, config, limit);
   const allFiles = new Set(files);
   const docs = files.filter(isDoc).map((path) => extractDoc(root, path, allFiles, config));
@@ -1426,7 +1428,10 @@ function fullCompletionStatus(root, outDir, graph) {
     });
   }
 
-  const graphBodyResult = optionalJson(join(root, outDir, "graph/graph.json"));
+  // The generation now comes from the store; `optionalJson`'s present/absent
+  // shape is preserved so the incremental-plan branch below is unchanged.
+  const graphBody = readGeneration(root, outDir);
+  const graphBodyResult = graphBody ? { state: "present", value: graphBody } : { state: "absent", value: null };
   const queueResult = optionalJson(join(root, outDir, "queue.json"));
   if (graphBodyResult.state === "present" && queueResult.state === "present") {
     const incrementalPlan = buildIncrementalPhase2Plan({
@@ -1702,7 +1707,7 @@ function doctor(root, outDir, options = {}) {
 async function runGraphCommand(root, outDir, subcommand, args) {
   if (subcommand === "build") {
     const generation = buildGraphGeneration(root, { outDir });
-    console.log(`graph built ${outDir}/graph/manifest.json provider=${generation.provider.id} nodes=${generation.nodes.length} edges=${generation.edges.length}`);
+    console.log(`graph built ${outDir}/graph/graph.db provider=${generation.provider.id} nodes=${generation.nodes.length} edges=${generation.edges.length}`);
     return 0;
   }
   if (subcommand === "status") {
@@ -1755,6 +1760,16 @@ async function runGraphCommand(root, outDir, subcommand, args) {
       planner: memrightPlannerStatus(),
       candidateSet,
     }, null, 2));
+    return 0;
+  }
+  // JSON on demand, never on disk. The store is the only persisted format; this
+  // exists for the cases the old graph.json was genuinely useful for — piping to
+  // jq, handing a generation to an external tool, eyeballing a diff — without
+  // keeping a second copy of the graph permanently in the repo.
+  if (subcommand === "export") {
+    const generation = readGeneration(root, outDir);
+    if (!generation) throw graphReadError("graph_missing", "Graph store is missing; run blueprint build");
+    console.log(JSON.stringify(generation, null, 2));
     return 0;
   }
   if (subcommand === "schema") {
@@ -1934,10 +1949,11 @@ function readFreshGraph(root, outDir, options = {}) {
   // the manifest recorded.
   let manifestFileLimit = 0;
   let persisted = null;
-  const manifestPath = join(root, outDir, "graph", "manifest.json");
+  const manifestPath = join(root, outDir, "graph", "graph.db");
   try {
-    if (!existsSync(manifestPath)) throw graphReadError("graph_missing", "Graph manifest is missing; run blueprint build");
-    persisted = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (!existsSync(manifestPath)) throw graphReadError("graph_missing", "Graph store is missing; run blueprint build");
+    persisted = readGeneration(root, outDir)?.manifest ?? null;
+    if (!persisted) throw graphReadError("graph_missing", "Graph store holds no generation; run blueprint build");
     if (!("fileLimit" in persisted)) {
       throw graphReadError("graph_rebuild_required", "Legacy graph manifest has no fileLimit; run blueprint build");
     }
@@ -1964,7 +1980,7 @@ function readFreshGraph(root, outDir, options = {}) {
         { expectedGeneration, observedGeneration: persisted.generationId ?? null },
       );
     }
-    const generation = readJson(join(root, outDir, "graph", "graph.json"), null);
+    const generation = readGeneration(root, outDir);
     const bodyGeneration = generation?.manifest?.generationId ?? null;
     if (!generation || bodyGeneration !== expectedGeneration) {
       throw graphReadError(
@@ -1979,8 +1995,7 @@ function readFreshGraph(root, outDir, options = {}) {
   if (status.state !== "fresh") {
     throw graphReadError("graph_rebuild_required", `Graph is ${status.state}; run blueprint build`, { state: status.state });
   }
-  const generationPath = join(root, outDir, "graph", "graph.json");
-  const generation = readJson(generationPath, null);
+  const generation = readGeneration(root, outDir);
   if (!generation) throw graphReadError("graph_corrupt", "Graph generation is missing or unreadable");
   return generation;
 }
@@ -2186,10 +2201,10 @@ function runHygieneCommand(root, outDir, subcommand, args) {
 }
 
 function loadPhase2Inputs(root, outDir) {
-  const graph = readJson(join(root, outDir, "graph/graph.json"), null);
+  const graph = readGeneration(root, outDir);
   const queue = readJson(join(root, outDir, "queue.json"), null);
   if (!graph?.manifest?.generationId) {
-    throw new Error(`phase2_invalid: ${outDir}/graph/graph.json is missing a generation; run blueprint build first`);
+    throw new Error(`phase2_invalid: ${outDir}/graph/graph.db is missing a generation; run blueprint build first`);
   }
   if (!Array.isArray(queue?.claims)) {
     throw new Error(`phase2_invalid: ${outDir}/queue.json is missing or invalid; run blueprint build first`);

@@ -16,6 +16,7 @@ import {
   scanSourcesPublic,
 } from "../graph/static-provider.mjs";
 import { EDGE_CONFIDENCE_TIER_ORDER } from "../graph/confidence-tiers.mjs";
+import { mutateManifest } from "./_store-helpers.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -79,10 +80,7 @@ test("graph status distinguishes missing, fresh, and stale generations", () => {
   const generation = buildGraphGeneration(REPO, { outDir });
   assert.equal(graphStatus(REPO, outDir).state, "fresh");
 
-  const manifestPath = path.join(outDir, "graph", "manifest.json");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  manifest.repo.sourceHash = "xxh128:stale";
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  mutateManifest(REPO, (manifest) => { manifest.repo.sourceHash = "xxh128:stale"; }, outDir);
   assert.equal(graphStatus(REPO, outDir).state, "stale");
 
   fs.rmSync(outDir, { recursive: true, force: true });

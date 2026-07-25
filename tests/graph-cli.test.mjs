@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readEnvelope, mutateManifest } from "./_store-helpers.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -27,8 +28,10 @@ test("blueprint graph build/status/search works from a repo root", () => {
   try {
     const build = run(["graph", "build", "--out", ".agent"], repo);
     assert.equal(build.status, 0, build.stderr);
-    assert.match(build.stdout, /graph built .agent\/graph\/manifest.json/);
-    assert.ok(fs.existsSync(path.join(repo, ".agent/graph/manifest.json")));
+    assert.match(build.stdout, /graph built .agent\/graph\/graph\.db/);
+    assert.ok(fs.existsSync(path.join(repo, ".agent/graph/graph.db")));
+    assert.ok(!fs.existsSync(path.join(repo, ".agent/graph/graph.json")), "graph.json must not be written");
+    assert.ok(!fs.existsSync(path.join(repo, ".agent/graph/manifest.json")), "manifest.json must not be written");
 
     const status = run(["graph", "status", "--out", ".agent"], repo);
     assert.equal(status.status, 0, status.stderr);
@@ -86,10 +89,7 @@ test("doctor reports 'broken' when the graph provider version is incompatible", 
   const repo = copyFixture();
   try {
     assert.equal(run(["build", "--out", ".agent"], repo).status, 0);
-    const manifestPath = path.join(repo, ".agent/graph/manifest.json");
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    manifest.provider.version = "repo-local-deterministic-v1";
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    mutateManifest(repo, (manifest) => { manifest.provider.version = "repo-local-deterministic-v1"; });
     const doctor = run(["doctor", "--json", "--out", ".agent"], repo);
     const payload = JSON.parse(doctor.stdout);
     assert.equal(payload.state, "broken");
@@ -123,9 +123,7 @@ test("doctor --full rejects Phase 1 alone and accepts current complete understan
     );
     assert.ok(fs.existsSync(path.join(repo, ".agent/phase2-plan.json")));
 
-    const graphManifest = JSON.parse(
-      fs.readFileSync(path.join(repo, ".agent/graph/manifest.json"), "utf8"),
-    );
+    const graphManifest = readEnvelope(repo);
     fs.writeFileSync(
       path.join(repo, ".agent/understanding.json"),
       JSON.stringify({

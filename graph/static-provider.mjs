@@ -31,6 +31,7 @@ import {
 } from "./confidence-tiers.mjs";
 import { PRECISION_TIERS, PRECISION_TIER_ORDER } from "./precision-tiers.mjs";
 import { STATIC_PROVIDER, TREESITTER_PROVIDER } from "./provider-identity.mjs";
+import { openStore, closeStore, saveGeneration, loadGeneration, hasGeneration } from "./store-sqlite.mjs";
 import { probeScip } from "./scip-provider.mjs";
 
 export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
@@ -200,10 +201,26 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
 
 export function graphStatus(repoRoot, outDir, options = {}) {
   const root = resolve(repoRoot);
-  const manifestPath = join(resolve(root, outDir), "graph", "manifest.json");
+  // The store IS the manifest now. "missing" means build has never run here,
+  // which is a normal first-use state answered by building — not by reaching
+  // for a second format.
+  const manifestPath = join(resolve(root, outDir), "graph", "graph.db");
   if (!existsSync(manifestPath)) return { state: "missing", manifestPath };
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  if (!manifest.complete) return { state: "incomplete", manifestPath, manifest };
+  const store = openStore(manifestPath);
+  let manifest;
+  let recordedHashes = new Map();
+  try {
+    if (!hasGeneration(store)) return { state: "missing", manifestPath };
+    const generation = loadGeneration(store);
+    manifest = generation.manifest;
+    if (!manifest?.complete) return { state: "incomplete", manifestPath, manifest };
+    for (const node of generation.nodes ?? []) {
+      const evidence = node.evidence?.[0];
+      if (evidence?.path && evidence?.contentHash) recordedHashes.set(evidence.path, evidence.contentHash);
+    }
+  } finally {
+    closeStore(store);
+  }
   // Staleness detection re-walks the source tree with the same fileLimit
   // the build used (default unlimited). If the walk itself OOMs or hits the
   // directory cap, we trust the manifest and surface scanTruncated so the
@@ -226,17 +243,6 @@ export function graphStatus(repoRoot, outDir, options = {}) {
       if (!SUPPORTED_EXTENSIONS.has(ext) && /^[a-z0-9_+\-.]+$/.test(ext)) {
         unsupportedExtensions.add(ext);
         unsupportedFileCount += 1;
-      }
-    }
-    const recordedHashes = new Map();
-    const graphJsonPath = join(resolve(root, outDir), "graph", "graph.json");
-    if (existsSync(graphJsonPath)) {
-      const generation = JSON.parse(readFileSync(graphJsonPath, "utf8"));
-      for (const node of generation.nodes ?? []) {
-        const evidence = node.evidence?.[0];
-        if (evidence?.path && evidence?.contentHash) {
-          recordedHashes.set(evidence.path, evidence.contentHash);
-        }
       }
     }
     for (const file of sources.files) {
@@ -273,6 +279,25 @@ export function graphStatus(repoRoot, outDir, options = {}) {
       dirtyOverlayFileCount,
     },
   };
+}
+
+/**
+ * Read the persisted generation from the one store.
+ *
+ * Returns null when no graph has been built here, so callers distinguish "build
+ * one" from "the graph is empty". There is deliberately no JSON path: if the
+ * database is absent the answer is `blueprint build`, which is cheap relative to
+ * carrying a second serialization format forever.
+ */
+export function readGeneration(repoRoot, outDir) {
+  const dbPath = join(resolve(repoRoot), outDir, "graph", "graph.db");
+  if (!existsSync(dbPath)) return null;
+  const db = openStore(dbPath);
+  try {
+    return loadGeneration(db);
+  } finally {
+    closeStore(db);
+  }
 }
 
 export function graphCapabilities(repoRoot, options = {}) {
@@ -904,21 +929,34 @@ function pathPayload(generation, nodeIds) {
 // torn mixture, because a single-file rename is atomic (and renameSync-over-existing
 // is already relied on for manifest.json). COMPLETE markers and content-addressed
 // dirs are no longer needed to avoid torn reads.
+// ONE store: graph.db. There is no graph.json and no fallback to one.
+//
+// graph.json was the original store and SQLite arrived beside it, so for one day
+// the repo carried two artifacts holding the same data — one read, one written.
+// Worse, graph.json was TRACKED IN GIT: 92 MB, six commits, roughly half the
+// 589 MB .git directory, and the reason `build` refused to run on a dirty tree
+// ("commit or restore them before rebuilding the committed graph"). A derived
+// artifact was being versioned, which made the graph structurally stale exactly
+// during active development and forced an overlay subsystem to compensate.
+//
+// The database is a local index. It is gitignored, it is rebuilt by `blueprint
+// build`, and if it is absent or stale the answer is to build — never to fall
+// back to a second format. SQLite's transaction gives atomicity directly, so the
+// write-body-then-manifest ordering the JSON path needed is gone with it.
 function writeGeneration(outDir, generation) {
   const graphDir = join(outDir, "graph");
   mkdirSync(graphDir, { recursive: true });
-  const stamp = `${process.pid}.${Date.now()}`;
-  const publishAtomic = (name, value) => {
-    const tmp = join(graphDir, `.${name}.${stamp}.tmp`);
-    writeJson(tmp, value);
-    renameSync(tmp, join(graphDir, name));
-  };
-  // Publish the generation body BEFORE the manifest, so once a reader sees a fresh
-  // manifest (its freshness gate) the graph.json it points at is already in place.
-  publishAtomic("graph.json", generation);
-  publishAtomic("manifest.json", generation.manifest);
-  // Drop any legacy content-addressed generations/ dir from an older build.
+  const db = openStore(join(graphDir, "graph.db"));
+  try {
+    saveGeneration(db, generation);
+  } finally {
+    closeStore(db);
+  }
+  // Drop artifacts from the pre-SQLite layout so a rebuilt repo cannot keep
+  // serving a stale JSON graph that nothing writes any more.
   rmSync(join(graphDir, "generations"), { recursive: true, force: true });
+  rmSync(join(graphDir, "graph.json"), { force: true });
+  rmSync(join(graphDir, "manifest.json"), { force: true });
 }
 
 function buildGenerationFromSources(root, source, options = {}) {
@@ -1407,7 +1445,7 @@ function normalizePath(value) {
 // dedup only (file bytes, source-tree fingerprint, generation id). No trust
 // boundary depends on collision resistance here: the blueprint→MemRight
 // federation provider reads only the generation identity, never validates it
-// cryptographically (tools/memright/federation/providers/blueprint.py).
+// cryptographically (rightcontext/engine/federation/providers/blueprint.py).
 // The hasher's construction is async (WASM init); init()/update()/digest()
 // are synchronous once it exists, so the async cost is paid exactly once at
 // module load (top-level await) and every call site below stays synchronous

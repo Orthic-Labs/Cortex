@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { mutateManifest } from "./_store-helpers.mjs";
 
 import {
   buildGraphGeneration,
@@ -137,10 +138,16 @@ test("provider upgrades invalidate generations that predate Python and Rust extr
   withLanguageFixture((repo) => {
     const outDir = path.join(repo, ".agent");
     buildGraphGeneration(repo, { outDir });
-    const manifestPath = path.join(outDir, "graph", "manifest.json");
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    manifest.provider.version = "repo-local-deterministic-v1";
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    // Age the LEXICAL layer's identity: after tree-sitter's promotion the
+    // selected provider recorded in `provider` is the AST one, and it is
+    // `lexicalProvider` that gates whether persisted lexical nodes are still
+    // readable — which is what this test is about.
+    mutateManifest(repo, (manifest) => {
+      const layer = manifest.lexicalProvider ?? manifest.provider;
+      layer.version = "repo-local-deterministic-v1";
+      if (manifest.lexicalProvider) manifest.lexicalProvider = layer;
+      else manifest.provider = layer;
+    }, outDir);
 
     const status = graphStatus(repo, outDir);
     assert.equal(status.state, "stale");

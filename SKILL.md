@@ -96,11 +96,11 @@ Machine, for agents (under `<repo>/.agent/`):
   `{ "sourceGenerationId": "<exact graph generationId>", "verdicts": [...] }`.
 - `understanding.json` — the synthesized understanding layer across 6 dimensions (Phase 2), including
   `architecture.flows[]` and `architecture.coverageGaps[]` so missing paths are first-class evidence.
-  Its top-level `sourceGenerationId` MUST exactly equal `.agent/graph/manifest.json.generationId` from
+  Its top-level `sourceGenerationId` MUST exactly equal the stored manifest's `generationId` from
   the graph the synthesis read. Generated human docs fail closed and ignore synthesis when this field
   is missing or mismatched; never relabel stale understanding with a newer generation ID.
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
-- `graph/manifest.json` + `graph/generations/<generationId>/{nodes,edges,graph}.json` — the structural graph (deterministic Blueprint-owned providers: `blueprint-treesitter` selected, `blueprint-static` as the lexical fallback layer).
+- `graph/graph.db` — **the one store.** A SQLite database holding the whole generation: nodes, edges, docTruth and the manifest envelope (deterministic Blueprint-owned providers: `blueprint-treesitter` selected, `blueprint-static` as the lexical fallback layer). It is a DERIVED, gitignored index — never committed, rebuilt by `blueprint build`. There is no `graph.json` and no fallback to one; `blueprint graph export` emits JSON on demand for piping or inspection.
 - `flows.json` — classified product-flow inventory (complete / broken / unsupported).
 - `hygiene/manifest.json` + `hygiene/facts.json` — optional generation-bound reusable hygiene
   evidence. `blueprint hygiene refresh` runs the targeted deterministic/expensive probes once;

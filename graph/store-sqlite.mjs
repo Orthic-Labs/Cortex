@@ -116,6 +116,46 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
     `);
   },
+  // Migration 3 — make the store SUFFICIENT, so it can be the only store.
+  //
+  // Until now this was a query cache beside an authoritative graph.json, so it
+  // only kept the fields queries needed. A file node lost its id/labels/name/
+  // confidence/evidence, and the generation envelope (provider, manifest,
+  // docTruth, repoRoot) was not persisted at all — the store could answer
+  // questions about a generation but could not reproduce one.
+  //
+  // These columns plus the `generation` envelope table close that gap:
+  // saveGeneration/loadGeneration now round-trip byte-equivalent generations,
+  // which is what lets graph.json be deleted rather than merely duplicated.
+  // The `extra` columns are the durable part of this lesson. B3 added
+  // `confidenceTier` to every edge and this schema silently dropped it, because
+  // a fixed column list can only persist the fields it was told about. `extra`
+  // holds every key a provider emits beyond the indexed ones, so a new field is
+  // preserved without a migration and — critically — presence is preserved:
+  // `resolved`, `specifier` and `reason` appear on SOME edges, and a nullable
+  // column cannot distinguish "absent" from "present and null".
+  (db) => {
+    db.exec(`
+      ALTER TABLE files ADD COLUMN node_id TEXT;
+      ALTER TABLE files ADD COLUMN labels TEXT;
+      ALTER TABLE files ADD COLUMN name TEXT;
+      ALTER TABLE files ADD COLUMN qualified_name TEXT;
+      ALTER TABLE files ADD COLUMN confidence REAL;
+      ALTER TABLE files ADD COLUMN evidence TEXT;
+      ALTER TABLE files ADD COLUMN extra TEXT;
+
+      ALTER TABLE symbols ADD COLUMN extra TEXT;
+
+      ALTER TABLE edges ADD COLUMN confidence_tier TEXT;
+      ALTER TABLE edges ADD COLUMN extra TEXT;
+      CREATE INDEX IF NOT EXISTS idx_edges_tier ON edges(confidence_tier);
+
+      CREATE TABLE IF NOT EXISTS generation (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -169,26 +209,46 @@ export function bulkInsertGeneration(db, generation, options = {}) {
   const fileReportByPath = new Map(fileReports.map((report) => [report.path, report]));
 
   const insertFile = db.prepare(`
-    INSERT INTO files (path, content_hash, language, provider, parse_status, error_node_count, generation_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO files (path, content_hash, language, provider, parse_status, error_node_count, generation_id,
+                       node_id, labels, name, qualified_name, confidence, evidence, extra)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET
       content_hash = excluded.content_hash, language = excluded.language, provider = excluded.provider,
-      parse_status = excluded.parse_status, error_node_count = excluded.error_node_count, generation_id = excluded.generation_id
+      parse_status = excluded.parse_status, error_node_count = excluded.error_node_count, generation_id = excluded.generation_id,
+      node_id = excluded.node_id, labels = excluded.labels, name = excluded.name,
+      qualified_name = excluded.qualified_name, confidence = excluded.confidence, evidence = excluded.evidence,
+      extra = excluded.extra
   `);
   const insertSymbol = db.prepare(`
-    INSERT INTO symbols (id, kind, labels, name, qualified_name, path, confidence, evidence, generation_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO symbols (id, kind, labels, name, qualified_name, path, confidence, evidence, generation_id, extra)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       kind = excluded.kind, labels = excluded.labels, name = excluded.name, qualified_name = excluded.qualified_name,
-      path = excluded.path, confidence = excluded.confidence, evidence = excluded.evidence, generation_id = excluded.generation_id
+      path = excluded.path, confidence = excluded.confidence, evidence = excluded.evidence,
+      generation_id = excluded.generation_id, extra = excluded.extra
   `);
   const insertEdge = db.prepare(`
-    INSERT INTO edges (id, kind, source, target, confidence, resolved, specifier, evidence, generation_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO edges (id, kind, source, target, confidence, resolved, specifier, evidence, generation_id,
+                       confidence_tier, extra)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       kind = excluded.kind, source = excluded.source, target = excluded.target, confidence = excluded.confidence,
-      resolved = excluded.resolved, specifier = excluded.specifier, evidence = excluded.evidence, generation_id = excluded.generation_id
+      resolved = excluded.resolved, specifier = excluded.specifier, evidence = excluded.evidence,
+      generation_id = excluded.generation_id, confidence_tier = excluded.confidence_tier, extra = excluded.extra
   `);
+
+  // Keys the relational columns already carry. Anything else a provider emits
+  // goes to `extra` verbatim, which is what keeps a schema change from silently
+  // dropping a new field (see the migration-3 comment).
+  const NODE_COLUMN_KEYS = new Set(["id", "kind", "labels", "name", "qualifiedName", "path", "confidence", "evidence"]);
+  const EDGE_COLUMN_KEYS = new Set(["id", "kind", "source", "target", "confidence", "confidenceTier", "evidence"]);
+  const extraOf = (object, columnKeys) => {
+    const extra = {};
+    for (const [key, value] of Object.entries(object)) {
+      if (!columnKeys.has(key)) extra[key] = value;
+    }
+    return Object.keys(extra).length ? JSON.stringify(extra) : null;
+  };
 
   db.exec("BEGIN;");
   try {
@@ -206,6 +266,13 @@ export function bulkInsertGeneration(db, generation, options = {}) {
           report?.parseStatus ?? null,
           report?.errorNodeCount ?? null,
           generationId,
+          node.id,
+          JSON.stringify(node.labels ?? []),
+          node.name ?? null,
+          node.qualifiedName ?? null,
+          node.confidence ?? 1,
+          JSON.stringify(node.evidence ?? []),
+          extraOf(node, NODE_COLUMN_KEYS),
         );
       } else {
         insertSymbol.run(
@@ -218,6 +285,7 @@ export function bulkInsertGeneration(db, generation, options = {}) {
           node.confidence ?? 1,
           JSON.stringify(node.evidence ?? []),
           generationId,
+          extraOf(node, NODE_COLUMN_KEYS),
         );
       }
     }
@@ -232,6 +300,8 @@ export function bulkInsertGeneration(db, generation, options = {}) {
         edge.specifier ?? null,
         JSON.stringify(edge.evidence ?? []),
         generationId,
+        edge.confidenceTier ?? null,
+        extraOf(edge, EDGE_COLUMN_KEYS),
       );
     }
     db.exec("COMMIT;");
@@ -240,6 +310,143 @@ export function bulkInsertGeneration(db, generation, options = {}) {
     throw error;
   }
   return { generationId, fileCount: nodes.filter((n) => n.kind === "file").length, symbolCount: nodes.filter((n) => n.kind !== "file").length, edgeCount: edges.length };
+}
+
+// ---------------------------------------------------------------------------
+// Whole-generation round trip — the store as the ONLY store.
+// ---------------------------------------------------------------------------
+
+// Envelope fields: everything in a generation that is not a node or an edge.
+// Kept as JSON blobs rather than columns because nothing queries into them —
+// they are read whole or not at all, and giving them columns would invent a
+// schema that no query needs (and that would then have to be migrated).
+const ENVELOPE_KEYS = ["schemaVersion", "provider", "manifest", "docTruth", "repoRoot", "augmentation"];
+
+/**
+ * Persist a complete generation: nodes and edges into their relational tables,
+ * everything else into the `generation` envelope.
+ *
+ * This is the write half of the pair that replaced graph.json. It is one
+ * transaction per call site (bulkInsertGeneration opens its own), so a crash
+ * mid-write leaves the previous generation intact rather than a torn mixture.
+ */
+export function saveGeneration(db, generation, options = {}) {
+  const summary = bulkInsertGeneration(db, generation, options);
+  const put = db.prepare(
+    "INSERT INTO generation (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  );
+  db.exec("BEGIN;");
+  try {
+    for (const key of ENVELOPE_KEYS) {
+      if (generation[key] === undefined) continue;
+      put.run(key, JSON.stringify(generation[key]));
+    }
+    db.exec("COMMIT;");
+  } catch (error) {
+    db.exec("ROLLBACK;");
+    throw error;
+  }
+  return summary;
+}
+
+/**
+ * Reconstruct the generation object that saveGeneration persisted.
+ *
+ * Returns null when the store holds no generation, so a caller can tell "no
+ * graph yet, build one" from "graph exists and is empty" — those demand
+ * different responses and must never collapse into the same value.
+ *
+ * Node order is files-then-symbols, which is the order the providers emit and
+ * therefore what the JSON artifacts held; several consumers scan for the first
+ * matching node, so a stable order is part of the contract, not cosmetic.
+ *
+ * The contract is SEMANTIC equality, not byte equality: object KEY order can
+ * differ, because optional edge fields (`resolved`, `specifier`, `reason`) come
+ * back from `extra` and land after `evidence` rather than before it. Verified
+ * safe rather than assumed — `generationId` is the only value that hashes
+ * JSON.stringify output, and it is computed at build time over the pre-
+ * augmentation node set, then carried in the manifest. It is already not
+ * recomputable from a persisted generation (re-hashing today's graph.json does
+ * not reproduce its own stored id either), so nothing can regress on key order.
+ * If a future caller ever needs to re-derive an id from a loaded generation, it
+ * must sort keys first — do not assume this returns byte-identical JSON.
+ */
+export function loadGeneration(db) {
+  const envelopeRows = db.prepare("SELECT key, value FROM generation").all();
+  if (envelopeRows.length === 0) return null;
+
+  const generation = {};
+  for (const row of envelopeRows) {
+    try {
+      generation[row.key] = JSON.parse(row.value);
+    } catch {
+      // A corrupt envelope value is a corrupt store, not a recoverable state.
+      throw new Error(`graph store envelope key "${row.key}" is not valid JSON`);
+    }
+  }
+
+  const fileRows = db.prepare(
+    "SELECT node_id, path, labels, name, qualified_name, confidence, evidence, extra FROM files ORDER BY rowid",
+  ).all();
+  const symbolRows = db.prepare(
+    "SELECT id, kind, labels, name, qualified_name, path, confidence, evidence, extra FROM symbols ORDER BY rowid",
+  ).all();
+  const edgeRows = db.prepare(
+    "SELECT id, kind, source, target, confidence, evidence, confidence_tier, extra FROM edges ORDER BY rowid",
+  ).all();
+
+  const parseJson = (text, fallback) => {
+    if (text === null || text === undefined) return fallback;
+    try { return JSON.parse(text); } catch { return fallback; }
+  };
+
+  generation.nodes = [
+    ...fileRows.map((row) => ({
+      id: row.node_id ?? `file:${row.path}`,
+      kind: "file",
+      labels: parseJson(row.labels, ["File"]),
+      name: row.name,
+      qualifiedName: row.qualified_name,
+      path: row.path,
+      confidence: row.confidence ?? 1,
+      evidence: parseJson(row.evidence, []),
+      ...parseJson(row.extra, {}),
+    })),
+    ...symbolRows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      labels: parseJson(row.labels, []),
+      name: row.name,
+      qualifiedName: row.qualified_name,
+      path: row.path,
+      confidence: row.confidence ?? 1,
+      evidence: parseJson(row.evidence, []),
+      ...parseJson(row.extra, {}),
+    })),
+  ];
+
+  // `resolved`, `specifier` and `reason` come back from `extra`, which records
+  // exactly the keys the provider emitted — so an edge that never had
+  // `specifier` does not gain a null one, and one that had `specifier: null`
+  // keeps it. That distinction is why they are not nullable columns.
+  generation.edges = edgeRows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    source: row.source,
+    target: row.target,
+    confidence: row.confidence ?? 1,
+    ...(row.confidence_tier === null || row.confidence_tier === undefined ? {} : { confidenceTier: row.confidence_tier }),
+    evidence: parseJson(row.evidence, []),
+    ...parseJson(row.extra, {}),
+  }));
+
+  return generation;
+}
+
+/** True when the store holds a persisted generation envelope. */
+export function hasGeneration(db) {
+  const row = db.prepare("SELECT COUNT(*) AS n FROM generation").get();
+  return row.n > 0;
 }
 
 // ---------------------------------------------------------------------------

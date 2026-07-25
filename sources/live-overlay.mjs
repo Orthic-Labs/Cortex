@@ -26,6 +26,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { openStore, closeStore, loadGeneration } from "../graph/store-sqlite.mjs";
 import {
   IGNORED_DIRS,
   SCOPE_PROVIDER,
@@ -44,8 +45,29 @@ const DEFAULT_BODY_BYTE_CAP = 2000;
 const TRUNCATION_MARKER = "\n\n[…file body truncated; per-file byte cap applied…]";
 
 function loadGenerationMeta(repoRoot) {
+  // The graph lives in graph.db. `.blueprint/index.jsonl` is not a second copy
+  // of it — it is the lighter bootstrap index, present when a repo has been
+  // indexed but never fully built, so it stays as a distinct source.
+  const dbPath = join(repoRoot, ".agent", "graph", "graph.db");
+  if (existsSync(dbPath)) {
+    try {
+      const db = openStore(dbPath);
+      try {
+        const generation = loadGeneration(db);
+        if (generation) {
+          const recordedHashes = new Map();
+          for (const node of generation.nodes ?? []) {
+            const evidence = node.evidence?.[0];
+            if (evidence?.path && evidence?.contentHash) recordedHashes.set(evidence.path, evidence.contentHash);
+          }
+          return { indexedAt: generation.manifest?.generatedAt ?? null, recordedHashes };
+        }
+      } finally {
+        closeStore(db);
+      }
+    } catch { /* unreadable store — fall through to the bootstrap index */ }
+  }
   const candidates = [
-    join(repoRoot, ".agent", "graph", "graph.json"),
     join(repoRoot, ".blueprint", "index.jsonl"),
   ];
   for (const path of candidates) {

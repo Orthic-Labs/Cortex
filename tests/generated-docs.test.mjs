@@ -24,6 +24,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { readEnvelope } from "./_store-helpers.mjs";
 
 import {
   DOC_PATHS,
@@ -89,9 +90,7 @@ it("architecture.md renders the synthesized component workflow as Mermaid", asyn
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const sourceGenerationId = JSON.parse(
-      readFileSync(join(root, ".agent/graph/manifest.json"), "utf8"),
-    ).generationId;
+    const sourceGenerationId = readEnvelope(root).generationId;
     writeFileSync(
       join(root, ".agent/understanding.json"),
       `${JSON.stringify({
