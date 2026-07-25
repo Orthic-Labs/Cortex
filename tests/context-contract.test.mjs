@@ -48,7 +48,7 @@ sys.exit(1 if errors else 0)
 test("canonical schema hash is stable and all v1 fixtures validate", () => {
   const schemaBytes = fs.readFileSync(SCHEMA_PATH);
   const schema = JSON.parse(schemaBytes.toString("utf8"));
-  const schemaSha256 = crypto.createHash("sha256").update(schemaBytes).digest("hex");
+  const schemaSha256 = crypto.createHash("sha256").update(schemaBytes).digest("hex"); // schema identity is published as sha256; asserting the published form
 
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
   assert.match(schemaSha256, /^[a-f0-9]{64}$/);

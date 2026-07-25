@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
+
+// XXH3-128, matching the harness and both providers. These expectations are
+// RECOMPUTED from the same file bytes, not pasted literals, so they still
+// verify normalization rather than restating whatever the code produced.
+const xxhasher = await createXXHash128();
+
+function xxh3Hex(bytes) {
+  xxhasher.init();
+  xxhasher.update(bytes);
+  return xxhasher.digest("hex");
+}
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -35,7 +46,7 @@ test("GitNexus context is normalized into exact Blueprint evidence", () => {
     path: "src/service.ts",
     startLine: 6,
     endLine: 9,
-    contentHash: createHash("sha256").update(fs.readFileSync(path.join(REPOS, "typescript-commerce/src/service.ts"))).digest("hex"),
+    contentHash: xxh3Hex(fs.readFileSync(path.join(REPOS, "typescript-commerce/src/service.ts"))),
   });
   assert.ok(normalized.edges.some((edge) => edge.source.name === "registerOrderRoute" && edge.target.name === "placeOrder"));
   assert.ok(normalized.edges.some((edge) => edge.source.name === "placeOrder" && edge.target.name === "save"));
@@ -59,7 +70,7 @@ test("locked task rows point to real bounded evidence", () => {
     for (const evidence of task.expectedEvidence) {
       const file = path.join(REPOS, task.repo, evidence.path);
       assert.ok(fs.existsSync(file), `${task.id}: missing ${file}`);
-      const expectedHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+      const expectedHash = xxh3Hex(fs.readFileSync(file));
       assert.equal(evidence.contentHash, expectedHash, `${task.id}: stale hash for ${evidence.path}`);
       const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
       assert.ok(evidence.startLine >= 1 && evidence.endLine >= evidence.startLine);
@@ -257,6 +268,6 @@ test("budget approval can be applied to provider reports", () => {
 
 
 test("schema hash covers exact canonical bytes", () => {
-  const expected = createHash("sha256").update(fs.readFileSync(SCHEMA)).digest("hex");
+  const expected = xxh3Hex(fs.readFileSync(SCHEMA));
   assert.equal(schemaHash(SCHEMA), expected);
 });

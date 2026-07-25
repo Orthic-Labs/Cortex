@@ -1,5 +1,17 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
+
+// XXH3-128, matching production. The harness previously hashed fixtures with
+// sha256 while the providers emitted xxh128, and that impedance mismatch is
+// exactly what silently failed every qualification task after 3988a735.
+const xxhasher = await createXXHash128();
+
+function xxh3Hex(bytes) {
+  xxhasher.init();
+  xxhasher.update(bytes);
+  return xxhasher.digest("hex");
+}
+
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -22,7 +34,7 @@ function args(argv) {
 
 
 function sha256(file) {
-  return createHash("sha256").update(readFileSync(file)).digest("hex");
+  return xxh3Hex(readFileSync(file));
 }
 
 

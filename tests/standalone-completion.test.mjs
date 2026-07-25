@@ -22,7 +22,15 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
+
+const xxhasher = await createXXHash128();
+
+function xxh3Hex(value) {
+  xxhasher.init();
+  xxhasher.update(value);
+  return xxhasher.digest("hex");
+}
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -30,9 +38,6 @@ const BLUEPRINT = join(HERE, "..");
 const CLI = join(BLUEPRINT, "scripts/blueprint.mjs");
 const FIXTURE = join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
 
-function xxh3Hex(text) {
-  return createHash("sha256").update(text).digest("hex");
-}
 
 function makeRepo() {
   const root = join(tmpdir(), `blueprint-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);

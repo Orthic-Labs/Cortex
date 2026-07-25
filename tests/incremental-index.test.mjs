@@ -15,7 +15,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
+
+const xxhasher = await createXXHash128();
+
+function xxh3Hex(value) {
+  xxhasher.init();
+  xxhasher.update(value);
+  return xxhasher.digest("hex");
+}
 import { execFileSync } from "node:child_process";
 
 import {
@@ -36,7 +44,7 @@ import {
 function fileOf(path, text) {
   return {
     path,
-    contentHash: createHash("sha256").update(text).digest("hex"),
+    contentHash: xxh3Hex(text),
     lines: text.split(/\r?\n/),
   };
 }

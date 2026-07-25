@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 // B0.2 provider-qualification runner.
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
+
+// XXH3-128, matching production. The harness previously hashed fixtures with
+// sha256 while the providers emitted xxh128, and that impedance mismatch is
+// exactly what silently failed every qualification task after 3988a735.
+const xxhasher = await createXXHash128();
+
+function xxh3Hex(bytes) {
+  xxhasher.init();
+  xxhasher.update(bytes);
+  return xxhasher.digest("hex");
+}
+
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFile as execFileCb, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -16,7 +28,7 @@ const GRAPH_ONLY_KINDS = new Set(["call_path","import_dependency","route_to_stor
 
 const DEFAULT_PROBE_TIMEOUT_MS = 5000;
 export function schemaHash(schemaPath) {
-  return createHash("sha256").update(readFileSync(schemaPath)).digest("hex");
+  return xxh3Hex(readFileSync(schemaPath));
 }
 
 export function normalizeGitNexusContext(context, repoRoot) {
@@ -37,7 +49,7 @@ export function normalizeGitNexusContext(context, repoRoot) {
     // GitNexus reports zero-based, inclusive source spans.
     startLine: Number(context.symbol.startLine) + 1,
     endLine: Number(context.symbol.endLine) + 1,
-    contentHash: createHash("sha256").update(readFileSync(filePath)).digest("hex"),
+    contentHash: xxh3Hex(readFileSync(filePath)),
   }] : [];
   return {
     evidence,
@@ -159,7 +171,7 @@ export function makeFallbackProvider() {
           path: item.relativePath,
           startLine: 1,
           endLine: item.text.split(/\r?\n/).length,
-          contentHash: createHash("sha256").update(readFileSync(item.path)).digest("hex"),
+          contentHash: xxh3Hex(readFileSync(item.path)),
           rank: index + 1,
           lexicalScore: item.score,
         })),
@@ -363,7 +375,7 @@ function buildStaticSnapshot(repoRoot) {
     const relativePath = normalizePath(absolutePath.slice(resolve(repoRoot).length + 1));
     const text = readFileSync(absolutePath, "utf8");
     const lines = text.split(/\r?\n/);
-    const contentHash = createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+    const contentHash = xxh3Hex(readFileSync(absolutePath));
     evidenceByPath.set(relativePath, { path: relativePath, startLine: 1, endLine: Math.max(1, lines.length), contentHash });
     return { absolutePath, relativePath, text, lines, contentHash };
   });
@@ -619,17 +631,17 @@ export function makeBlueprintTreeSitterProvider(opts = {}) {
     if (!refresh && snapshots.has(absolute)) return snapshots.get(absolute);
     const started = performance.now();
     const { buildTreeSitterGraph } = await import("../graph/treesitter-provider.mjs");
-    // contentHash MUST be supplied here, with the same algorithm the harness
-    // uses for every other provider's evidence (sha256 over the raw file bytes,
-    // as at collectRepoFiles). buildTreeSitterGraph accepts a caller-supplied
-    // hash and only falls back to deriving its own XXH3-128 when the field is
-    // absent — so omitting it makes tree-sitter emit 32-hex digests against
-    // 64-hex expected evidence and every task fails `evidence_mismatch` for a
-    // hashing reason rather than a graph-quality one.
+    // contentHash is supplied explicitly so the harness, not the provider,
+    // decides the digest — and it is now the SAME XXH3-128 the provider would
+    // derive on its own, because the harness moved off sha256 (2026-07-26).
+    // The mismatch this once guarded against (32-hex provider digests compared
+    // against 64-hex expected evidence, failing every task for a hashing
+    // reason rather than a graph-quality one) can no longer arise from the
+    // algorithm; keeping the field explicit keeps it from arising from drift.
     const files = collectTextFiles(absolute).map((absolutePath) => ({
       path: normalizePath(absolutePath.slice(absolute.length + 1)),
       text: readFileSync(absolutePath, "utf8"),
-      contentHash: createHash("sha256").update(readFileSync(absolutePath)).digest("hex"),
+      contentHash: xxh3Hex(readFileSync(absolutePath)),
     }));
     const graph = await buildTreeSitterGraph(files);
     // Map graph nodes into the harness node shape. Evidence spans come from the
@@ -896,7 +908,7 @@ export function makeCodebaseMemoryProvider(opts = {}) {
     const stats = statSync(absolute);
     if (!stats.isFile()) return null;
     const key = `${absolute}:${stats.mtimeMs}:${stats.size}`;
-    if (!fileHashes.has(key)) fileHashes.set(key, createHash("sha256").update(readFileSync(absolute)).digest("hex"));
+    if (!fileHashes.has(key)) fileHashes.set(key, xxh3Hex(readFileSync(absolute)));
     return fileHashes.get(key);
   };
   const nodeFromRow = (row, offset, repoRoot) => {
@@ -943,7 +955,7 @@ export function makeCodebaseMemoryProvider(opts = {}) {
       try {
         const { stdout } = await execFile(binary, ["--version"], { timeout: timeoutMs });
         const version = String(stdout || "").trim();
-        const checksum = createHash("sha256").update(readFileSync(binary)).digest("hex");
+        const checksum = xxh3Hex(readFileSync(binary));
         if (expectedVersion && version !== expectedVersion) {
           return { available: false, reason: "version_mismatch", version, expectedVersion, binary };
         }
@@ -1078,7 +1090,7 @@ export function makeCodebaseMemoryProvider(opts = {}) {
           return value === "{}" || (!value.includes("..") && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("/"));
         });
 
-        const actualChecksum = createHash("sha256").update(readFileSync(binary)).digest("hex");
+        const actualChecksum = xxh3Hex(readFileSync(binary));
         checks.binaryChecksum = Boolean(expectedChecksum) && actualChecksum === expectedChecksum;
         checks.license = expectedLicense === "MIT";
 
@@ -1129,7 +1141,7 @@ export function makeCodebaseMemoryProvider(opts = {}) {
     },
     async measureRepository(repoRoot) {
       const absoluteRoot = resolve(repoRoot);
-      const measurementCache = resolve(cacheDir, "real-repositories", createHash("sha256").update(absoluteRoot).digest("hex").slice(0, 12));
+      const measurementCache = resolve(cacheDir, "real-repositories", xxh3Hex(absoluteRoot).slice(0, 12));
       rmSync(measurementCache, { recursive: true, force: true });
       mkdirSync(measurementCache, { recursive: true });
       const env = { CBM_CACHE_DIR: measurementCache, CBM_ALLOWED_ROOT: absoluteRoot };
@@ -1336,7 +1348,7 @@ async function gitSourceState(root) {
   }
   return {
     head,
-    fingerprint: createHash("sha256").update(`${head}\0${status}`).digest("hex"),
+    fingerprint: xxh3Hex(`${head}\0${status}`),
   };
 }
 
@@ -1821,7 +1833,9 @@ function resolveReposRoot(args) {
 }
 
 function qualificationFingerprint({ fixturesPath, schemaPath, providerNames, realRepos, limit, providerConfig }) {
-  const hash = createHash("sha256");
+  xxhasher.init();
+  const hash = { update(v) { xxhasher.update(typeof v === "string" ? v : v); return hash; },
+                 digest(enc) { return xxhasher.digest(enc); } };
   for (const value of [
     "blueprint-provider-qualification-v1",
     process.platform,
