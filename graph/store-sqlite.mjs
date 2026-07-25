@@ -1,9 +1,7 @@
-// SQLite graph store — standalone, NOT wired into the live graph build yet.
-// A regenerable CACHE for a generation's nodes/edges (as produced by e.g.
-// graph/treesitter-provider.mjs or graph/static-provider.mjs), never a source
-// of truth: the JSON generation written by the provider remains authoritative,
-// this store exists purely to answer graph-shaped queries (blast radius,
-// impact analysis) faster than re-walking a JSON array in JS on every call.
+// SQLite graph store — the single persisted generation store for Blueprint.
+// Build-time providers produce the generation-shaped input; this store persists
+// its envelope and relational rows, and indexed queries read it without loading
+// the whole graph into JavaScript.
 //
 // Runtime: `node:sqlite` (`DatabaseSync`) — a Node v22.5+/v24+ builtin, no
 // dependency. This module writes ONLY inside the sqlite file path it is
@@ -30,8 +28,65 @@ export function openStore(dbPath = ":memory:") {
   return db;
 }
 
+/**
+ * Read-only handle for DOWNSTREAM CONSUMERS (membrane's freshness evaluator, and
+ * anything else on a latency budget that must never mutate the store).
+ *
+ * Deliberately does NOT run migrate(): a reader must never upgrade someone
+ * else's schema, and on an older store it must fail loudly rather than silently
+ * rewrite it. Callers compare `storeSchemaVersion` against the SCHEMA_VERSION
+ * they pinned and decide for themselves.
+ *
+ * Concurrency contract: the store is WAL, so a reader opened here sees the last
+ * COMMITTED generation while `blueprint build` writes, and never a torn
+ * envelope — saveGeneration writes rows and envelope inside transactions.
+ */
+export function openStoreReadOnly(dbPath) {
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
 export function closeStore(db) {
   db.close();
+}
+
+/**
+ * The cheap freshness surface: everything a downstream consumer needs to pin a
+ * generation, and nothing that costs a materialisation.
+ *
+ * Explicitly EXCLUDES docTruth. That single envelope row is ~8.5 MB on this
+ * workspace and costs ~205 ms to read, which alone would blow a 900 ms prompt
+ * hook; the rest of the envelope reads in ~1 ms. Returns null when no generation
+ * has been sealed, which is distinct from a torn or corrupt one (that throws).
+ */
+export function readManifestEnvelope(db) {
+  const get = (key) => {
+    const row = db.prepare("SELECT value FROM generation WHERE key = ?").get(key);
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      throw new Error(`graph store envelope key "${key}" is not valid JSON`);
+    }
+  };
+  const manifest = get("manifest");
+  if (!manifest) return null;
+  const versionRow = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+  return {
+    storeSchemaVersion: versionRow ? Number(versionRow.value) : 0,
+    schemaVersion: get("schemaVersion") ?? null,
+    generationId: manifest.generationId ?? null,
+    provider: manifest.provider ?? null,
+    lexicalProvider: manifest.lexicalProvider ?? null,
+    providerComposition: manifest.providerComposition ?? null,
+    complete: manifest.complete === true,
+    fileLimit: manifest.fileLimit ?? 0,
+    repo: manifest.repo ?? null,
+    counts: manifest.counts ?? null,
+    // "built at commit X, clean or dirty" — the distinction membrane uses to
+    // refuse treating a dirty-overlay build as a committed snapshot.
+    sourceObservation: get("sourceObservation") ?? null,
+    repoRoot: get("repoRoot") ?? null,
+  };
 }
 
 // Versioned migration runner. MIGRATIONS[n] takes the schema from version n
@@ -195,9 +250,8 @@ export function migrate(db) {
 // deliberately compatible — see treesitter-provider.mjs's header comment).
 //
 // `mode: "replace"` (default) clears all prior rows before inserting, since
-// this store is a single-current-generation cache, mirroring
-// static-provider's single stable graph.json file (never an accumulating
-// history). `mode: "append"` skips the clear, for callers deliberately
+  // this store is a single-current-generation database (never an accumulating
+  // history). `mode: "append"` skips the clear, for callers deliberately
 // keeping multiple generations side by side (e.g. a test asserting
 // generation_id filtering).
 export function bulkInsertGeneration(db, generation, options = {}) {
@@ -320,7 +374,10 @@ export function bulkInsertGeneration(db, generation, options = {}) {
 // Kept as JSON blobs rather than columns because nothing queries into them —
 // they are read whole or not at all, and giving them columns would invent a
 // schema that no query needs (and that would then have to be migrated).
-const ENVELOPE_KEYS = ["schemaVersion", "provider", "manifest", "docTruth", "repoRoot", "augmentation"];
+// `sourceObservation` records the commit the graph was built at and whether the
+// tree was clean — a downstream consumer must be able to tell a committed
+// snapshot from a dirty-overlay build without opening git.
+const ENVELOPE_KEYS = ["schemaVersion", "provider", "manifest", "docTruth", "repoRoot", "augmentation", "sourceObservation"];
 
 /**
  * Persist a complete generation: nodes and edges into their relational tables,
@@ -395,41 +452,55 @@ export function loadGeneration(db) {
     "SELECT id, kind, source, target, confidence, evidence, confidence_tier, extra FROM edges ORDER BY rowid",
   ).all();
 
-  const parseJson = (text, fallback) => {
-    if (text === null || text === undefined) return fallback;
-    try { return JSON.parse(text); } catch { return fallback; }
-  };
-
   generation.nodes = [
-    ...fileRows.map((row) => ({
-      id: row.node_id ?? `file:${row.path}`,
-      kind: "file",
-      labels: parseJson(row.labels, ["File"]),
-      name: row.name,
-      qualifiedName: row.qualified_name,
-      path: row.path,
-      confidence: row.confidence ?? 1,
-      evidence: parseJson(row.evidence, []),
-      ...parseJson(row.extra, {}),
-    })),
-    ...symbolRows.map((row) => ({
-      id: row.id,
-      kind: row.kind,
-      labels: parseJson(row.labels, []),
-      name: row.name,
-      qualifiedName: row.qualified_name,
-      path: row.path,
-      confidence: row.confidence ?? 1,
-      evidence: parseJson(row.evidence, []),
-      ...parseJson(row.extra, {}),
-    })),
+    ...fileRows.map(deserializeFileNodeRow),
+    ...symbolRows.map(deserializeSymbolNodeRow),
   ];
 
   // `resolved`, `specifier` and `reason` come back from `extra`, which records
   // exactly the keys the provider emitted — so an edge that never had
   // `specifier` does not gain a null one, and one that had `specifier: null`
   // keeps it. That distinction is why they are not nullable columns.
-  generation.edges = edgeRows.map((row) => ({
+  generation.edges = edgeRows.map(deserializeEdgeNodeRow);
+
+  return generation;
+}
+
+function parseJson(text, fallback) {
+  if (text === null || text === undefined) return fallback;
+  try { return JSON.parse(text); } catch { return fallback; }
+}
+
+function deserializeFileNodeRow(row) {
+  return {
+    id: row.node_id ?? `file:${row.path}`,
+    kind: "file",
+    labels: parseJson(row.labels, ["File"]),
+    name: row.name,
+    qualifiedName: row.qualified_name,
+    path: row.path,
+    confidence: row.confidence ?? 1,
+    evidence: parseJson(row.evidence, []),
+    ...parseJson(row.extra, {}),
+  };
+}
+
+function deserializeSymbolNodeRow(row) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    labels: parseJson(row.labels, []),
+    name: row.name,
+    qualifiedName: row.qualified_name,
+    path: row.path,
+    confidence: row.confidence ?? 1,
+    evidence: parseJson(row.evidence, []),
+    ...parseJson(row.extra, {}),
+  };
+}
+
+function deserializeEdgeNodeRow(row) {
+  return {
     id: row.id,
     kind: row.kind,
     source: row.source,
@@ -438,9 +509,70 @@ export function loadGeneration(db) {
     ...(row.confidence_tier === null || row.confidence_tier === undefined ? {} : { confidenceTier: row.confidence_tier }),
     evidence: parseJson(row.evidence, []),
     ...parseJson(row.extra, {}),
-  }));
+  };
+}
 
-  return generation;
+/** Read one envelope value without materialising nodes or edges. */
+export function getGenerationEnvelope(db, key = null) {
+  const rows = key === null
+    ? db.prepare("SELECT key, value FROM generation ORDER BY rowid").all()
+    : db.prepare("SELECT key, value FROM generation WHERE key = ?").all(key);
+  const envelope = {};
+  for (const row of rows) {
+    try {
+      envelope[row.key] = JSON.parse(row.value);
+    } catch {
+      throw new Error(`graph store envelope key "${row.key}" is not valid JSON`);
+    }
+  }
+  return key === null ? envelope : envelope[key] ?? null;
+}
+
+/** Read indexed file hashes for freshness checks, without loading graph nodes. */
+export function loadFileContentHashes(db, generationId = null) {
+  const rows = generationId === null
+    ? db.prepare("SELECT path, content_hash FROM files ORDER BY rowid").all()
+    : db.prepare("SELECT path, content_hash FROM files WHERE generation_id = ? ORDER BY rowid").all(generationId);
+  return new Map(rows.filter((row) => row.content_hash).map((row) => [row.path, row.content_hash]));
+}
+
+/** Slim, ordered edge rows for traversal. No evidence or provider extras are parsed. */
+export function listEdgeCore(db, options = {}) {
+  const clauses = [];
+  const params = [];
+  if (options.generationId) { clauses.push("generation_id = ?"); params.push(options.generationId); }
+  if (options.source) { clauses.push("source = ?"); params.push(options.source); }
+  if (options.target) { clauses.push("target = ?"); params.push(options.target); }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  return db.prepare(`
+    SELECT id, kind, source, target, confidence, confidence_tier
+    FROM edges ${where} ORDER BY rowid
+  `).all(...params).map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    source: row.source,
+    target: row.target,
+    confidence: row.confidence ?? 1,
+    ...(row.confidence_tier === null || row.confidence_tier === undefined ? {} : { confidenceTier: row.confidence_tier }),
+  }));
+}
+
+/** Hydrate only requested nodes, preserving files-then-symbols and rowid order. */
+export function hydrateNodesByIds(db, nodeIds) {
+  const ids = [...new Set((nodeIds ?? []).map(String))];
+  if (!ids.length) return [];
+  const json = JSON.stringify(ids);
+  const files = db.prepare("SELECT * FROM files WHERE node_id IN (SELECT value FROM json_each(?)) ORDER BY rowid").all(json);
+  const symbols = db.prepare("SELECT * FROM symbols WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid").all(json);
+  return [...files.map(deserializeFileNodeRow), ...symbols.map(deserializeSymbolNodeRow)];
+}
+
+/** Hydrate only requested edges, preserving edge rowid order. */
+export function hydrateEdgesByIds(db, edgeIds) {
+  const ids = [...new Set((edgeIds ?? []).map(String))];
+  if (!ids.length) return [];
+  return db.prepare("SELECT * FROM edges WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid")
+    .all(JSON.stringify(ids)).map(deserializeEdgeNodeRow);
 }
 
 /** True when the store holds a persisted generation envelope. */

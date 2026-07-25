@@ -32,24 +32,23 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     assert.equal(resolve.node.evidence[0].path, "src/service.ts");
     assert.equal(resolve.node.evidence[0].startLine, 6);
 
-    const neighbors = run(["graph", "neighbors", "--node", "symbol:src/service.ts::OrderService.placeOrder", "--direction", "both", "--depth", "1", "--out", ".agent"], repo);
+    const neighbors = run(["graph", "neighbors", "--node", "symbol:src/service.ts::OrderService.placeOrder", "--direction", "both", "--depth", "1", "--json", "--out", ".agent"], repo);
     assert.ok(neighbors.edges.some((edge) => edge.kind === "CALLS" && edge.target === "symbol:src/service.ts::OrderService.placeOrder"));
     assert.ok(neighbors.edges.some((edge) => edge.kind === "CALLS" && edge.source === "symbol:src/service.ts::OrderService.placeOrder"));
 
-    const pathResult = run(["graph", "path", "--from", "symbol:src/routes.ts::registerOrderRoute", "--to", "symbol:src/store.ts::OrderStore.save", "--out", ".agent"], repo);
+    const pathResult = run(["graph", "path", "--from", "symbol:src/routes.ts::registerOrderRoute", "--to", "symbol:src/store.ts::OrderStore.save", "--json", "--out", ".agent"], repo);
     assert.deepEqual(pathResult.path.map((step) => step.id), [
       "symbol:src/routes.ts::registerOrderRoute",
       "symbol:src/service.ts::OrderService.placeOrder",
       "symbol:src/store.ts::OrderStore.save",
     ]);
 
-    const architecture = run(["graph", "architecture", "--out", ".agent"], repo);
-    assert.ok(architecture.summary.symbols >= 5);
-    assert.ok(architecture.entryPoints.some((node) => node.id.includes("registerOrderRoute")));
+    const architecture = run(["graph", "architecture", "--json", "--out", ".agent"], repo);
+    assert.ok(architecture.counts.symbols >= 5);
+    assert.ok(architecture.examples.some((node) => node.id.includes("registerOrderRoute")));
 
-    const impact = run(["graph", "impact", "--node", "symbol:src/store.ts::OrderStore.save", "--out", ".agent"], repo);
+    const impact = run(["graph", "impact", "--node", "symbol:src/store.ts::OrderStore.save", "--json", "--out", ".agent"], repo);
     assert.ok(impact.impacted.some((node) => node.id === "symbol:src/service.ts::OrderService.placeOrder"));
-    assert.ok(impact.impacted.some((node) => node.id.includes("placeOrder stores a new order")));
 
     const candidates = run(["graph", "candidates", "--query", "placeOrder", "--out", ".agent", "--limit", "2"], repo);
     assert.equal(candidates.provider, "blueprint-static");

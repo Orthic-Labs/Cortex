@@ -100,6 +100,28 @@ Machine, for agents (under `<repo>/.agent/`):
   the graph the synthesis read. Generated human docs fail closed and ignore synthesis when this field
   is missing or mismatched; never relabel stale understanding with a newer generation ID.
 - `reconcile.json` — one entry per code↔doc divergence with verdict + proposed reconciliation (Phase 4); `decision` stays `null` until the user calls it.
+### Downstream read contract (membrane and other consumers) — STABLE, changes are breaking
+
+`blueprint graph manifest` is the supported freshness surface. It opens the store **read-only**,
+never migrates it, emits the envelope **only** (no nodes, no edges, no docTruth), and measured
+**82 ms** end-to-end on a 34,760-node graph — safe from a prompt-path hook.
+
+Guaranteed fields: `storeSchemaVersion`, `generationId`, `provider`, `lexicalProvider`,
+`providerComposition`, `complete`, `fileLimit`, `repo`, `counts`, `sourceObservation`
+(`head` commit + `dirty` + `statusDigest` — how a consumer tells a committed snapshot from a
+dirty-overlay build), `repoRoot`, `storePath`.
+
+Concurrency: the store is **WAL**. A read-only reader sees the last committed generation while
+`blueprint build` writes, never a torn envelope — `saveGeneration` writes rows and envelope inside
+transactions. `openStoreReadOnly()` is the programmatic equivalent for in-process consumers.
+
+`counts` reflects the **post-augmentation** generation and is asserted equal to the stored rows.
+Do not read `docTruth` on a latency budget: it is a single ~8.5 MB envelope row (~205 ms).
+
+**Breaking-change policy:** renaming the store, changing the envelope schema, or changing the
+generation format requires a changelog line naming the store path and `storeSchemaVersion`, so
+pinned consumers fail loudly instead of degrading silently.
+
 - `graph/graph.db` — **the one store.** A SQLite database holding the whole generation: nodes, edges, docTruth and the manifest envelope (deterministic Blueprint-owned providers: `blueprint-treesitter` selected, `blueprint-static` as the lexical fallback layer). It is a DERIVED, gitignored index — never committed, rebuilt by `blueprint build`. There is no `graph.json` and no fallback to one; `blueprint graph export` emits JSON on demand for piping or inspection.
 - `flows.json` — classified product-flow inventory (complete / broken / unsupported).
 - `hygiene/manifest.json` + `hygiene/facts.json` — optional generation-bound reusable hygiene
@@ -234,8 +256,13 @@ the `.agent/graph/` tree (manifest + immutable generation files), the portable
 `planner-status`, `mermaid`. `doctor --json` emits typed states (`ready`, `degraded`, `stale`,
 `broken`, `corrupt`, `missing`) with granular `reasons[]` and provider capability coverage.
 `hygiene refresh` makes Audit's scanner output Blueprint-owned and generation-bound. Flow inventory
-is capped and reports `truncated=true`. **`START-HERE.md` is retired.** Per-command semantics and the
-full parsed-language list: `references/IMPLEMENTATION-STATUS.md`.
+is capped and reports `truncated=true`. Structural query commands (`neighbors`, `impact`, `path`,
+`architecture`) are index-first: they return schema v2 bounded reference rows under `--budget`
+(default 2,000 tokens), with deterministic ranking, edge-kind counts, continuation cursors, and
+`generationId`/`sourceState`/`dirtyFileCount` freshness fields. Output is tabular by default;
+`--json` selects the identical bounded data for programs. `resolve --node` is the one-node full
+detail path; `graph export` is the explicit whole-generation escape hatch. **`START-HERE.md` is
+retired.** Per-command semantics and the full parsed-language list: `references/IMPLEMENTATION-STATUS.md`.
 
 Blueprint is **PARTIAL** for whole-repository understanding: lexical rather than AST coverage,
 doc-code contradiction joins incomplete, no visual explorer. The interactive visual explorer and raw

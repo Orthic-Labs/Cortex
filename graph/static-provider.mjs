@@ -31,7 +31,15 @@ import {
 } from "./confidence-tiers.mjs";
 import { PRECISION_TIERS, PRECISION_TIER_ORDER } from "./precision-tiers.mjs";
 import { STATIC_PROVIDER, TREESITTER_PROVIDER } from "./provider-identity.mjs";
-import { openStore, closeStore, saveGeneration, loadGeneration, hasGeneration } from "./store-sqlite.mjs";
+import {
+  openStore,
+  closeStore,
+  saveGeneration,
+  loadGeneration,
+  hasGeneration,
+  getGenerationEnvelope,
+  loadFileContentHashes,
+} from "./store-sqlite.mjs";
 import { probeScip } from "./scip-provider.mjs";
 
 export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
@@ -170,7 +178,8 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
     //
     // `lexicalProvider` preserves the identity of the persisted lexical nodes.
     // That, not the selected provider, is what decides whether an existing
-    // graph.json can still be trusted — see graphStatus's providerMismatch.
+    // the persisted lexical provider record can still be trusted — see
+    // graphStatus's providerMismatch.
     if (summary?.parsedFiles > 0) {
       const astExtensions = [...TS_EXTENSIONS];
       const astSet = new Set(astExtensions);
@@ -189,6 +198,16 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
         ],
       };
       generation.provider = TS_PROVIDER;
+      // The manifest's counts were computed BEFORE this augmentation, so they
+      // describe the lexical layer alone — on this workspace that understated
+      // the graph by ~47% (33,487 edges recorded against 62,743 actually
+      // stored). Downstream consumers pin these numbers, so a manifest that
+      // undercounts its own generation is a lie with a version stamp on it.
+      generation.manifest.counts = {
+        ...generation.manifest.counts,
+        nodes: generation.nodes.length,
+        edges: generation.edges.length,
+      };
     }
     if (options.outDir) writeGeneration(resolve(root, options.outDir), generation);
     return { state: "ok", summary };
@@ -211,13 +230,10 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   let recordedHashes = new Map();
   try {
     if (!hasGeneration(store)) return { state: "missing", manifestPath };
-    const generation = loadGeneration(store);
-    manifest = generation.manifest;
+    const envelope = getGenerationEnvelope(store);
+    manifest = envelope.manifest;
     if (!manifest?.complete) return { state: "incomplete", manifestPath, manifest };
-    for (const node of generation.nodes ?? []) {
-      const evidence = node.evidence?.[0];
-      if (evidence?.path && evidence?.contentHash) recordedHashes.set(evidence.path, evidence.contentHash);
-    }
+    recordedHashes = loadFileContentHashes(store, manifest.generationId ?? null);
   } finally {
     closeStore(store);
   }
@@ -290,7 +306,7 @@ export function graphStatus(repoRoot, outDir, options = {}) {
  * carrying a second serialization format forever.
  */
 export function readGeneration(repoRoot, outDir) {
-  const dbPath = join(resolve(repoRoot), outDir, "graph", "graph.db");
+  const dbPath = join(resolve(repoRoot, outDir), "graph", "graph.db");
   if (!existsSync(dbPath)) return null;
   const db = openStore(dbPath);
   try {
@@ -915,7 +931,7 @@ function pathPayload(generation, nodeIds) {
   };
 }
 
-// The generation is a SINGLE consolidated file at a STABLE path, `graph/graph.json`.
+// The generation is a SINGLE consolidated store at a STABLE path, `graph/graph.db`.
 //
 // The prior scheme wrote a content-addressed directory `generations/<hash>/` per
 // build and pruned the rest. That was designed for a multi-generation cache that no
@@ -924,10 +940,9 @@ function pathPayload(generation, nodeIds) {
 // change instead of a small textual diff. A single stable file both fixes that and
 // removes the dir/marker/prune machinery.
 //
-// Atomicity is preserved by the same temp-then-rename that already publishes the
-// manifest: a reader opening graph.json sees the old file or the new file, never a
-// torn mixture, because a single-file rename is atomic (and renameSync-over-existing
-// is already relied on for manifest.json). COMPLETE markers and content-addressed
+// The old JSON path used temp-then-rename atomicity. The SQLite path now relies on
+// the store transaction: a reader sees the prior complete generation or the new
+// complete generation, never a torn mixture. COMPLETE markers and content-addressed
 // dirs are no longer needed to avoid torn reads.
 // ONE store: graph.db. There is no graph.json and no fallback to one.
 //
@@ -1425,8 +1440,34 @@ function generationId(nodes, edges, files) {
   return `xxh128:${xxh128(JSON.stringify({ nodes, edges, sourceHash: sourceHash(files) }))}`;
 }
 
+// Blueprint's own generated docs (docs/product.md, docs/architecture.md) carry a
+// generation header as their first line. They are OUTPUTS of a build, not source
+// truth, and they embed the generationId — so every build rewrites them and, if
+// they were hashed, the graph would be stale the instant it finished. The build
+// then throws "generated graph is stale immediately after build" and every query
+// fails `graph_rebuild_required`.
+//
+// This was latent for as long as `build` refused to run on a dirty tree; removing
+// that refusal (the graph is a local index now, not a committed artifact) made it
+// reachable on any repo where the generated docs are tracked. Excluding them here
+// applies the rule README.md already had — its generated pointer block is stripped
+// before hashing for exactly this reason.
+//
+// Excluded from the HASH only: the docs remain scanned, remain graph nodes, and
+// still take part in doc↔code joins. A real source edit still moves the hash.
+const GENERATED_DOC_MARKER = "<!-- generated by blueprint";
+
+function isGeneratedDoc(file) {
+  return typeof file.lines?.[0] === "string" && file.lines[0].startsWith(GENERATED_DOC_MARKER);
+}
+
 function sourceHash(files) {
-  return `xxh128:${xxh128(files.map((file) => `${file.path}:${file.contentHash}`).join("\n"))}`;
+  return `xxh128:${xxh128(
+    files
+      .filter((file) => !isGeneratedDoc(file))
+      .map((file) => `${file.path}:${file.contentHash}`)
+      .join("\n"),
+  )}`;
 }
 
 function estimateTokens(evidence) {

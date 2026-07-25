@@ -124,6 +124,23 @@
         { "type": "required_text", "value": "PARTIAL" },
         { "type": "forbidden_text", "value": "I opened blueprint serve" }
       ]
+    },
+    {
+      "id": "blueprint-index-first-query-contract",
+      "prompt": "How should I query callers, neighbors, paths, and architecture without flooding the agent context?",
+      "expected_skill": "blueprint",
+      "forbidden_skills": [],
+      "expected_behavior": "Uses bounded index-first structural graph queries with a token budget, freshness stamp, continuation cursor, tabular default, and --json parity; uses resolve for one-node detail and export only as the explicit whole-generation escape hatch.",
+      "severity": "error",
+      "mode": "static",
+      "assertions": [
+        { "type": "required_text", "value": "index-first" },
+        { "type": "required_text", "value": "2,000" },
+        { "type": "required_text", "value": "dirtyFileCount" },
+        { "type": "required_text", "value": "continuation" },
+        { "type": "required_text", "value": "--json" },
+        { "type": "required_text", "value": "graph export" }
+      ]
     }
   ],
   "safety": [
