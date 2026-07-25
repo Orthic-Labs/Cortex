@@ -51,7 +51,7 @@ import {
   sealPhase2Artifacts,
 } from "../lib/incremental-phase2.mjs";
 import { CODE_EXTENSIONS } from "../graph/language-extractors.mjs";
-import { openStore, openStoreReadOnly, closeStore, bulkInsertGeneration, countRows, readManifestEnvelope } from "../graph/store-sqlite.mjs";
+import { openStore, openStoreReadOnly, closeStore, saveGeneration, countRows, readManifestEnvelope } from "../graph/store-sqlite.mjs";
 import {
   readIndexedMeta,
   indexedQueryGeneration,
@@ -205,18 +205,23 @@ function readJson(path, fallback) {
 // test and NO consumers -- `openStore` was called only from its own test, so no
 // repo ever had a database. This is the wiring.
 //
-// Same contract as augmentGenerationWithTreeSitter: it must NEVER fail the
-// build. The JSON artifacts remain the source of truth; the DB is a
-// regenerable index for queries (blastRadius, listEdges, neighbours) that are
-// impractical over JSON. `node:sqlite` is a Node builtin, but it is version-
-// gated, so an older runtime degrades to "unavailable" instead of throwing.
+// THE AUTHORITATIVE STORE WRITE for a build. It must NEVER fail the build;
+// `node:sqlite` is version-gated, so an older runtime degrades to "unavailable"
+// instead of throwing.
+//
+// Uses saveGeneration, not bulkInsertGeneration: the latter replaces rows while
+// leaving the envelope untouched, so a build could end with fresh nodes and a
+// stale manifest describing them — the undercount class already seen once. This
+// writes rows AND envelope together, which also makes it correct on the paths
+// where tree-sitter augmentation is disabled or degrades (it then does not
+// persist at all, and this call is what seals sourceObservation).
 function persistGenerationToStore(root, outDir, generation) {
   const dbPath = join(resolve(root, outDir), "graph", "graph.db");
   let db = null;
   try {
     mkdirSync(dirname(dbPath), { recursive: true });
     db = openStore(dbPath);
-    bulkInsertGeneration(db, generation, { mode: "replace" });
+    saveGeneration(db, generation);
     return { ok: true, path: dbPath, rows: countRows(db) };
   } catch (error) {
     return { ok: false, path: dbPath, reason: String(error?.message ?? error) };
@@ -640,7 +645,10 @@ async function build(root, outDir, options = {}) {
   graphGeneration.sourceObservation = sourceObservation ?? null;
   // AST layer on top of the lexical graph; re-persists the generation. Never
   // fails the build — see augmentGenerationWithTreeSitter.
-  await augmentGenerationWithTreeSitter(graphGeneration, root, { outDir });
+  // No outDir: augmentation must NOT persist. persistGenerationToStore below is
+  // the single authoritative write, so the generation is not serialised to the
+  // same database twice per build.
+  await augmentGenerationWithTreeSitter(graphGeneration, root, {});
   persistGenerationToStore(root, outDir, graphGeneration);
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
