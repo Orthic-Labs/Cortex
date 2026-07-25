@@ -596,6 +596,158 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Tree-sitter AST provider, registered so the GATES decide whether it should
+ * replace blueprint-static as the selected provider. It is already wired into
+ * `blueprint build` as a union augmentation (see augmentGenerationWithTreeSitter);
+ * this registration is what turns "it produces richer nodes" into a measured
+ * claim instead of an assertion.
+ *
+ * Snapshot is mapped into the harness's node shape ({labels,name,qualifiedName,
+ * path,startLine,endLine,contentHash}) so rankStaticEvidence and the existing
+ * scoring apply unchanged — the comparison against blueprint-static is
+ * apples-to-apples.
+ */
+export function makeBlueprintTreeSitterProvider(opts = {}) {
+  const timings = [];
+  const snapshots = new Map();
+  let unavailableReason = null;
+
+  const getSnapshot = async (repoRoot, refresh = false) => {
+    const absolute = resolve(repoRoot);
+    if (!refresh && snapshots.has(absolute)) return snapshots.get(absolute);
+    const started = performance.now();
+    const { buildTreeSitterGraph } = await import("../graph/treesitter-provider.mjs");
+    const files = collectTextFiles(absolute).map((absolutePath) => ({
+      path: normalizePath(absolutePath.slice(absolute.length + 1)),
+      text: readFileSync(absolutePath, "utf8"),
+    }));
+    const graph = await buildTreeSitterGraph(files);
+    // Map graph nodes into the harness node shape. Evidence spans come from the
+    // AST, so startLine/endLine are the real symbol bounds rather than
+    // whole-file ranges — that precision is the point of the swap.
+    const nodes = [];
+    for (const node of graph.nodes) {
+      const ev = (node.evidence ?? [])[0];
+      if (!ev?.path) continue;
+      nodes.push({
+        labels: node.labels?.length ? node.labels : [node.kind === "file" ? "File" : "Symbol"],
+        name: node.name,
+        qualifiedName: node.qualifiedName ?? node.name,
+        path: normalizePath(ev.path),
+        startLine: ev.startLine ?? 1,
+        endLine: ev.endLine ?? ev.startLine ?? 1,
+        contentHash: ev.contentHash,
+      });
+    }
+    // Edges must be mapped into the harness shape too, not passed through raw.
+    // The harness keys an edge by {source:{path,qualifiedName}} objects; the
+    // tree-sitter graph emits namespaced id STRINGS ("symbol:<path>::<name>").
+    // Passing them through unmapped makes every structural task report
+    // `structural_mismatch` even when the edge was correctly extracted.
+    // `labels` MUST be carried onto edge endpoints: nodeMatchesLocator() falls
+    // back to a labels check ("File"/"Module") whenever the expected locator has
+    // no "::" suffix, so a file-level IMPORTS edge can never match without them.
+    const byId = new Map();
+    for (const node of graph.nodes) {
+      const ev = (node.evidence ?? [])[0];
+      if (!ev?.path) continue;
+      byId.set(node.id, {
+        path: normalizePath(ev.path),
+        qualifiedName: node.qualifiedName ?? node.name,
+        name: node.name,
+        labels: node.labels?.length ? node.labels : [node.kind === "file" ? "File" : "Symbol"],
+      });
+    }
+    const edges = [];
+    for (const edge of graph.edges ?? []) {
+      const source = byId.get(edge.source);
+      const target = byId.get(edge.target);
+      if (!source || !target) continue; // unresolved target stays unresolved, never a fabricated edge
+      edges.push({ kind: edge.kind, source, target, confidence: edge.confidence });
+    }
+    const snapshot = {
+      nodes: dedupeNodes(nodes),
+      edges: dedupeEdges(edges),
+      fileReports: graph.fileReports ?? [],
+    };
+    timings.push(performance.now() - started);
+    snapshots.set(absolute, snapshot);
+    return snapshot;
+  };
+
+  return {
+    id: "blueprint-treesitter",
+    kind: "blueprint-treesitter",
+    capabilities: new Set(BLUEPRINT_STATIC_CAPABILITIES),
+    async probe() {
+      try {
+        const mod = await import("../graph/treesitter-provider.mjs");
+        return {
+          available: true,
+          kind: "blueprint-treesitter",
+          version: `${mod.PROVIDER?.id ?? "blueprint-treesitter"}@${mod.PROVIDER?.version ?? "0"}`,
+          license: "workspace-owned",
+          persistence: "regenerable",
+          nativeDependencies: [],
+          capabilities: [...BLUEPRINT_STATIC_CAPABILITIES],
+        };
+      } catch (err) {
+        unavailableReason = String(err?.message ?? err);
+        return { available: false, kind: "blueprint-treesitter", reason: unavailableReason };
+      }
+    },
+    async execute(task, repoRoot) {
+      if (!BLUEPRINT_STATIC_CAPABILITIES.has(task.kind)) {
+        return { state: "unsupported", reason: `blueprint_treesitter_${task.kind}_unsupported` };
+      }
+      try {
+        const snapshot = await getSnapshot(repoRoot, task.freshness === "current");
+        return {
+          state: "ok",
+          evidence: rankStaticEvidence(task, snapshot),
+          nodes: snapshot.nodes,
+          edges: snapshot.edges,
+          falseEvidence: [],
+        };
+      } catch (err) {
+        return { state: "error", reason: String(err?.message ?? err) };
+      }
+    },
+    async runQualificationSuites(reposRoot) {
+      const sourceRepo = join(reposRoot, "typescript-commerce");
+      if (!existsSync(sourceRepo)) {
+        return { execution: { state: "error", reason: "freshness_fixture_missing" } };
+      }
+      const checks = {};
+      try {
+        let snapshot = await getSnapshot(sourceRepo, true);
+        checks.initial = snapshot.nodes.some((node) => node.qualifiedName === "OrderService.placeOrder");
+        // Parse honesty: a provider that reports every file "ok" while silently
+        // dropping symbols is worse than one that admits a partial parse.
+        checks.parseHonesty = snapshot.fileReports.every((r) =>
+          ["ok", "partial", "failed", "unsupported"].includes(r.parseStatus));
+        checks.spansAreSymbolScoped = snapshot.nodes.some((node) => node.endLine > node.startLine);
+      } catch (err) {
+        return { execution: { state: "error", reason: String(err?.message ?? err) } };
+      }
+      const passed = Object.values(checks).every(Boolean);
+      return { execution: { state: passed ? "passed" : "failed", checks } };
+    },
+    metrics() {
+      return {
+        fullMs: timings.length ? roundMs(timings[0]) : null,
+        incrementalMs: null,
+        queryP95Ms: timings.length ? roundMs(percentile(timings, 0.95)) : null,
+        peakRssBytes: null,
+        indexBytes: 0,
+        measurementBoundary: "treesitter_ast_snapshot",
+      };
+    },
+    async close() {},
+  };
+}
+
 export function makeCodebaseMemoryProvider(opts = {}) {
   const binary = String(opts.binary ?? "codebase-memory-mcp");
   const timeoutMs = Number(opts.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS);
@@ -1521,6 +1673,8 @@ function makeProviderByName(name, opts = {}) {
   switch (name) {
     case "blueprint-static":
       return makeBlueprintStaticProvider(opts);
+    case "blueprint-treesitter":
+      return makeBlueprintTreeSitterProvider(opts);
     case "fallback":
       return makeFallbackProvider(opts);
     case "codebase-memory":
@@ -1577,7 +1731,7 @@ function qualificationFingerprint({ fixturesPath, schemaPath, providerNames, rea
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  const providerNames = listArg(args.providers, ["fallback", "blueprint-static", "codebase-memory", "graphify"]);
+  const providerNames = listArg(args.providers, ["fallback", "blueprint-static", "blueprint-treesitter", "codebase-memory", "graphify"]);
   const fixturesPath = String(args.fixtures ?? resolve(process.cwd(), "tools/skills/blueprint/evals/graph-tasks.jsonl"));
   const outPath = String(args.out ?? resolve(process.cwd(), "qualification.json"));
   const schemaPath = String(

@@ -423,6 +423,9 @@ function extractJsLike(file, tree, dialect, confidenceForNode) {
   const definesEdges = [];
   const rawImports = [];
   const callSources = []; // { symbolId, node, isTest }
+  // Module-level string constants naming a resource (path, table, file).
+  // Resolved into CONFIGURES edges once the whole file set is known.
+  const configuresTargets = [];
   const classNameNodeType = dialect === "js" ? "identifier" : "type_identifier";
   const fileNodeId = `file:${file.path}`;
 
@@ -499,8 +502,20 @@ function extractJsLike(file, tree, dialect, confidenceForNode) {
         const nameNode = declarator.childForFieldName("name");
         const valueNode = declarator.childForFieldName("value");
         if (!nameNode || !valueNode) continue;
-        if (valueNode.type !== "arrow_function" && valueNode.type !== "function_expression") continue;
-        addFunctionLike(decl, nameNode.text, nameNode.text, ["Function"], fileNodeId, "CONTAINS", valueNode);
+        if (valueNode.type === "arrow_function" || valueNode.type === "function_expression") {
+          addFunctionLike(decl, nameNode.text, nameNode.text, ["Function"], fileNodeId, "CONTAINS", valueNode);
+          continue;
+        }
+        // Non-function module-level bindings are real symbols too — config
+        // constants, path/table/env names. Dropping them loses the whole
+        // config-resource class (a const holding a resource path, and the
+        // CONFIGURES edge to the file it names), which the lexical provider
+        // does emit. Only top-level bindings are kept; locals inside a function
+        // body are noise at graph scale.
+        if (decl.parent && decl.parent.type !== "program" && decl.parent.type !== "export_statement") continue;
+        addTypeSymbol(decl, nameNode.text, ["Constant"], fileNodeId);
+        const literal = stringLiteralValue(valueNode);
+        if (literal) configuresTargets.push({ name: nameNode.text, value: literal, node: decl });
       }
       return;
     }
@@ -508,6 +523,28 @@ function extractJsLike(file, tree, dialect, confidenceForNode) {
       const expr = decl.namedChild(0);
       if (expr && expr.type === "call_expression") maybeTestCall(expr, fileNodeId);
     }
+  }
+
+  /**
+   * First string literal at or beneath a value node.
+   *
+   * Walks descendants rather than requiring the value to BE a literal, because
+   * the dominant config idiom is a fallback expression —
+   * `process.env.X ?? "resources/orders.json"` — where the resource name is
+   * nested. Matching only bare literals misses essentially every real config
+   * constant.
+   */
+  function stringLiteralValue(node, depth = 0) {
+    if (!node || depth > 4) return null;
+    if (node.type === "string" || node.type === "template_string") {
+      const inner = (node.text ?? "").replace(/^[`'"]/, "").replace(/[`'"]$/, "");
+      return inner.length ? inner : null;
+    }
+    for (const child of node.namedChildren ?? []) {
+      const found = stringLiteralValue(child, depth + 1);
+      if (found) return found;
+    }
+    return null;
   }
 
   function addTypeSymbol(node, name, labels, containerId) {
@@ -538,7 +575,7 @@ function extractJsLike(file, tree, dialect, confidenceForNode) {
   }
 
   walkTop(tree.rootNode);
-  return { nodes, containsEdges, definesEdges, rawImports, callSources, classNameNodeType };
+  return { nodes, containsEdges, definesEdges, rawImports, callSources, configuresTargets, classNameNodeType };
 }
 
 function stripQuotes(text) {
@@ -806,6 +843,7 @@ export async function extractFile(file) {
   const definesEdges = parseStatus === "failed" ? [] : extracted.definesEdges;
   const rawImports = parseStatus === "failed" ? [] : extracted.rawImports;
   const callSources = parseStatus === "failed" ? [] : extracted.callSources;
+  const configuresTargets = parseStatus === "failed" ? [] : (extracted.configuresTargets ?? []);
 
   const edges = [
     ...containsEdges.map((e) => edgeRecord("CONTAINS", e.source, e.target, [e.evidence])),
@@ -825,6 +863,7 @@ export async function extractFile(file) {
     grammar: record.grammar,
     parseStatus,
     errorNodeCount,
+    configuresTargets,
     nodes: [fileNode, ...symbolNodes],
     edges,
     rawImports,
@@ -973,6 +1012,29 @@ export async function buildTreeSitterGraph(files) {
       const resolved = Boolean(targetPath);
       if (resolved) resolvedSet.add(targetPath);
       edges.push(importEdgeRecord(sourceId, resolved ? `file:${targetPath}` : null, imp.specifier, resolved, [imp.evidence]));
+    }
+
+    // CONFIGURES: a module-level string constant that names a real file in the
+    // repo is a config->resource relationship. Only emitted when the literal
+    // resolves to a tracked path — a constant holding an arbitrary string is
+    // not a resource edge, and guessing would fabricate structure.
+    for (const target of report.configuresTargets ?? []) {
+      const literal = normalizePath(String(target.value).replace(/^\.\//, ""));
+      const match = filePathSet.has(literal)
+        ? literal
+        : [...filePathSet].find((candidate) => candidate.endsWith(`/${literal}`) || candidate === literal);
+      if (!match) continue;
+      const constNode = report.nodes.find((n) => n.qualifiedName === target.name || n.name === target.name);
+      if (!constNode) continue;
+      edges.push({
+        id: `edge:CONFIGURES:${constNode.id}->file:${match}`,
+        kind: "CONFIGURES",
+        source: constNode.id,
+        target: `file:${match}`,
+        confidence: 0.9,
+        resolved: true,
+        evidence: constNode.evidence,
+      });
     }
     importedByFile.set(file.path, resolvedSet);
   }
