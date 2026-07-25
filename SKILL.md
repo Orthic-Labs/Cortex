@@ -208,10 +208,12 @@ The two constraints that must not drift out of this file:
 - The provider is **deterministic lexical extraction, not compiler/AST coverage.** Confirmed
   2026-07-25: no Tree-sitter dependency exists in the workspace, and there is no SQLite graph store.
   Never describe Blueprint's code substrate as AST- or compiler-grade.
-- The **qualification harness is built and gated, and no real provider has passed it.**
-  `evals/run-qualification.mjs` enforces six mandatory gates and the only registered provider is the
-  `rg/skel-baseline` fallback, wired so `correctness` can never be `true`. Do not add new metrics
-  before there is a provider that can produce them.
+- The **qualification harness is built and gated; `blueprint-static` (lexical) is the passing,
+  selected provider.** `evals/run-qualification.mjs` enforces six mandatory gates; the
+  `rg/skel-baseline` fallback fails by design. The tested tree-sitter provider
+  (`graph/treesitter-provider.mjs`) is **not yet registered or wired** — swapping it in goes through
+  this harness's gates, never through prose. Do not add new metrics before there is a provider that
+  can produce them.
 
 Summary of what Phase 1 writes: `build` produces `.agent/{map,claims,stale,index,queue,flows}.json`,
 the `.agent/graph/` tree (manifest + immutable generation files), the portable

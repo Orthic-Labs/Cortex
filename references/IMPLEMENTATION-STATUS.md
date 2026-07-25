@@ -74,13 +74,20 @@ advertise an interactive visual explorer or raw graph ingestion into MemRight as
 is immutable JSON generations. The AST-provider upgrade is accepted, prioritised, and unbuilt; see
 `docs/2026-07-25-SKILL-UPDATES-CONSOLIDATION.md` §1 items B1–B4.
 
-**The qualification harness is built and gated; no real provider has passed it.**
+**The qualification harness is built and gated, and the lexical provider is the one that passed.**
 `evals/run-qualification.mjs` enforces six mandatory gates (`correctness, freshness, security,
-contract, portability, operability`) plus performance budgets, and
-`docs/baselines/2026-07-10-blueprint-graph/qualification.json` currently registers exactly one
-provider — the `rg/skel-baseline` fallback, wired so `correctness` can never be `true`, with
-`realRepositoryMeasurements: []`. The binding constraint is a provider worth measuring, not more
-measurement.
+contract, portability, operability`) plus performance budgets.
+`docs/baselines/2026-07-10-blueprint-graph/qualification.json` registers four providers:
+`blueprint-static` (**passed**, selected), the `rg/skel-baseline` fallback (fails by design —
+`correctness` can never be `true`), and `codebase-memory`/`graphify` (unavailable).
+`realRepositoryMeasurements` remains empty. So the harness is not waiting for its first provider —
+it is waiting for a *stronger* one: `graph/treesitter-provider.mjs` exists, is tested (162-test
+suite green), and is **not yet registered or wired**; `static-provider.mjs` still drives
+`blueprint build`. The next step is registering the tree-sitter provider against this harness and
+letting the gates decide the swap, not prose.
+
+*(Correction 2026-07-25: an earlier revision of this file claimed only the fallback was registered.
+That came from a truncated read of the qualification JSON and was wrong.)*
 
 Plan of record: `docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`.
 Qualification evidence: `docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
