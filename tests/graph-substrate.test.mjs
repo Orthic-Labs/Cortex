@@ -15,6 +15,7 @@ import {
   queryGraph,
   scanSourcesPublic,
 } from "../graph/static-provider.mjs";
+import { EDGE_CONFIDENCE_TIER_ORDER } from "../graph/confidence-tiers.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -27,9 +28,17 @@ test("static graph substrate builds a complete generation with exact evidence", 
   assert.match(generation.manifest.generationId, /^xxh128:[a-f0-9]{32}$/);
   assert.equal(generation.manifest.complete, true);
   assert.ok(generation.nodes.some((node) => node.kind === "symbol" && node.qualifiedName === "OrderService.placeOrder"));
-  assert.ok(generation.edges.some((edge) => edge.kind === "CALLS" && edge.source.includes("registerOrderRoute") && edge.target.includes("OrderService.placeOrder")));
+  assert.ok(generation.edges.some((edge) => edge.kind === "CALLS" && edge.source.includes("registerOrderRoute") && edge.target?.includes("OrderService.placeOrder")));
   assert.ok(generation.edges.some((edge) => edge.kind === "IMPORTS" && edge.source === "file:src/routes.ts" && edge.target === "file:src/service.ts"));
-  assert.ok(generation.edges.every((edge) => generation.nodes.some((node) => node.id === edge.source) && generation.nodes.some((node) => node.id === edge.target)));
+  // Resolved edges (target !== null) must always point at two real nodes.
+  // Unresolved edges (blueprint B3 — tagged UNRESOLVED, never silently
+  // dropped) intentionally carry target: null and are exempt from this check.
+  const resolvedEdges = generation.edges.filter((edge) => edge.target !== null);
+  assert.ok(resolvedEdges.length > 0);
+  assert.ok(resolvedEdges.every((edge) => generation.nodes.some((node) => node.id === edge.source) && generation.nodes.some((node) => node.id === edge.target)));
+  // Every edge — resolved or not — carries a confidenceTier from the shared
+  // B3 vocabulary and a numeric confidence derived from that tier.
+  assert.ok(generation.edges.every((edge) => EDGE_CONFIDENCE_TIER_ORDER.includes(edge.confidenceTier)));
 });
 
 test("static graph query returns bounded exact source-backed results", () => {
@@ -236,12 +245,12 @@ test("doc-code truth joins are typed and evidence-backed without polluting graph
   const docMap = {
     generatedAt: "2026-07-12T00:00:00.000Z",
     nodes: [
-      { id: "doc.arch", kind: "doc", path: "docs/ARCHITECTURE.md", sha1: "docsha", lifecycle: { status: "current" } },
+      { id: "doc.arch", kind: "doc", path: "docs/ARCHITECTURE.md", contentHash: "docsha", lifecycle: { status: "current" } },
       {
         id: "doc.old",
         kind: "doc",
         path: "docs/archive/OLD.md",
-        sha1: "oldsha",
+        contentHash: "oldsha",
         lifecycle: { status: "superseded", supersededBy: "docs/ARCHITECTURE.md", supersededOn: "2026-07-13" },
       },
       { id: "claim.ok", kind: "claim", source: "docs/ARCHITECTURE.md", line: 3, text: "Implemented by `src/store.ts`.", status: "implemented" },

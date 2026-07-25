@@ -31,7 +31,7 @@ import {
   normalizePath,
   readFileBounded,
   safeResolve,
-  sha256Hex,
+  xxh3Hex,
 } from "./_shared.mjs";
 
 const ADAPTER_ID = "rightcontext-sources/task-anchor";
@@ -176,7 +176,7 @@ export function produce(task, scope) {
         text: body.text,
         startLine: body.startLine,
         endLine: body.endLine,
-        bodySha256: sha256Hex(body.text),
+        bodyHash: xxh3Hex(body.text),
         estimatedTokens: Math.max(1, body.endLine - body.startLine + 1),
         resolver: `rightcontext sources read --anchor ${safe}`,
       }),

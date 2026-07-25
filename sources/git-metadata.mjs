@@ -23,7 +23,7 @@ import {
   SCOPE_PROVIDER,
   isGitRepo,
   makeCandidate,
-  sha256Hex,
+  xxh3Hex,
   tryGit,
 } from "./_shared.mjs";
 
@@ -123,7 +123,7 @@ export function produce(task, scope) {
     text: meta.text,
     startLine: 1,
     endLine: meta.text.split(/\r?\n/).length,
-    bodySha256: sha256Hex(meta.text),
+    bodyHash: xxh3Hex(meta.text),
     estimatedTokens: Math.max(1, Math.round(meta.text.length / 3.5)),
     resolver: `git status && git log -1 && git rev-parse --abbrev-ref HEAD`,
   });

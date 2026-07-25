@@ -19,14 +19,28 @@ import {
   extractCallNames,
   extractImports,
   extractSymbols,
+  extractUnresolvedImportSpecifiers,
 } from "./language-extractors.mjs";
 import { addSchemaReferenceEdges } from "./schema-extractors.mjs";
 import { emptyCache, loadParseCache, writeParseCache, nextCache } from "./parse-cache.mjs";
+import {
+  EDGE_CONFIDENCE_TIERS,
+  EDGE_CONFIDENCE_TIER_ORDER,
+  EDGE_CONFIDENCE_TIER_DESCRIPTIONS,
+  tierConfidence,
+} from "./confidence-tiers.mjs";
+import { PRECISION_TIERS, PRECISION_TIER_ORDER } from "./precision-tiers.mjs";
+import { probeScip } from "./scip-provider.mjs";
+
+export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
+export { PRECISION_TIERS, PRECISION_TIER_ORDER };
+export { augmentGenerationWithScip } from "./scip-provider.mjs";
 
 const PROVIDER = {
   id: "blueprint-static",
   version: "repo-local-deterministic-v3",
   license: "workspace-owned",
+  precisionTier: PRECISION_TIERS.LEXICAL,
 };
 
 const IGNORED = new Set([
@@ -220,10 +234,25 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   };
 }
 
-export function graphCapabilities() {
+export function graphCapabilities(repoRoot, options = {}) {
   return {
     schemaVersion: 1,
     provider: PROVIDER,
+    // blueprint B4 — the highest precision tier THIS provider can achieve.
+    // AST/COMPILER tiers, when available, come from separate providers
+    // (graph/treesitter-provider.mjs, graph/scip-provider.mjs) that augment
+    // the same generation; see graphPrecisionProbe() for the combined view.
+    precisionTier: PROVIDER.precisionTier,
+    precisionTiers: {
+      order: PRECISION_TIER_ORDER,
+      current: PROVIDER.precisionTier,
+    },
+    // blueprint B3 — the confidence-tier vocabulary every edge is tagged
+    // with. Exported so consumers can filter by minimum tier.
+    edgeConfidenceTiers: {
+      order: EDGE_CONFIDENCE_TIER_ORDER,
+      descriptions: EDGE_CONFIDENCE_TIER_DESCRIPTIONS,
+    },
     languageCoverage: {
       parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
       opaqueFileExtensions: [...OPAQUE_FILE_EXTENSIONS].sort(),
@@ -234,6 +263,34 @@ export function graphCapabilities() {
       maxFileBytes: 2 * 1024 * 1024,
     },
     outputs: ["graph", "flows", "docTruth", "mermaid", "ContextCandidateSet"],
+    // Optional: when a repoRoot is supplied, fold in the live SCIP-tier probe
+    // so the capabilities/probe surface reports precision-tier availability
+    // end to end, not just this provider's own ceiling.
+    scip: repoRoot ? probeScip(repoRoot, options) : undefined,
+  };
+}
+
+// blueprint B4 — combined precision-tier probe across all three providers.
+// Honest by construction: LEXICAL and AST are always "ok" (static-provider
+// always runs; treesitter-provider's WASM grammars ship in the workspace and
+// its own augment step reports its own degrade separately), COMPILER reflects
+// whatever probeScip() actually finds on disk — never assumed available.
+export function graphPrecisionProbe(repoRoot, options = {}) {
+  const scip = probeScip(repoRoot, options);
+  return {
+    schemaVersion: 1,
+    tiers: [
+      { tier: PRECISION_TIERS.LEXICAL, provider: PROVIDER.id, state: "ok" },
+      { tier: PRECISION_TIERS.AST, provider: "blueprint-treesitter", state: "ok" },
+      {
+        tier: PRECISION_TIERS.COMPILER,
+        provider: scip.provider.id,
+        state: scip.state,
+        reason: scip.reason ?? null,
+        degradesTo: scip.degradesTo ?? null,
+      },
+    ],
+    highestAvailable: scip.state === "ok" ? PRECISION_TIERS.COMPILER : PRECISION_TIERS.AST,
   };
 }
 
@@ -873,22 +930,32 @@ function buildGenerationFromSources(root, source, options = {}) {
   }
   for (const file of source.files.filter(isCodeFile)) {
     const sourceNode = fileNodes.get(file.path);
+    if (!sourceNode) continue;
     for (const imported of extractImports(file, source.files)) {
       const targetNode = fileNodes.get(imported);
-      if (sourceNode && targetNode) edges.push(edge("IMPORTS", sourceNode, targetNode, [fileEvidence(file, 1, 1)]));
+      // A resolved import specifier is deterministic path resolution — the
+      // most certain tier we have (blueprint B3).
+      if (targetNode) {
+        edges.push(importEdgeRecord(sourceNode, targetNode, imported, true, [fileEvidence(file, 1, 1)]));
+      }
+    }
+    // Unresolved relative imports must be tagged and kept, never dropped
+    // (blueprint B3). extractImports() only returns hits; this is the miss list.
+    for (const specifier of extractUnresolvedImportSpecifiers(file, source.files)) {
+      edges.push(importEdgeRecord(sourceNode, null, specifier, false, [fileEvidence(file, 1, 1)]));
     }
   }
   addSchemaReferenceEdges(source.files, nodes, edges);
   addCallEdges(source.files, nodes, edges);
   addConfigEdges(source.files, nodes, edges);
   const cleanNodes = dedupeBy(nodes, (node) => node.id);
-  const rawEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target}:${item.evidence?.[0]?.path ?? ""}`);
+  const rawEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier ?? ""}:${item.evidence?.[0]?.path ?? ""}`);
   const candidateGeneration = { schemaVersion: 1, provider: PROVIDER, manifest: null, nodes: cleanNodes, edges: rawEdges, repoRoot: root };
   const docMap = readDocMap(root, null);
   const docTruth = docMap
     ? buildDocCodeJoins(candidateGeneration, { docMap })
     : { schemaVersion: 1, provider: PROVIDER.id, joins: [], supersedes: [], truncated: false, sourceDocMap: null };
-  const cleanEdges = dedupeBy(rawEdges, (item) => `${item.kind}:${item.source}:${item.target}:${item.evidence?.[0]?.path ?? ""}`);
+  const cleanEdges = dedupeBy(rawEdges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier ?? ""}:${item.evidence?.[0]?.path ?? ""}`);
   const manifest = {
     schemaVersion: 1,
     provider: PROVIDER,
@@ -1131,7 +1198,7 @@ function addCallEdges(files, nodes, edges) {
     targetsByName.set(callName, matches);
   }
   const importsByPath = new Map();
-  for (const importEdge of edges.filter((item) => item.kind === "IMPORTS")) {
+  for (const importEdge of edges.filter((item) => item.kind === "IMPORTS" && item.target !== null)) {
     const sourcePath = importEdge.source.replace(/^file:/, "");
     const targetPath = importEdge.target.replace(/^file:/, "");
     const imported = importsByPath.get(sourcePath) ?? new Set();
@@ -1154,18 +1221,40 @@ function addCallEdges(files, nodes, edges) {
     const isCalled = (callName) => calledNames.has(harvest.caseInsensitive ? callName.toLowerCase() : callName);
     for (const [callName, namedTargets] of targetsByName) {
       if (!isCalled(callName)) continue;
+      const kind = source.labels.includes("Test") ? "TESTS" : "CALLS";
       const sameFile = namedTargets.filter((target) => target.path === source.path && target.id !== source.id);
       const importedPaths = importsByPath.get(source.path) ?? new Set();
       const imported = namedTargets.filter((target) => importedPaths.has(target.path) && target.id !== source.id);
-      const resolvedTargets = sameFile.length > 0
-        ? sameFile
+      const uniqueFallback = namedTargets.length === 1 && namedTargets[0].id !== source.id ? namedTargets : [];
+      // Tier is DERIVED from which resolution strategy actually produced the
+      // match — not hardcoded — per blueprint B3. Same-file name match is
+      // bounded (no cross-module collision possible); an import-linked or
+      // repo-wide-unique match crosses file boundaries on a heuristic.
+      const [resolvedTargets, tier] = sameFile.length > 0
+        ? [sameFile, EDGE_CONFIDENCE_TIERS.SAME_FILE_LEXICAL]
         : imported.length > 0
-          ? imported
-          : namedTargets.length === 1 && namedTargets[0].id !== source.id
-            ? namedTargets
-            : [];
+          ? [imported, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC]
+          : uniqueFallback.length > 0
+            ? [uniqueFallback, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC]
+            : [[], null];
       for (const target of resolvedTargets) {
-        edges.push(edge(source.labels.includes("Test") ? "TESTS" : "CALLS", source, target, source.evidence));
+        edges.push(edge(kind, source, target, source.evidence, tier));
+      }
+      // Ambiguous call: 2+ OTHER (non-self) candidate symbols share this
+      // name repo-wide and none is in the same file or an imported file, so
+      // none can be honestly preferred. Tagged UNRESOLVED and kept — never
+      // silently dropped, never promoted by guessing one (blueprint B3).
+      //
+      // Excludes self on purpose: containsCall/extractCallNames' regex can
+      // match a function's OWN declaration line as if it called itself
+      // (`function sharedName() {` looks like a call to a naive `name(`
+      // pattern). When that leaves exactly one OTHER candidate, this is that
+      // pre-existing lexical-extraction artifact, not real ambiguity — always
+      // true, so reporting it as "N candidates, none preferred" would be a
+      // false claim. It stays silent rather than fabricating a tag.
+      const otherCandidates = namedTargets.filter((target) => target.id !== source.id);
+      if (resolvedTargets.length === 0 && otherCandidates.length > 1) {
+        edges.push(unresolvedCallEdge(kind, source, callName, otherCandidates.length, source.evidence));
       }
     }
   }
@@ -1179,18 +1268,54 @@ function addConfigEdges(files, nodes, edges) {
     const line = file.lines[source.evidence[0].startLine - 1] ?? "";
     for (const match of line.matchAll(/["']([^"']+\.(?:json|yaml|yml|toml|sqlite|db))["']/g)) {
       const target = filesByPath.get(normalizePath(match[1]));
-      if (target) edges.push(edge("CONFIGURES", source, target, source.evidence));
+      // A string-literal-to-filename match is a heuristic, not a resolved
+      // binding — it crosses file boundaries on text pattern alone.
+      if (target) edges.push(edge("CONFIGURES", source, target, source.evidence, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC));
     }
   }
 }
 
-function edge(kind, source, target, evidence) {
+function edge(kind, source, target, evidence, tier) {
+  if (!tier) throw new Error(`edge() requires an explicit confidenceTier (kind=${kind})`);
   return {
     id: `edge:${kind}:${source.id}->${target.id}`,
     kind,
     source: source.id,
     target: target.id,
-    confidence: 1,
+    confidence: tierConfidence(tier),
+    confidenceTier: tier,
+    resolved: true,
+    specifier: null,
+    evidence,
+  };
+}
+
+function unresolvedCallEdge(kind, source, callName, candidateCount, evidence) {
+  return {
+    id: `edge:${kind}:${source.id}->unresolved:${callName}`,
+    kind,
+    source: source.id,
+    target: null,
+    confidence: tierConfidence(EDGE_CONFIDENCE_TIERS.UNRESOLVED),
+    confidenceTier: EDGE_CONFIDENCE_TIERS.UNRESOLVED,
+    resolved: false,
+    specifier: callName,
+    reason: `${candidateCount} candidate symbol(s) named "${callName}" exist repo-wide; none is in the same file or an imported file`,
+    evidence,
+  };
+}
+
+function importEdgeRecord(sourceNode, targetNode, specifier, resolved, evidence) {
+  const tier = resolved ? EDGE_CONFIDENCE_TIERS.EXACT_RESOLUTION : EDGE_CONFIDENCE_TIERS.UNRESOLVED;
+  return {
+    id: `edge:IMPORTS:${sourceNode.id}->${resolved ? targetNode.id : `unresolved:${specifier}`}`,
+    kind: "IMPORTS",
+    source: sourceNode.id,
+    target: resolved ? targetNode.id : null,
+    confidence: tierConfidence(tier),
+    confidenceTier: tier,
+    resolved,
+    specifier: resolved ? null : specifier,
     evidence,
   };
 }

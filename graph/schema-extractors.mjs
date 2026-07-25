@@ -1,3 +1,5 @@
+import { EDGE_CONFIDENCE_TIERS, tierConfidence } from "./confidence-tiers.mjs";
+
 export const SCHEMA_EXTENSIONS = new Set(["graphql", "gql", "sql"]);
 
 export function extractSchemaSymbols(file, addNode) {
@@ -58,12 +60,16 @@ function symbolNode(file, name, startLine, endLine, labels) {
 }
 
 function referenceEdge(source, target) {
+  // Text-pattern name match against another schema symbol — a heuristic that
+  // crosses file boundaries without a resolved binding (blueprint B3).
+  const tier = EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC;
   return {
     id: `edge:REFERENCES:${source.id}->${target.id}`,
     kind: "REFERENCES",
     source: source.id,
     target: target.id,
-    confidence: 1,
+    confidence: tierConfidence(tier),
+    confidenceTier: tier,
     evidence: source.evidence,
   };
 }

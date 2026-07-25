@@ -112,3 +112,53 @@ while other workloads run on the workspace; re-verify quiet first.**
 
 Plan of record: `docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`.
 Qualification evidence: `docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
+
+## B3 — per-edge confidence tiers (implemented)
+
+`graph/confidence-tiers.mjs` defines the tier vocabulary, ordered most -> least certain:
+`EXACT_RESOLUTION` (1.0) > `SAME_FILE_LEXICAL` (0.75) > `CROSS_FILE_HEURISTIC` (0.5) >
+`UNRESOLVED` (0). Numeric `confidence` is a pure function of the tier (`tierConfidence()`), never a
+per-finding subjective score. Both `graph/static-provider.mjs` and `graph/treesitter-provider.mjs`
+tag every edge they emit with `confidenceTier`, DERIVED from the resolution path that actually
+produced it (never hardcoded per provider):
+
+- resolved import specifier -> `EXACT_RESOLUTION`; unresolved relative import -> `UNRESOLVED`
+  (`target: null`, kept, never dropped — `extractUnresolvedImportSpecifiers()` in
+  `graph/language-extractors.mjs` covers JS/TS and Python; Rust/native/script/nsis are honestly
+  uncovered rather than guessed at).
+- a call resolved to a same-file symbol -> `SAME_FILE_LEXICAL`; resolved via an already-resolved
+  import link, or a repo-wide unique-name fallback -> `CROSS_FILE_HEURISTIC`; a genuinely ambiguous
+  call (2+ OTHER, non-self candidates, none preferred) -> `UNRESOLVED`, tagged and kept, never
+  guessed. Self is excluded from the ambiguity count on purpose: the lexical provider's
+  `containsCall`/`extractCallNames` regex can match a function's own declaration line as a call to
+  itself, and reporting that pre-existing extraction quirk as "N candidates, none preferred" would
+  be a false claim — it stays silent rather than fabricating a tag.
+- schema (`GraphQL`/`Sql`) `REFERENCES` edges and `CONFIGURES` edges (string-literal-to-filename
+  match) are `CROSS_FILE_HEURISTIC`.
+
+`EDGE_CONFIDENCE_TIER_ORDER`/`filterEdgesByMinTier()`/`isTierAtLeast()` are exported for consumers
+to filter by minimum tier. Covered by `tests/confidence-precision-tiers.test.mjs` plus updated
+assertions in `tests/graph-substrate.test.mjs` (which now explicitly tolerates `target: null` on
+unresolved edges instead of assuming every edge resolves).
+
+## B4 — SCIP/compiler precision tier (implemented, honestly degraded)
+
+`graph/precision-tiers.mjs` defines `COMPILER > AST > LEXICAL`, a property of a PROVIDER (its
+ceiling), orthogonal to the per-edge confidence tier above. `static-provider.mjs`'s `PROVIDER`
+declares `LEXICAL`; `treesitter-provider.mjs`'s `PROVIDER` declares `AST`; both surface
+`precisionTier` on their `graphCapabilities()` probe output.
+
+`graph/scip-provider.mjs` is the `COMPILER` tier. Blueprint never vendors, installs, or invokes a
+SCIP indexer — it only READS a portable JSON export (`{ documents: [{ relativePath, occurrences:
+[{ symbol, roles, range }] }] }`, e.g. from `scip print --json`) if the repo already produced one at
+`index.scip.json`, `.blueprint/index.scip.json`, or `$BLUEPRINT_SCIP_INDEX`. `probeScip()` reports
+`state: "unavailable"` with an honest `reason` and `degradesTo: "AST"` on absence, unreadable JSON,
+or an unrecognized shape — mirroring `augmentGenerationWithTreeSitter`'s WASM-load degrade contract.
+`augmentGenerationWithScip()` mirrors that async-at-the-build-boundary pattern and only ever adds
+`REFERENCES` edges (tagged `EXACT_RESOLUTION`) that are literally present in the index's occurrence
+list, joined against nodes already in the generation — it never fabricates a node or reference.
+`graphPrecisionProbe(repoRoot)` in `static-provider.mjs` composes all three tiers into one probe
+(`LEXICAL`/`AST` always `ok`, `COMPILER` reflecting the live `probeScip()` result) for a
+consumer-facing "highest precision actually available" answer. Covered by
+`tests/confidence-precision-tiers.test.mjs` (absence, malformed JSON, wrong shape, and
+presence-with-real-join paths, plus the combined probe).

@@ -1,6 +1,17 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createXXHash128 } from "hash-wasm";
+
+// XXH3-128 everywhere in blueprint: these are content/identity digests for
+// regenerable artifacts, never tamper-evidence. (adapt's payload_sha256 is the
+// opposite case and deliberately stays cryptographic.)
+const xxhasher = await createXXHash128();
+
+function xxh3Hex(value) {
+  xxhasher.init();
+  xxhasher.update(value);
+  return xxhasher.digest("hex");
+}
 import {
   existsSync,
   mkdirSync,
@@ -39,6 +50,7 @@ import {
   sealPhase2Artifacts,
 } from "../lib/incremental-phase2.mjs";
 import { CODE_EXTENSIONS } from "../graph/language-extractors.mjs";
+import { openStore, closeStore, bulkInsertGeneration, countRows } from "../graph/store-sqlite.mjs";
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -169,13 +181,36 @@ function parseArgs(argv) {
   return args;
 }
 
-function sha1(text) {
-  return createHash("sha1").update(text).digest("hex");
-}
-
 function readJson(path, fallback) {
   if (!existsSync(path)) return fallback;
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+// Per-repo SQLite graph store, written alongside the JSON artifacts at
+// <outDir>/graph/graph.db. The store module shipped in 5eba7152 with a passing
+// test and NO consumers -- `openStore` was called only from its own test, so no
+// repo ever had a database. This is the wiring.
+//
+// Same contract as augmentGenerationWithTreeSitter: it must NEVER fail the
+// build. The JSON artifacts remain the source of truth; the DB is a
+// regenerable index for queries (blastRadius, listEdges, neighbours) that are
+// impractical over JSON. `node:sqlite` is a Node builtin, but it is version-
+// gated, so an older runtime degrades to "unavailable" instead of throwing.
+function persistGenerationToStore(root, outDir, generation) {
+  const dbPath = join(root, outDir, "graph", "graph.db");
+  let db = null;
+  try {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    db = openStore(dbPath);
+    bulkInsertGeneration(db, generation, { mode: "replace" });
+    return { ok: true, path: dbPath, rows: countRows(db) };
+  } catch (error) {
+    return { ok: false, path: dbPath, reason: String(error?.message ?? error) };
+  } finally {
+    if (db) {
+      try { closeStore(db); } catch { /* close failure must not fail the build */ }
+    }
+  }
 }
 
 function writeJson(path, value) {
@@ -367,10 +402,10 @@ function sourceSignature(root, config, limit = 0) {
           "",
         );
       }
-      return `${path}:${sha1(text)}`;
+      return `${path}:${xxh3Hex(text)}`;
     });
-  const fileListHash = sha1(files.join("\n"));
-  return sha1([fileListHash, ...docHashes].join("\n"));
+  const fileListHash = xxh3Hex(files.join("\n"));
+  return xxh3Hex([fileListHash, ...docHashes].join("\n"));
 }
 
 function extractDoc(root, path, allFiles, config) {
@@ -417,7 +452,7 @@ function extractDoc(root, path, allFiles, config) {
     claims.push({
       // Claim IDs must be unique across same-slug paths. Suffix the path-hash
       // short form so two docs whose slugs collide still get distinct claims.
-      id: `claim.${slug(path)}.${sha1(path).slice(0, 4)}.${i + 1}`,
+      id: `claim.${slug(path)}.${xxh3Hex(path).slice(0, 4)}.${i + 1}`,
       kind: "claim",
       source: path,
       line: i + 1,
@@ -445,11 +480,11 @@ function extractDoc(root, path, allFiles, config) {
     // Doc IDs must be collision-safe across same-slug paths
     // (e.g. `src/foo.md` and `src_foo.md` both slug to `src-foo-md`).
     // Suffix the path-hash short form so distinct paths never collide.
-    id: `doc.${slug(path)}.${sha1(path).slice(0, 8)}`,
+    id: `doc.${slug(path)}.${xxh3Hex(path).slice(0, 8)}`,
     kind: "doc",
     path,
     title: headings[0]?.text ?? basename(path),
-    sha1: sha1(stableText),
+    contentHash: xxh3Hex(stableText),
     searchText: truncateText(stableText.replace(/\s+/g, " "), 2400),
     lifecycle,
     headings,
@@ -519,7 +554,7 @@ async function build(root, outDir, options = {}) {
       if (claim.status === "stale") stale.staleClaims.push(claim);
     }
     for (const ref of doc.codeRefs) {
-      const id = `code.${slug(ref.path)}.${sha1(ref.path).slice(0, 8)}`;
+      const id = `code.${slug(ref.path)}.${xxh3Hex(ref.path).slice(0, 8)}`;
       codeRefs.set(ref.path, { id, kind: "code_ref", path: ref.path, exists: ref.exists });
       edges.push({ from: doc.id, to: id, type: "mentions-code" });
       if (!ref.exists) stale.missingReferences.push({ source: doc.path, path: ref.path });
@@ -535,7 +570,7 @@ async function build(root, outDir, options = {}) {
       edges.push({ from: targetDoc.id, to: doc.id, type: "supersedes" });
       continue;
     }
-    const id = `code.${slug(targetPath)}.${sha1(targetPath).slice(0, 8)}`;
+    const id = `code.${slug(targetPath)}.${xxh3Hex(targetPath).slice(0, 8)}`;
     codeRefs.set(targetPath, { id, kind: "code_ref", path: targetPath, exists: true });
     edges.push({ from: id, to: doc.id, type: "supersedes" });
   }
@@ -564,7 +599,7 @@ async function build(root, outDir, options = {}) {
     schemaVersion: SCHEMA_VERSION,
     generatedAt,
     sourceSignature: signature,
-    configHash: sha1(JSON.stringify(config)),
+    configHash: xxh3Hex(JSON.stringify(config)),
     files: files.map((path) => ({ path, isDoc: isDoc(path) })),
   };
 
@@ -578,6 +613,7 @@ async function build(root, outDir, options = {}) {
   // AST layer on top of the lexical graph; re-persists the generation. Never
   // fails the build — see augmentGenerationWithTreeSitter.
   await augmentGenerationWithTreeSitter(graphGeneration, root, { outDir });
+  persistGenerationToStore(root, outDir, graphGeneration);
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
   const phase2Plan = buildIncrementalPhase2Plan({
@@ -638,7 +674,7 @@ function gitSourceObservation(root) {
     return {
       head,
       dirty: status.length > 0,
-      statusDigest: createHash("sha256").update(status).digest("hex"),
+      statusDigest: xxh3Hex(status),
     };
   } catch {
     return null;
@@ -875,7 +911,7 @@ function plannedContextBudget(task, root) {
       CONTEXT_BUDGET_SCRIPT,
       "plan",
       "--surface", "blueprint",
-      "--session", createHash("sha256").update(root).digest("hex"),
+      "--session", xxh3Hex(root),
       "--query", task,
       "--record", CONTEXT_BUDGET_LOG,
     );

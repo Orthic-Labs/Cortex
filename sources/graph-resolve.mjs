@@ -28,7 +28,7 @@ import {
   makeCandidate,
   normalizePath,
   safeResolve,
-  sha256Hex,
+  xxh3Hex,
 } from "./_shared.mjs";
 
 const ADAPTER_ID = "rightcontext-sources/graph-resolve";
@@ -160,7 +160,7 @@ export function produce(task, scope) {
             text: node.qualifiedName ?? node.name ?? item.symbol,
             startLine: ev.startLine ?? 1,
             endLine: ev.endLine ?? 1,
-            bodySha256: ev.contentHash ?? sha256Hex(node.qualifiedName ?? item.symbol),
+            bodyHash: ev.contentHash ?? xxh3Hex(node.qualifiedName ?? item.symbol),
             estimatedTokens: Math.max(1, (ev.endLine ?? 1) - (ev.startLine ?? 1) + 1),
             resolver: `blueprint graph resolve --node ${node.id}`,
           }),
@@ -189,7 +189,7 @@ export function produce(task, scope) {
           text: fileNode.qualifiedName ?? safe,
           startLine: ev.startLine ?? 1,
           endLine: ev.endLine ?? 1,
-          bodySha256: ev.contentHash ?? sha256Hex(safe),
+          bodyHash: ev.contentHash ?? xxh3Hex(safe),
           estimatedTokens: Math.max(1, (ev.endLine ?? 1) - (ev.startLine ?? 1) + 1),
           resolver: `blueprint graph resolve --node ${fileNode.id}`,
         }),
@@ -233,7 +233,7 @@ export function produce(task, scope) {
           text: node.qualifiedName ?? node.name ?? token,
           startLine: ev.startLine ?? 1,
           endLine: ev.endLine ?? 1,
-          bodySha256: ev.contentHash ?? sha256Hex(node.qualifiedName ?? token),
+          bodyHash: ev.contentHash ?? xxh3Hex(node.qualifiedName ?? token),
           estimatedTokens: Math.max(1, (ev.endLine ?? 1) - (ev.startLine ?? 1) + 1),
           resolver: `blueprint graph resolve --node ${node.id}`,
         }),

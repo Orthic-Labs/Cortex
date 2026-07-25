@@ -91,6 +91,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Parser, Language } from "web-tree-sitter";
 import { createXXHash128, xxhash128 } from "hash-wasm";
+import { EDGE_CONFIDENCE_TIERS, tierConfidence } from "./confidence-tiers.mjs";
+import { PRECISION_TIERS } from "./precision-tiers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // graph/ -> blueprint/ -> skills/ -> tools/ -> node_modules/
@@ -102,6 +104,7 @@ export const PROVIDER = {
   id: "blueprint-treesitter",
   version: "standalone-v1",
   license: "workspace-owned",
+  precisionTier: PRECISION_TIERS.AST,
 };
 
 // Extension -> language descriptor. `dialect` selects which extractor runs;
@@ -363,13 +366,18 @@ function symbolNode(kind, file, name, qualifiedName, startRow, endRow, labels, c
   };
 }
 
-function edgeRecord(kind, sourceId, targetId, evidence, confidence = 1) {
+// `tier` is REQUIRED — every AST-provider edge must be derived from how it
+// was actually resolved (blueprint B3), never a hardcoded default. CONTAINS
+// and DEFINES are exact structural facts straight from the parse tree, so
+// their call sites always pass EXACT_RESOLUTION.
+function edgeRecord(kind, sourceId, targetId, evidence, tier = EDGE_CONFIDENCE_TIERS.EXACT_RESOLUTION) {
   return {
     id: `edge:${kind}:${sourceId}->${targetId}`,
     kind,
     source: sourceId,
     target: targetId,
-    confidence,
+    confidence: tierConfidence(tier),
+    confidenceTier: tier,
     resolved: true,
     specifier: null,
     evidence,
@@ -377,12 +385,14 @@ function edgeRecord(kind, sourceId, targetId, evidence, confidence = 1) {
 }
 
 function importEdgeRecord(sourceId, targetId, specifier, resolved, evidence) {
+  const tier = resolved ? EDGE_CONFIDENCE_TIERS.EXACT_RESOLUTION : EDGE_CONFIDENCE_TIERS.UNRESOLVED;
   return {
     id: `edge:IMPORTS:${sourceId}->${resolved ? targetId : `unresolved:${specifier}`}`,
     kind: "IMPORTS",
     source: sourceId,
     target: resolved ? targetId : null,
-    confidence: resolved ? 1 : 0,
+    confidence: tierConfidence(tier),
+    confidenceTier: tier,
     resolved,
     specifier,
     evidence,
@@ -1036,12 +1046,16 @@ export async function buildTreeSitterGraph(files) {
       if (!match) continue;
       const constNode = report.nodes.find((n) => n.qualifiedName === target.name || n.name === target.name);
       if (!constNode) continue;
+      // String-literal-to-filename match — a heuristic, not a resolved
+      // binding (blueprint B3).
+      const tier = EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC;
       edges.push({
         id: `edge:CONFIGURES:${constNode.id}->file:${match}`,
         kind: "CONFIGURES",
         source: constNode.id,
         target: `file:${match}`,
-        confidence: 0.9,
+        confidence: tierConfidence(tier),
+        confidenceTier: tier,
         resolved: true,
         evidence: constNode.evidence,
       });
@@ -1058,15 +1072,42 @@ export async function buildTreeSitterGraph(files) {
       const eligible = candidates.filter((c) => c.labels.includes("Function") || c.labels.includes("Method"));
       const sameFile = eligible.filter((c) => c.path === file.path && c.id !== call.sourceId);
       const importedMatches = eligible.filter((c) => imported.has(c.path) && c.id !== call.sourceId);
-      const resolvedTargets = sameFile.length > 0
-        ? sameFile
+      const uniqueFallback = eligible.length === 1 && eligible[0].id !== call.sourceId ? eligible : [];
+      // Tier DERIVED from which resolution strategy actually matched
+      // (blueprint B3) — same-file name match is bounded; import-linked or
+      // repo-wide-unique match crosses file boundaries on a heuristic.
+      const [resolvedTargets, tier] = sameFile.length > 0
+        ? [sameFile, EDGE_CONFIDENCE_TIERS.SAME_FILE_LEXICAL]
         : importedMatches.length > 0
-          ? importedMatches
-          : (eligible.length === 1 && eligible[0].id !== call.sourceId ? eligible : []);
+          ? [importedMatches, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC]
+          : uniqueFallback.length > 0
+            ? [uniqueFallback, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC]
+            : [[], null];
       const sourceNode = report.nodes.find((n) => n.id === call.sourceId);
       if (!sourceNode || !fileSymbolIds.has(call.sourceId)) continue;
+      const kind = call.isTest ? "TESTS" : "CALLS";
       for (const target of resolvedTargets) {
-        edges.push(edgeRecord(call.isTest ? "TESTS" : "CALLS", sourceNode.id, target.id, sourceNode.evidence));
+        edges.push(edgeRecord(kind, sourceNode.id, target.id, sourceNode.evidence, tier));
+      }
+      // Ambiguous call: 2+ OTHER (non-self) candidates share this name and
+      // none could be preferred. Tag UNRESOLVED and keep it — never silently
+      // drop, never guess a candidate (blueprint B3). Excludes self so a
+      // recursive call (a function calling itself, correctly unresolved to
+      // "no OTHER candidate") isn't misreported as ambiguity.
+      const otherEligible = eligible.filter((c) => c.id !== call.sourceId);
+      if (resolvedTargets.length === 0 && otherEligible.length > 1) {
+        edges.push({
+          id: `edge:${kind}:${sourceNode.id}->unresolved:${call.calleeName}`,
+          kind,
+          source: sourceNode.id,
+          target: null,
+          confidence: tierConfidence(EDGE_CONFIDENCE_TIERS.UNRESOLVED),
+          confidenceTier: EDGE_CONFIDENCE_TIERS.UNRESOLVED,
+          resolved: false,
+          specifier: call.calleeName,
+          reason: `${otherEligible.length} candidate symbol(s) named "${call.calleeName}" exist repo-wide; none is in the same file or an imported file`,
+          evidence: sourceNode.evidence,
+        });
       }
     }
   }
@@ -1087,6 +1128,7 @@ export function graphCapabilities() {
   return {
     schemaVersion: 1,
     provider: PROVIDER,
+    precisionTier: PROVIDER.precisionTier,
     grammarPackage: GRAMMAR_PACKAGE,
     supportedExtensions: SUPPORTED_EXTENSIONS,
     tier1Languages: TIER1_LANGUAGE_IDS,

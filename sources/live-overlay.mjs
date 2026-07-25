@@ -34,7 +34,7 @@ import {
   normalizePath,
   readFileBounded,
   safeResolve,
-  sha256Hex,
+  xxh3Hex,
   tryGit,
 } from "./_shared.mjs";
 
@@ -152,7 +152,7 @@ export function produce(task, scope) {
     let liveSha = null;
     if (recordedHash) {
       try {
-        liveSha = sha256Hex(readFileSync(absolute));
+        liveSha = xxh3Hex(readFileSync(absolute));
       } catch {
         continue;
       }
@@ -181,7 +181,7 @@ export function produce(task, scope) {
         text: body.text,
         startLine: 1,
         endLine: body.lines,
-        bodySha256: body.bodySha256,
+        bodyHash: body.bodyHash,
         estimatedTokens: Math.max(1, body.lines),
         resolver: `blueprint graph overlay --check ${safe}`,
       }),

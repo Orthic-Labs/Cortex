@@ -226,6 +226,72 @@ export function extractImports(file, files) {
   return extractJavaScriptImports(file, files);
 }
 
+// Companion to extractImports: returns the RELATIVE import specifiers that
+// looked like a real repo-local import but resolved to no file (blueprint
+// B3 — unresolved references must be tagged, never silently dropped).
+// extractImports() only ever returns specifiers that DID resolve, so this
+// walks the same relative-specifier candidates and reports the misses.
+// Scoped to the two dialects with test coverage (JS/TS, Python); other
+// dialects (Rust/native/script/nsis) are honestly reported as
+// "not yet covered" by the caller rather than guessed at here.
+export function extractUnresolvedImportSpecifiers(file, files) {
+  const extension = file.path.split(".").at(-1)?.toLowerCase();
+  if (SCHEMA_EXTENSIONS.has(extension)) return [];
+  if (extension === "py") return extractUnresolvedPythonImports(file, files);
+  if (JAVASCRIPT_EXTENSIONS.has(extension) || COMPONENT_EXTENSIONS.has(extension)) {
+    return extractUnresolvedJavaScriptImports(file, files);
+  }
+  return [];
+}
+
+function extractUnresolvedJavaScriptImports(file, files) {
+  const unresolved = new Set();
+  const baseDir = file.path.split("/").slice(0, -1);
+  const specifiers = [
+    ...[...file.text.matchAll(/(?:import|export)(?:\s+type)?[\s\S]*?\sfrom\s+["']([^"']+)["']/g)].map((match) => match[1]),
+    ...[...file.text.matchAll(/import\s*["']([^"']+)["']/g)].map((match) => match[1]),
+    ...[...file.text.matchAll(/require\s*\(\s*["']([^"']+)["']\s*\)/g)].map((match) => match[1]),
+  ];
+  for (const specifier of specifiers) {
+    if (!specifier.startsWith(".")) continue;
+    const raw = [...baseDir, ...specifier.split("/")].filter((part) => part && part !== ".");
+    const parts = [];
+    for (const part of raw) part === ".." ? parts.pop() : parts.push(part);
+    const base = parts.join("/").replace(/\.(js|jsx|mjs|cjs)$/, "");
+    const candidates = [
+      base,
+      ...["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "astro"].map((extension) => `${base}.${extension}`),
+      ...["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"].map((extension) => `${base}/index.${extension}`),
+    ];
+    const found = files.some((candidate) => candidates.includes(candidate.path));
+    if (!found) unresolved.add(specifier);
+  }
+  return [...unresolved];
+}
+
+function extractUnresolvedPythonImports(file, files) {
+  const unresolved = new Set();
+  const baseDir = file.path.split("/").slice(0, -1);
+  for (const line of file.lines) {
+    const fromMatch = line.match(/^\s*from\s+([.A-Za-z_]\w*(?:\.\w+)*)\s+import\s+/);
+    const importMatch = line.match(/^\s*import\s+([A-Za-z_]\w*(?:\.\w+)*)/);
+    const moduleName = fromMatch?.[1] ?? importMatch?.[1];
+    if (!moduleName) continue;
+    const leadingDots = moduleName.match(/^\.+/)?.[0].length ?? 0;
+    // Only a relative import (leading dots) is confidently "repo-local" —
+    // a bare `import os` has no expectation of resolving to a repo file, so
+    // treating it as unresolved would be a false claim, not an honest one.
+    if (leadingDots === 0) continue;
+    const moduleParts = moduleName.slice(leadingDots).split(".").filter(Boolean);
+    const relativeBase = baseDir.slice(0, Math.max(0, baseDir.length - (leadingDots - 1)));
+    const candidateBase = [...relativeBase, ...moduleParts].join("/");
+    const candidates = [`${candidateBase}.py`, `${candidateBase}/__init__.py`, ...suffixModuleCandidates(files, moduleParts, "py")];
+    const found = candidates.some((candidate) => files.some((item) => item.path === candidate));
+    if (!found) unresolved.add(moduleName);
+  }
+  return [...unresolved];
+}
+
 function extractJavaScriptImports(file, files) {
   const imports = new Set();
   const baseDir = file.path.split("/").slice(0, -1);

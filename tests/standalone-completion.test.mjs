@@ -30,7 +30,7 @@ const BLUEPRINT = join(HERE, "..");
 const CLI = join(BLUEPRINT, "scripts/blueprint.mjs");
 const FIXTURE = join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
 
-function sha256Hex(text) {
+function xxh3Hex(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
@@ -327,11 +327,11 @@ test("standalone: unchanged rebuild is byte-identical at every artifact", () => 
       "docs/architecture.md",
     ];
     const hashes1 = Object.fromEntries(
-      artifactPaths.map((rel) => [rel, sha256Hex(readFileSync(join(repo, rel), "utf8"))]),
+      artifactPaths.map((rel) => [rel, xxh3Hex(readFileSync(join(repo, rel), "utf8"))]),
     );
     runCli(repo, ["build", "--out", ".agent"]);
     const hashes2 = Object.fromEntries(
-      artifactPaths.map((rel) => [rel, sha256Hex(readFileSync(join(repo, rel), "utf8"))]),
+      artifactPaths.map((rel) => [rel, xxh3Hex(readFileSync(join(repo, rel), "utf8"))]),
     );
     for (const rel of artifactPaths) {
       assert.equal(hashes2[rel], hashes1[rel], `${rel} must be byte-identical across unchanged rebuilds`);

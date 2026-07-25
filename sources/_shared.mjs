@@ -111,18 +111,17 @@ export function isSupportedPath(path) {
 // call site below stays synchronous — no per-call Promise, no blocking
 // busy-wait.
 //
-// NOTE: the exported name `sha256Hex` and the `bodySha256` field name below
-// are kept as-is even though the algorithm underneath is now XXH3-128 — five
-// sibling files under sources/ (dirty-files.mjs, git-metadata.mjs,
-// graph-resolve.mjs, live-overlay.mjs, task-anchor.mjs) import `sha256Hex`
-// by name and pass results through as `bodySha256`; this task's ownership
-// scope covers only _shared.mjs, so renaming here without updating those
-// call sites would break them. The `sha256:` PREFIX on the value actually
-// written into the artifact (the self-describing tag, `sourceHash` below)
-// is what changes.
+// The hash here is XXH3-128 and the names now say so. They previously read
+// `sha256Hex`/`bodySha256` long after the algorithm had moved, because the task
+// that migrated the algorithm owned only this file and could not rename the six
+// importing siblings. Names that lie about their algorithm are how a digest
+// mismatch becomes invisible, so the rename was completed across every call
+// site (2026-07-26). The self-describing `xxh128:` tag on `sourceHash` below is
+// what consumers actually branch on; the contract schema accepts both that and
+// the legacy `sha256:` form, so older artifacts still validate.
 const xxhasher = await createXXHash128();
 
-export function sha256Hex(value) {
+export function xxh3Hex(value) {
   xxhasher.init();
   xxhasher.update(String(value ?? ""));
   return xxhasher.digest("hex");
@@ -154,12 +153,12 @@ export function makeCandidate({
   instructionPolicy = "data_only",
   startLine = 1,
   endLine,
-  bodySha256,
+  bodyHash,
   evidenceKind = "file",
 }) {
   const computedEndLine = endLine ?? Math.max(1, (text?.split(/\r?\n/).length ?? 1));
   const computedTokens = estimatedTokens ?? Math.max(1, computedEndLine - startLine + 1);
-  const computedBodySha = bodySha256 ?? sha256Hex(text ?? sourceRef);
+  const computedBodySha = bodyHash ?? xxh3Hex(text ?? sourceRef);
   return {
     id,
     layer,
@@ -193,7 +192,7 @@ export function readFileBounded(absolutePath, byteCap) {
     truncated,
     bytes: stat.size,
     lines: text.split(/\r?\n/).length,
-    bodySha256: sha256Hex(text),
+    bodyHash: xxh3Hex(text),
   };
 }
 

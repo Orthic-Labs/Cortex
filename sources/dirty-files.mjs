@@ -34,7 +34,7 @@ import {
   makeCandidate,
   normalizePath,
   safeResolve,
-  sha256Hex,
+  xxh3Hex,
   tryGit,
 } from "./_shared.mjs";
 
@@ -86,7 +86,7 @@ function diffForFile(repoRoot, path, byteCap) {
       text: truncated ? text.slice(0, byteCap) + TRUNCATION_MARKER : text,
       truncated,
       bytes: text.length,
-      bodySha256: sha256Hex(text),
+      bodyHash: xxh3Hex(text),
     };
   } catch {
     return null;
@@ -168,7 +168,7 @@ export function produce(task, scope) {
         text,
         startLine,
         endLine,
-        bodySha256: sha256Hex(text),
+        bodyHash: xxh3Hex(text),
         estimatedTokens: Math.max(1, bytes > 0 ? Math.round(bytes / 3.5) : endLine),
         resolver: `git status --porcelain -- ${safe}`,
       }),
