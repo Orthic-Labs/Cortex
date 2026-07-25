@@ -619,9 +619,17 @@ export function makeBlueprintTreeSitterProvider(opts = {}) {
     if (!refresh && snapshots.has(absolute)) return snapshots.get(absolute);
     const started = performance.now();
     const { buildTreeSitterGraph } = await import("../graph/treesitter-provider.mjs");
+    // contentHash MUST be supplied here, with the same algorithm the harness
+    // uses for every other provider's evidence (sha256 over the raw file bytes,
+    // as at collectRepoFiles). buildTreeSitterGraph accepts a caller-supplied
+    // hash and only falls back to deriving its own XXH3-128 when the field is
+    // absent — so omitting it makes tree-sitter emit 32-hex digests against
+    // 64-hex expected evidence and every task fails `evidence_mismatch` for a
+    // hashing reason rather than a graph-quality one.
     const files = collectTextFiles(absolute).map((absolutePath) => ({
       path: normalizePath(absolutePath.slice(absolute.length + 1)),
       text: readFileSync(absolutePath, "utf8"),
+      contentHash: createHash("sha256").update(readFileSync(absolutePath)).digest("hex"),
     }));
     const graph = await buildTreeSitterGraph(files);
     // Map graph nodes into the harness node shape. Evidence spans come from the
