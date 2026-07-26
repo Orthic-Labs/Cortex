@@ -17,7 +17,7 @@ durable recall/other layers and emits the final `ContextPacket v1`; verified `Kn
 may enter the durable output path. Raw graph nodes, embeddings, edges, and visual layouts never
 enter MemRight. Blueprint never owns the final cross-layer token budget.
 
-## What Phase 1 writes (verified 2026-07-12)
+## What Phase 1 writes (verified 2026-07-26)
 
 The live Phase-1 implementation writes both the original document truth map and the
 Blueprint-owned code graph:
@@ -25,8 +25,8 @@ Blueprint-owned code graph:
 - bootstrap node kinds remain `repo|doc|claim|code_ref`;
 - bootstrap edge kinds remain `contains|mentions-code`;
 - `blueprint build` writes `.agent/map.json`, `.agent/claims.json`, `.agent/stale.json`,
-  `.agent/index.json`, `.agent/queue.json`, `.agent/flows.json`, the `.agent/graph/` tree
-  (manifest + immutable generation files), and the portable `.blueprint/manifest.json`;
+  `.agent/index.json`, `.agent/queue.json`, `.agent/flows.json`, the derived
+  `.agent/graph/graph.db` SQLite store, and the portable `.blueprint/manifest.json`;
 - it also generates the two human docs `docs/product.md` and `docs/architecture.md`;
 - live graph commands include `build`, `status`, `schema`, `search`, `neighbors`, `path`,
   `impact`, `resolve`, `architecture`, `flows`, and `candidates`;
@@ -64,27 +64,27 @@ Blueprint-owned code graph:
 
 ## Where it is still PARTIAL
 
-The implementation is still **PARTIAL** for final whole-repository understanding because the
-provider is deterministic lexical extraction rather than compiler/AST coverage for every language,
-and doc-code contradiction joins and optional visual explorer work remain incomplete. Do not
-advertise an interactive visual explorer or raw graph ingestion into MemRight as live.
+The implementation is still **PARTIAL** for final whole-repository understanding because AST
+coverage varies by language, dynamic relationships can require compiler/runtime evidence, optional
+semantic retrieval is not active, and an interactive visual explorer is not shipped. Do not
+advertise complete compiler precision, active vector search, an interactive explorer or raw graph
+ingestion into MemRight as live.
 
-**Confirmed 2026-07-25:** there is no Tree-sitter dependency anywhere in the workspace
-(`rg -l 'tree.sitter|tree_sitter'` matches documentation only), and no SQLite graph store — storage
-is immutable JSON generations. The AST-provider upgrade is accepted, prioritised, and unbuilt; see
-`docs/2026-07-25-SKILL-UPDATES-CONSOLIDATION.md` §1 items B1–B4.
+**Confirmed 2026-07-26:** Blueprint uses `node:sqlite` as its sole graph store at
+`.agent/graph/graph.db`. The schema persists files, symbols, edges, generation metadata and an
+optional vectors table, with indexes on generation, symbol path, edge source/target/kind/confidence
+tier and vector model. WAL plus transactional generation writes keep read-only consumers on the
+last complete generation during a build. There is no `graph.json`; `blueprint graph export` emits
+JSON on demand. Embeddings remain off by default and no Blueprint path currently generates them.
 
-**The qualification harness is built and gated, and the lexical provider is the one that passed.**
+**The qualification harness is built and gated.**
 `evals/run-qualification.mjs` enforces six mandatory gates (`correctness, freshness, security,
 contract, portability, operability`) plus performance budgets.
 `docs/baselines/2026-07-10-blueprint-graph/qualification.json` registers four providers:
 `blueprint-static` (**passed**, selected), the `rg/skel-baseline` fallback (fails by design —
 `correctness` can never be `true`), and `codebase-memory`/`graphify` (unavailable).
-`realRepositoryMeasurements` remains empty. So the harness is not waiting for its first provider —
-it is waiting for a *stronger* one: `graph/treesitter-provider.mjs` exists, is tested (162-test
-suite green), and is **not yet registered or wired**; `static-provider.mjs` still drives
-`blueprint build`. The next step is registering the tree-sitter provider against this harness and
-letting the gates decide the swap, not prose.
+`realRepositoryMeasurements` remains empty. That baseline predates Tree-sitter promotion and must
+not be read as current provider selection.
 
 *(Correction 2026-07-25: an earlier revision of this file claimed only the fallback was registered.
 That came from a truncated read of the qualification JSON and was wrong.)*
@@ -99,7 +99,8 @@ That came from a truncated read of the qualification JSON and was wrong.)*
   because the provider does not yet implement those qualification suites. That is the concrete,
   measured remaining work for promotion — suite implementations plus a two-platform (win32+darwin)
   portability run.
-- `blueprint-static` remains the selected provider; the canonical baseline at
+- `blueprint-treesitter` is now the selected build provider, layered over
+  `blueprint-static` as its deterministic lexical fallback. The canonical baseline at
   `docs/baselines/2026-07-10-blueprint-graph/` is deliberately NOT regenerated from a Mac-only run,
   because its recorded portability evidence spans both platforms and a single-platform rerun would
   degrade it.

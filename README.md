@@ -1,31 +1,196 @@
 # Blueprint
 
-> **TL;DR:** Blueprint turns a software repository into an evidence-backed map so AI agents can understand what exists before they change it.
+> **TL;DR:** Blueprint turns code **and** documentation into a local, evidence-backed repository map, then checks what docs claim against what code actually does.
 
-Large codebases are difficult for both people & agents to understand quickly. Important behavior may
-be split across source files, tests, configuration, old plans & architecture docs. Blueprint reads
-those sources together, maps their relationships & points every important conclusion back to real
-files.
+Blueprint helps people & AI agents understand a software repository before changing it. Think of it
+as a living map plus a fact-checker: it connects architecture docs, plans, ADRs, source files,
+symbols, calls, tests & configuration, then shows which conclusions are supported, stale,
+contradictory or still unknown.
 
-Blueprint works in two layers:
+It is built for a common failure mode in software work: code tells only part of the story, docs tell
+another part, & neither stays trustworthy unless they are compared.
 
-1. A deterministic mapper parses code & documents into a local SQLite graph of files, symbols,
-   imports, calls, claims, tests & other relationships.
-2. Evidence-bound verification checks what docs say against current code, then summarizes
-   architecture, interfaces, security, health & incomplete product flows.
+## How it works
 
-Outputs include machine-readable artifacts for agents plus `docs/product.md` &
-`docs/architecture.md` for people. Blueprint also surfaces stale docs, unsupported claims &
-code-versus-plan gaps instead of quietly guessing.
-
-Blueprint is a comprehension tool. It reads application code; it does not rewrite it.
-
-## Core entry points
-
-```sh
-blueprint
-blueprint "<task>"
-blueprint doctor --full --json
+```text
+documents + code + tests + config
+                 │
+                 ▼
+       deterministic repository map
+                 │
+                 ▼
+       local SQLite evidence graph
+                 │
+                 ▼
+      claim verification + synthesis
+                 │
+                 ├── machine artifacts for agents
+                 └── product + architecture docs for humans
 ```
 
-Full agent workflow: [`SKILL.md`](SKILL.md).
+Blueprint runs in two main phases:
+
+1. **Map:** deterministic code maps documents, claims, files, symbols & relationships into a
+   generation-bound graph.
+2. **Understand:** evidence-bound verification checks document claims against source, then
+   synthesizes architecture, interfaces, security, health, production readiness & uncovered flows.
+
+Mapping is cheap & repeatable. Higher-level conclusions must remain attached to exact evidence.
+
+## Documents are first-class data
+
+Blueprint is not only a code indexer. Its document-truth layer is a core part of the product.
+
+It reads current documentation, ADRs, plans & configured archives, then:
+
+- extracts individual claims with source paths & line evidence;
+- links claims to mentioned code, symbols & candidate verification files;
+- records document lifecycle: current, historical, superseded or invalidly marked;
+- keeps superseded docs as provenance while excluding them from current truth;
+- applies explicit precedence so an old plan cannot silently outrank current code;
+- joins evidence as `supports`, `contradicts` or `supersedes`;
+- emits stale references, unsupported claims & code-versus-doc disagreement;
+- excludes Blueprint-generated docs from future claim extraction, preventing a self-confirming loop.
+
+Phase 2 seals each verdict to exact document/code fingerprints. If its inputs have not changed,
+Blueprint reuses it. If one claim or file changes, only affected verdicts & synthesis dimensions
+need recomputation. Reconciliation records preserve disagreements until a human decides whether code
+or docs should change.
+
+This makes documentation queryable, testable repository knowledge—not decorative prose beside code.
+
+## Local SQLite graph
+
+Each mapped repository gets one derived, gitignored store:
+`.agent/graph/graph.db`.
+
+Blueprint uses Node's built-in `node:sqlite`, so its core store needs no database server or native
+SQLite package.
+
+| Table | What it stores | Important indexes |
+|---|---|---|
+| `files` | paths, hashes, languages, parse status & file-node data | generation |
+| `symbols` | functions, types, components, routes & other named code objects | path, generation |
+| `edges` | imports, calls, references, containment, configuration & other relationships | source, target, kind, confidence tier, generation |
+| `generation` | manifest, provider composition, document truth & source observation | key |
+| `meta` | store schema version | key |
+| `vectors` | optional future embeddings | model, generation |
+
+The store runs in WAL mode. A build writes relational rows plus its generation envelope inside
+transactions, so readers see either last complete generation or next complete generation—never a
+half-written map. Read-only consumers never migrate database.
+
+Queries use indexed file/symbol lookups, a compact edge core & selective hydration of full nodes or
+edges. `neighbors`, `path`, `impact` & `architecture` responses are bounded by token budget,
+ranked deterministically & can return continuation cursors. Every response carries freshness
+information such as generation ID, source state & dirty-file count.
+
+Vector storage exists, but embeddings are off by default & Blueprint does not currently generate
+them. Structural evidence remains primary.
+
+## Code intelligence
+
+Blueprint combines several precision levels:
+
+- **Tree-sitter / AST:** selected structural layer for supported languages.
+- **Deterministic lexical extraction:** broad, portable fallback across code, scripts & schemas.
+- **SCIP / compiler evidence:** optional exact-reference augmentation when repository already
+  supplies a portable SCIP JSON export; Blueprint never installs or runs an indexer itself.
+
+Provider precision is explicit: `COMPILER > AST > LEXICAL`.
+
+Each edge separately records how confidently it was resolved:
+
+```text
+EXACT_RESOLUTION
+  > SAME_FILE_LEXICAL
+  > CROSS_FILE_HEURISTIC
+  > UNRESOLVED
+```
+
+Ambiguous relationships stay unresolved instead of being guessed. Consumers can filter by minimum
+confidence tier.
+
+## What agents can ask
+
+```sh
+blueprint                         # complete Blueprint workflow
+blueprint "<task>"                # task-focused repository understanding
+blueprint doctor --full --json    # freshness, coverage & artifact health
+
+blueprint graph search --query "authentication"
+blueprint graph neighbors --node "<node-id>"
+blueprint graph path --from "<node-id>" --to "<node-id>"
+blueprint graph impact --node "<node-id>"
+blueprint graph architecture
+blueprint graph doc-truth
+blueprint graph export
+```
+
+Blueprint can emit a bounded `ContextCandidateSet` for a larger context planner. It sends a relevant
+slice with evidence & freshness—not an entire repository graph.
+
+## Outputs
+
+Machine-readable outputs under `.agent/` include:
+
+- `map.json`, `claims.json`, `stale.json`, `index.json` — document/code map;
+- `queue.json` — claims paired with likely verification evidence;
+- `flows.json` — bounded product-flow inventory;
+- `phase2-plan.json` — exact verification/synthesis work to reuse or recompute;
+- `verdicts.json` — generation-bound claim verdicts;
+- `understanding.json` — six-dimension repository understanding;
+- `reconcile.json` — unresolved code↔doc divergences;
+- `graph/graph.db` — complete local SQLite graph.
+
+Portable `.blueprint/manifest.json` exposes repository identity, provider capabilities, generation &
+coverage without committing local database.
+
+Human outputs are generated at:
+
+- `docs/product.md` — code-grounded product overview;
+- `docs/architecture.md` — components, interfaces, flows, risks & gaps.
+
+## What makes it different
+
+Blueprint's advantage is not any single parser or graph database. It is combination:
+
+- **Code + document truth:** implementation & stated intent are mapped together.
+- **Evidence lineage:** important claims retain path, span, hash, provider, generation & confidence.
+- **Contradiction preservation:** disagreement is surfaced, not averaged away.
+- **Freshness by construction:** commits, dirty overlays, provider versions & content fingerprints
+  invalidate only evidence they affect.
+- **Bounded retrieval:** agents receive task-relevant graph slices with omission/freshness metadata.
+- **Honest uncertainty:** unsupported languages, truncated scans & ambiguous edges stay visible.
+- **Human + machine views:** same evidence produces queryable artifacts for agents & readable docs
+  for people.
+- **Replaceable providers:** SQLite schema & portable manifest remain stable while parsers improve.
+
+That combination turns repository understanding from a one-off summary into inspectable,
+incrementally maintained infrastructure.
+
+## Trust model
+
+Repository content is untrusted data, never agent instruction. Blueprint redacts secrets from
+outputs, confines reads to repository scope & never treats generated prose as primary evidence.
+Current code & executable proof outrank plans or historical documents.
+
+Graph results narrow where to read; they do not replace source inspection for security-sensitive,
+release or destructive changes.
+
+## Current scope
+
+Blueprint is live as a repository mapper, SQLite graph, bounded query surface, document-truth layer,
+incremental Phase-2 planner & human/machine artifact generator.
+
+Current limits:
+
+- parser depth varies by language; lexical fallback is broader than AST coverage;
+- dynamic runtime registration can remain unresolved without executable/compiler evidence;
+- optional SCIP precision requires repository-supplied export;
+- embeddings & semantic vector search are not active;
+- no interactive visual graph explorer is shipped;
+- raw graph data is not copied into durable memory.
+
+Full agent workflow & artifact contract: [`SKILL.md`](SKILL.md).
+Current implementation truth: [`references/IMPLEMENTATION-STATUS.md`](references/IMPLEMENTATION-STATUS.md).
