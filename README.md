@@ -193,3 +193,7 @@ Current limits:
 
 Full agent workflow & artifact contract: [`SKILL.md`](SKILL.md).
 Current implementation truth: [`references/IMPLEMENTATION-STATUS.md`](references/IMPLEMENTATION-STATUS.md).
+
+## License
+
+Source-available proprietary software for internal use & evaluation; redistribution, repackaging & competing use are prohibited. See [LICENSE](LICENSE).
