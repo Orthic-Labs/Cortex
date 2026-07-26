@@ -1,11 +1,10 @@
 # Blueprint
 
-> **TL;DR:** Blueprint turns code **and** documentation into a local, evidence-backed repository map, then checks what docs claim against what code actually does.
+> **TL;DR:** Blueprint turns code **and** documentation into a local, evidence-backed repository map, so people & agents can find what is true, stale, contradictory or still unknown before changing a system.
 
-Blueprint helps people & AI agents understand a software repository before changing it. Think of it
-as a living map plus a fact-checker: it connects architecture docs, plans, ADRs, source files,
-symbols, calls, tests & configuration, then shows which conclusions are supported, stale,
-contradictory or still unknown.
+Blueprint helps people & AI agents understand a software repository before changing it. It connects
+architecture docs, plans, ADRs, source files, symbols, calls, tests & configuration, then shows which
+conclusions are supported, stale, contradictory or still unknown.
 
 It is built for a common failure mode in software work: code tells only part of the story, docs tell
 another part, & neither stays trustworthy unless they are compared.
