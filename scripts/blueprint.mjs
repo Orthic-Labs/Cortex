@@ -2027,6 +2027,45 @@ function memrightPlannerStatus() {
 }
 
 function withFreshIndexedGraph(root, outDir, options = {}, callback) {
+  const pinnedGeneration = String(options.expectedGeneration ?? "").trim();
+  if (pinnedGeneration) {
+    // Prompt-path fast path (same contract as the `manifest` subcommand): the
+    // caller passing --expected-generation IS the central freshness verdict —
+    // membrane's /freshness already re-walked the tree and pinned this
+    // generation. Re-deriving staleness here via graphStatus re-hashes every
+    // source file (~2-3s on a 35k-file workspace), which blew the federation
+    // lane's 350ms budget on every prompt. Verify the pin against the store
+    // envelope and query; stale pins still fail closed as
+    // graph_generation_changed.
+    const dbPath = join(resolve(root, outDir), "graph", "graph.db");
+    if (!existsSync(dbPath)) {
+      throw graphReadError("graph_missing", "Graph store is missing; run blueprint build");
+    }
+    const db = openStore(dbPath);
+    try {
+      const meta = readIndexedMeta(db);
+      const observed = meta?.manifest?.generationId ?? null;
+      if (!meta || meta.manifest?.complete !== true || observed !== pinnedGeneration) {
+        throw graphReadError(
+          "graph_generation_changed",
+          "Graph generation changed after the central freshness verdict",
+          { expectedGeneration: pinnedGeneration, observedGeneration: observed },
+        );
+      }
+      return callback({
+        db,
+        meta,
+        freshness: {
+          generationId: observed,
+          // The central verdict owns dirty/clean classification on this path.
+          sourceState: "central_verdict",
+          dirtyFileCount: null,
+        },
+      });
+    } finally {
+      closeStore(db);
+    }
+  }
   const status = graphStatus(root, outDir, options);
   const expectedGeneration = String(options.expectedGeneration ?? "").trim();
   const observedGeneration = status.manifest?.generationId ?? null;
