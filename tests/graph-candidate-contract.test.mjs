@@ -91,3 +91,37 @@ test("candidate set applies real tiering: anchors reserved, exact flagged, overf
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("pinned generation answers from the store alone — no source-tree walk", () => {
+  // Latency contract for the prompt-path caller (membrane federation, 350ms
+  // budget): with --expected-generation, candidates must not re-derive
+  // staleness by walking/hashing sources. Proven structurally: delete every
+  // source file after build; only the store remains. A tree walk would see a
+  // stale/missing repo and refuse — the pinned door must still answer.
+  const repo = path.join(os.tmpdir(), `blueprint-pinned-door-${process.pid}-${Date.now()}`);
+  fs.cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    const build = spawnSync(process.execPath, [CLI, "graph", "build", "--out", ".agent"], {
+      cwd: repo, encoding: "utf8",
+    });
+    assert.equal(build.status, 0, build.stderr || build.stdout);
+    const manifest = spawnSync(process.execPath, [CLI, "graph", "manifest", "--out", ".agent"], {
+      cwd: repo, encoding: "utf8",
+    });
+    assert.equal(manifest.status, 0, manifest.stderr || manifest.stdout);
+    const generation = JSON.parse(manifest.stdout).generationId;
+    for (const entry of fs.readdirSync(repo)) {
+      if (entry !== ".agent") fs.rmSync(path.join(repo, entry), { recursive: true, force: true });
+    }
+    const pinned = spawnSync(process.execPath, [CLI, "graph", "candidates", "--query", "placeOrder",
+      "--out", ".agent", "--expected-generation", generation], { cwd: repo, encoding: "utf8" });
+    assert.equal(pinned.status, 0, pinned.stderr || pinned.stdout);
+    assert.equal(JSON.parse(pinned.stdout).candidates.length > 0, true);
+    const wrongPin = spawnSync(process.execPath, [CLI, "graph", "candidates", "--query", "placeOrder",
+      "--out", ".agent", "--expected-generation", "xxh128:" + "f".repeat(32)], { cwd: repo, encoding: "utf8" });
+    assert.notEqual(wrongPin.status, 0, "a stale pin must fail closed");
+    assert.match(wrongPin.stderr || wrongPin.stdout, /graph_generation_changed/);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
