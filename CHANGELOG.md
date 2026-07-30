@@ -1,0 +1,10 @@
+# Changelog
+
+## Unreleased
+
+- Reconciled `.blueprint/manifest.json` producer and bootstrap consumer around one nested generation contract.
+- Corrected every portable graph artifact reference to the sole SQLite store at `.agent/graph/graph.db`.
+- Replaced largest-file Phase-2 anchors with deterministic claim-relevance and cross-file graph-connectivity ranking.
+- Added build-to-bootstrap and graph-ranked anchor regressions.
+- Declared exact hashing, Tree-sitter runtime, and grammar dependencies so a clean checkout can run Blueprint and its tests.
+- Enforced LF text checkout so frozen evidence hashes remain identical across Windows and macOS.

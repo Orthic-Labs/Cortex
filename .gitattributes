@@ -1,0 +1,3 @@
+evals/fixture-repos/** text eol=lf
+*.wasm binary
+*.db binary

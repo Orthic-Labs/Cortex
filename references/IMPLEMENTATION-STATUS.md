@@ -27,6 +27,12 @@ Blueprint-owned code graph:
 - `blueprint build` writes `.agent/map.json`, `.agent/claims.json`, `.agent/stale.json`,
   `.agent/index.json`, `.agent/queue.json`, `.agent/flows.json`, the derived
   `.agent/graph/graph.db` SQLite store, and the portable `.blueprint/manifest.json`;
+- the portable manifest stores repository identity under `repo`, generation metadata under
+  `generation`, and points `artifacts.graph` at `.agent/graph/graph.db`; the bootstrap consumer
+  reads that same versioned shape;
+- Phase-2 queue anchors prioritize files linked by extracted document claims, then cross-file graph
+  connectivity, with deterministic path ordering; file size is only a fallback when no graph file
+  nodes exist;
 - it also generates the two human docs `docs/product.md` and `docs/architecture.md`;
 - live graph commands include `build`, `status`, `schema`, `search`, `neighbors`, `path`,
   `impact`, `resolve`, `architecture`, `flows`, and `candidates`;

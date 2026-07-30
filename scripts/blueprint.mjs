@@ -633,12 +633,10 @@ async function build(root, outDir, options = {}) {
     files: files.map((path) => ({ path, isDoc: isDoc(path) })),
   };
 
-  const queue = buildUnderstandingQueue(root, docs, files, signature);
   writeJson(join(root, outDir, "map.json"), map);
   writeJson(join(root, outDir, "claims.json"), claims);
   writeJson(join(root, outDir, "stale.json"), stale);
   writeJson(join(root, outDir, "index.json"), index);
-  writeJson(join(root, outDir, "queue.json"), queue);
   const graphGeneration = buildGraphGeneration(root, { outDir, fileLimit: limit || 0 });
   // Sealed into the store envelope so a downstream consumer can distinguish a
   // committed snapshot from a dirty-overlay build without shelling out to git.
@@ -650,6 +648,8 @@ async function build(root, outDir, options = {}) {
   // same database twice per build.
   await augmentGenerationWithTreeSitter(graphGeneration, root, {});
   persistGenerationToStore(root, outDir, graphGeneration);
+  const queue = buildUnderstandingQueue(root, docs, files, signature, graphGeneration);
+  writeJson(join(root, outDir, "queue.json"), queue);
   const flows = graphFlowInventory(graphGeneration);
   writeJson(join(root, outDir, "flows.json"), flows);
   const phase2Plan = buildIncrementalPhase2Plan({
@@ -739,7 +739,11 @@ function writeBlueprintManifest(root, outDir, {
     : `gen:${Date.now().toString(16).padStart(16, "0")}`;
   const manifest = {
     schemaVersion: 1,
-    repo: basename(root),
+    repo: {
+      rootName: basename(root),
+      sourceHash: graphManifest.repo?.sourceHash ?? null,
+      fileCount: stats.files,
+    },
     generatedAt: stableStamp,
     entrypoint: ".agent/",
     humanDocs: ["docs/product.md", "docs/architecture.md"],
@@ -751,7 +755,7 @@ function writeBlueprintManifest(root, outDir, {
       queue: `${outDir}/queue.json`,
       flows: `${outDir}/flows.json`,
       phase2Plan: `${outDir}/phase2-plan.json`,
-      graph: `${outDir}/graph/manifest.json`,
+      graph: `${outDir}/graph/graph.db`,
     },
     generation: {
       schemaVersion: 1,
@@ -800,15 +804,18 @@ function writeBlueprintManifest(root, outDir, {
 }
 
 // Deterministic Phase-2 worklist: pair each doc claim with the implementation
-// files its own doc references (the things to verify it against), plus the
-// largest implementation files as synthesis anchors. Grounds the agent pass so
-// it reads real code instead of guessing.
-function buildUnderstandingQueue(root, docs, files, signature) {
+// files its own doc references (the things to verify it against), then rank
+// synthesis anchors by claim relevance and cross-file graph connectivity.
+function buildUnderstandingQueue(root, docs, files, signature, graphGeneration) {
   const claims = [];
+  const claimLinks = new Map();
   for (const doc of docs) {
     const candidateFiles = doc.codeRefs
       .filter((ref) => ref.exists && isImplementationPath(ref.path))
       .map((ref) => ref.path);
+    for (const path of candidateFiles) {
+      claimLinks.set(path, (claimLinks.get(path) ?? 0) + 1);
+    }
     for (const claim of doc.claims) {
       claims.push({
         id: claim.id,
@@ -820,7 +827,43 @@ function buildUnderstandingQueue(root, docs, files, signature) {
       });
     }
   }
-  const anchors = files
+
+  const implementationFiles = files.filter(isImplementationPath);
+  const fileNodes = new Map(
+    (graphGeneration?.nodes ?? [])
+      .filter((node) => node.kind === "file" && isImplementationPath(node.path))
+      .map((node) => [node.id, node.path]),
+  );
+  const ownerByNode = new Map(
+    (graphGeneration?.nodes ?? [])
+      .filter((node) => node.path && isImplementationPath(node.path))
+      .map((node) => [node.id, node.path]),
+  );
+
+  const graphDegree = new Map(implementationFiles.map((path) => [path, 0]));
+  for (const edge of graphGeneration?.edges ?? []) {
+    if (!edge.target || edge.resolutionStatus === "unresolved") continue;
+    const sourcePath = ownerByNode.get(edge.source);
+    const targetPath = ownerByNode.get(edge.target);
+    if (!sourcePath || !targetPath || sourcePath === targetPath) continue;
+    graphDegree.set(sourcePath, (graphDegree.get(sourcePath) ?? 0) + 1);
+    graphDegree.set(targetPath, (graphDegree.get(targetPath) ?? 0) + 1);
+  }
+
+  const anchors = fileNodes.size > 0
+    ? implementationFiles
+      .map((path) => ({
+        path,
+        claimLinks: claimLinks.get(path) ?? 0,
+        graphDegree: graphDegree.get(path) ?? 0,
+      }))
+      .sort((a, b) =>
+        b.claimLinks - a.claimLinks
+        || b.graphDegree - a.graphDegree
+        || a.path.localeCompare(b.path))
+      .slice(0, 15)
+      .map((item) => item.path)
+    : implementationFiles
     .filter(isImplementationPath)
     .map((path) => {
       try {
@@ -1564,7 +1607,7 @@ function doctor(root, outDir, options = {}) {
       schemaVersion: 1,
       state: "missing",
       generatedAt: startedAt,
-      artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/manifest.json` },
+      artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/graph.db` },
       errors: [`${outDir}/map.json missing; run build first`],
       warnings: [],
       reasons: [
@@ -1591,7 +1634,7 @@ function doctor(root, outDir, options = {}) {
       schemaVersion: 1,
       state: "corrupt",
       generatedAt: startedAt,
-      artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/manifest.json` },
+      artifacts: { map: `${outDir}/map.json`, graph: `${outDir}/graph/graph.db` },
       errors: [String(error?.message ?? error)],
       warnings: [],
       reasons: [
@@ -1709,7 +1752,7 @@ function doctor(root, outDir, options = {}) {
     generatedAt: startedAt,
     artifacts: {
       map: `${outDir}/map.json`,
-      graph: `${outDir}/graph/manifest.json`,
+      graph: `${outDir}/graph/graph.db`,
       graphState: graph.state,
       provider: graph.manifest?.provider ?? null,
       generationId: graph.manifest?.generationId ?? null,

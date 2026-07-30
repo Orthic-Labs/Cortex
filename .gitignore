@@ -1,0 +1,7 @@
+node_modules/
+.cache/
+.audit/
+.agent/graph/graph.db
+.agent/graph/graph.db-shm
+.agent/graph/graph.db-wal
+.agent/cache/

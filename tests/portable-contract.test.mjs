@@ -159,13 +159,15 @@ test("bootstrap returns ready when the tracked manifest matches the current sour
     const hash = sourceHash(sources.files);
     const manifest = {
       schemaVersion: 1,
-      generationId: "test-bootstrap-ready",
       provider: "blueprint-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
-      toolVersions: { blueprint: "0.4.2" },
-      supportedEdgeTypes: ["CALLS", "IMPORTS"],
-      supportedLanguages: ["typescript"],
+      generation: {
+        id: "test-bootstrap-ready",
+        toolVersions: { blueprint: "0.4.2" },
+        supportedEdgeTypes: ["CALLS", "IMPORTS"],
+        supportedLanguages: ["typescript"],
+      },
       repo: { rootName: "typescript-commerce", sourceHash: hash, fileCount: sources.files.length },
       frozen: true,
     };
@@ -175,6 +177,10 @@ test("bootstrap returns ready when the tracked manifest matches the current sour
     assert.equal(result.state, "ready");
     assert.equal(result.descriptor.frozen, true);
     assert.equal(result.descriptor.contentHash, hash);
+    assert.equal(result.descriptor.id, "test-bootstrap-ready");
+    assert.deepEqual(result.descriptor.toolVersions, { blueprint: "0.4.2" });
+    assert.deepEqual(result.descriptor.supportedEdgeTypes, ["CALLS", "IMPORTS"]);
+    assert.deepEqual(result.descriptor.supportedLanguages, ["typescript"]);
     // The tracked descriptor must carry NO absolute machine paths.
     const serialised = JSON.stringify(result.descriptor);
     assert.ok(!/D:[\\/]/.test(serialised), "ready descriptor must not carry a Windows drive letter");

@@ -128,7 +128,7 @@ test("standalone: every artifact agrees on generation identity", () => {
     assert.equal(typeof index.sourceSignature, "string", "index.sourceSignature must be a string");
     assert.ok(index.sourceSignature.length > 0, "index.sourceSignature must not be empty");
     assert.equal(manifest.sourceSignature, index.sourceSignature, "manifest.sourceSignature must equal index.sourceSignature");
-    assert.equal(map.repo, manifest.repo, "map.repo and manifest.repo must agree");
+    assert.equal(map.repo, manifest.repo.rootName, "map.repo and manifest.repo.rootName must agree");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

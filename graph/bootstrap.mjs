@@ -104,20 +104,21 @@ export function bootstrapFromTracked(repoRoot) {
   }
 
   if (recordedHash === currentHash) {
+    const gen = manifest.generation ?? {};
     return {
       state: "ready",
       manifestPath,
       descriptor: {
         schemaVersion: 1,
-        id: manifest.generationId,
-        revision: manifest.generationId,
+        id: gen.id,
+        revision: gen.id,
         indexedAt: manifest.generatedAt,
         stale: false,
         sourceKind: "blueprint-tracked",
-        toolVersions: manifest.toolVersions ?? {},
+        toolVersions: gen.toolVersions ?? {},
         providerCapabilities: graphCapabilities().languageCoverage.parsedExtensions,
-        supportedEdgeTypes: manifest.supportedEdgeTypes ?? [],
-        supportedLanguages: manifest.supportedLanguages ?? [],
+        supportedEdgeTypes: gen.supportedEdgeTypes ?? [],
+        supportedLanguages: gen.supportedLanguages ?? [],
         fileCount: sources.files.length,
         contentHash: recordedHash,
         frozen: true,

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   buildGraphGeneration,
@@ -16,7 +17,7 @@ import {
 import { openStore, closeStore, loadGeneration } from "../graph/store-sqlite.mjs";
 import { indexedImpact, indexedNeighbors, indexedPath } from "../graph/traverse-store.mjs";
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
 const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
 const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
