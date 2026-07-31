@@ -34,10 +34,8 @@ test("provider identity and capability surface are well-formed", () => {
 
 test("upgradeDylinkSection transcodes a real grammar file and Language.load succeeds", async () => {
   const { readFileSync } = await import("node:fs");
-  const { join, dirname } = await import("node:path");
-  const { fileURLToPath } = await import("node:url");
-  const HERE = dirname(fileURLToPath(import.meta.url));
-  const wasmPath = join(HERE, "..", "..", "..", "node_modules", "tree-sitter-wasms", "out", "tree-sitter-javascript.wasm");
+  const { createRequire } = await import("node:module");
+  const wasmPath = createRequire(import.meta.url).resolve("tree-sitter-wasms/out/tree-sitter-javascript.wasm");
   const raw = new Uint8Array(readFileSync(wasmPath));
   const result = upgradeDylinkSection(raw);
   assert.equal(result.upgraded, true);

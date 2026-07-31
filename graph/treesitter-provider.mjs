@@ -87,6 +87,7 @@
 //   but zero symbol nodes.
 
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Parser, Language } from "web-tree-sitter";
@@ -96,10 +97,9 @@ import { PRECISION_TIERS } from "./precision-tiers.mjs";
 import { TREESITTER_PROVIDER } from "./provider-identity.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// graph/ -> blueprint/ -> skills/ -> tools/ -> node_modules/
-const TOOLS_ROOT = join(HERE, "..", "..", "..");
-const WASM_DIR = join(TOOLS_ROOT, "node_modules", "tree-sitter-wasms", "out");
-const GRAMMAR_PACKAGE_JSON = join(TOOLS_ROOT, "node_modules", "tree-sitter-wasms", "package.json");
+const requireFromHere = createRequire(import.meta.url);
+const GRAMMAR_PACKAGE_JSON = requireFromHere.resolve("tree-sitter-wasms/package.json");
+const WASM_DIR = join(dirname(GRAMMAR_PACKAGE_JSON), "out");
 
 // Identity lives in provider-identity.mjs so static-provider can read it for the
 // staleness check without importing this module (and with it web-tree-sitter).

@@ -20,8 +20,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 import os from "node:os";
 import path from "node:path";
 import { seedStore } from "./_store-helpers.mjs";
+import { findWorkspaceRoot } from "./_workspace-root.mjs";
 
-const ROOT = path.resolve(HERE, "../../../..");
+const ROOT = findWorkspaceRoot(HERE);
+const BLUEPRINT = path.resolve(HERE, "..");
 const SCHEMA = path.join(ROOT, "tools/lib/context-contracts.schema.json");
 const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
 
@@ -155,10 +157,10 @@ test("workingTreeSummary reports unavailable outside a git repo", () => {
 // ---- graph-resolve ----
 
 test("graph-resolve: emits file and symbol candidates when graph is available", () => {
-  const fixture = path.join(ROOT, "tools/skills/blueprint/evals/fixture-repos/typescript-commerce");
+  const fixture = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
   withTempRepo("resolve", (repo) => {
     cpSync(fixture, repo, { recursive: true });
-    spawnSync(process.execPath, [path.join(ROOT, "tools/skills/blueprint/scripts/blueprint.mjs"), "graph", "build", "--out", ".agent"], { cwd: repo, stdio: "pipe" });
+    spawnSync(process.execPath, [path.join(BLUEPRINT, "scripts/blueprint.mjs"), "graph", "build", "--out", ".agent"], { cwd: repo, stdio: "pipe" });
     // The path must exist IN THE FIXTURE. This previously read
     // "src/services/checkout.ts", which the fixture does not contain — and the
     // test still passed, because graph-resolve was looking for the generation at

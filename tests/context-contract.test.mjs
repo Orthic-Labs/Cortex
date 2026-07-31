@@ -6,10 +6,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { findWorkspaceRoot } from "./_workspace-root.mjs";
 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(HERE, "../../../..");
+const ROOT = findWorkspaceRoot(HERE);
 const SCHEMA_PATH = path.join(ROOT, "tools/lib/context-contracts.schema.json");
 const FIXTURES = path.join(ROOT, "tools/tests/context_contracts/fixtures");
 const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];

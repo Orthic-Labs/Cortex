@@ -26,13 +26,15 @@ import {
   schemaHash,
   selectProvider,
 } from "../evals/run-qualification.mjs";
+import { findWorkspaceRoot } from "./_workspace-root.mjs";
 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
+const ROOT = findWorkspaceRoot(HERE);
 const TASKS = path.join(BLUEPRINT, "evals/graph-tasks.jsonl");
 const REPOS = path.join(BLUEPRINT, "evals/fixture-repos");
-const SCHEMA = path.resolve(BLUEPRINT, "../../lib/context-contracts.schema.json");
+const SCHEMA = path.join(ROOT, "tools/lib/context-contracts.schema.json");
 
 test("GitNexus context is normalized into exact Blueprint evidence", () => {
   const normalized = normalizeGitNexusContext({

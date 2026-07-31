@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { findWorkspaceRoot } from "./_workspace-root.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(HERE, "../../../..");
+const ROOT = findWorkspaceRoot(HERE);
 const BLUEPRINT = path.resolve(HERE, "..");
 const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
 const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");

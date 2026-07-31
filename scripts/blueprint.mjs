@@ -68,9 +68,24 @@ import {
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const CONTEXT_BUDGET_SCRIPT = resolve(SCRIPT_DIR, "../../../lib/context_budget.py");
-const CONTEXT_BUDGET_LOG = resolve(SCRIPT_DIR, "../../../.cache/metrics/context-budget.jsonl");
-const AUDIT_FACT_COLLECTOR = resolve(SCRIPT_DIR, "../../audit/collect-facts.mjs");
+
+function resolveToolsRoot() {
+  const installedRoot = resolve(SCRIPT_DIR, "../../..");
+  if (existsSync(join(installedRoot, "lib/context_budget.py"))) return installedRoot;
+  let current = SCRIPT_DIR;
+  while (true) {
+    const candidate = join(current, "tools");
+    if (existsSync(join(candidate, "lib/context_budget.py"))) return candidate;
+    const parent = dirname(current);
+    if (parent === current) return installedRoot;
+    current = parent;
+  }
+}
+
+const TOOLS_ROOT = resolveToolsRoot();
+const CONTEXT_BUDGET_SCRIPT = join(TOOLS_ROOT, "lib/context_budget.py");
+const CONTEXT_BUDGET_LOG = join(TOOLS_ROOT, ".cache/metrics/context-budget.jsonl");
+const AUDIT_FACT_COLLECTOR = join(TOOLS_ROOT, "skills/audit/collect-facts.mjs");
 const DEFAULT_HYGIENE_CHECKS = [
   "decomposition",
   "dead_code",
