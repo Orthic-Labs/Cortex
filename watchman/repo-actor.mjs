@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { applyFileDelta, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
+import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
 import { parseFileFacts, scanSourcesPublic } from "../graph/static-provider.mjs";
+import { extractDoc, isDoc, loadConfig } from "../scripts/blueprint.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
 import { collectDependents, closeStore, openStore } from "../graph/store-sqlite.mjs";
 import { eventsSince, startWatch, writeSnapshot } from "./adapter.mjs";
@@ -53,8 +54,13 @@ function descriptorFor(root, sourceFiles, path, renameTo = null) {
 
 function deltaFor(root, sourceFiles, event) {
   const normalized = normalizePath(event.path);
+  const target = normalizePath(event.renameTo ?? normalized);
   const current = descriptorFor(root, sourceFiles, normalized, event.renameTo);
-  if (!current) return { eventKind: event.eventKind === "rename" ? "rename" : "delete", path: normalized, renameTo: event.renameTo ?? null, parsed: null, provider: { id: "lexical", version: "repo-local-delta-v1" } };
+  const document = current && isDoc(target)
+    ? extractDoc(root, target, new Set(current.files.map((file) => normalizePath(file.path))), loadConfig(root, ".agent"))
+    : null;
+  const provider = (document || isDoc(normalized) || isDoc(target)) ? DOC_PROVIDER : { id: "lexical", version: "repo-local-delta-v1" };
+  if (!current) return { eventKind: event.eventKind === "rename" ? "rename" : "delete", path: normalized, renameTo: event.renameTo ?? null, parsed: null, provider, ...(provider.id === DOC_PROVIDER.id ? { domain: "doc" } : {}) };
   return {
     eventKind: event.eventKind,
     path: normalized,
@@ -64,7 +70,8 @@ function deltaFor(root, sourceFiles, event) {
     fileIdentity: current.read.fileIdentity,
     size: current.read.bytes.length,
     mtimeMs: current.read.statAfter.mtimeMs,
-    provider: { id: "lexical", version: "repo-local-delta-v1" },
+    provider,
+    ...(document ? { domain: "doc", document } : {}),
   };
 }
 
@@ -81,7 +88,7 @@ function applyRepairPaths(db, root, paths, sourceClock, inOuterTransaction) {
     if (ownBatch) db.exec("BEGIN IMMEDIATE");
     try {
       const source = scanSourcesPublic(root, 0, {});
-      for (const path of batch) applyFileDelta(db, deltaFor(root, source.files ?? [], { eventKind: "modify", path }), { inTransaction: true, sourceClock });
+      for (const path of batch) applyFileDelta(db, deltaFor(root, source.files ?? [], { eventKind: "modify", path }), { inTransaction: true, sourceClock, repoRoot: root, outDir: ".agent" });
       if (ownBatch) db.exec("COMMIT");
     } catch (error) {
       if (ownBatch) db.exec("ROLLBACK");
@@ -96,7 +103,7 @@ function applyJournalEvent(db, root, row, maxDependentFiles = MAX_DEPENDENT_FILE
   const sameOuter = closure.paths.length <= REPAIR_BATCH;
   if (sameOuter) db.exec("BEGIN IMMEDIATE");
   try {
-    const base = applyFileDelta(db, { ...deltaFor(root, source.files ?? [], { ...row, renameTo: row.rename_to }), sourceClock: row.source_clock, journalSeq: row.seq }, { inTransaction: sameOuter });
+    const base = applyFileDelta(db, { ...deltaFor(root, source.files ?? [], { ...row, renameTo: row.rename_to }), sourceClock: row.source_clock, journalSeq: row.seq }, { inTransaction: sameOuter, repoRoot: root, outDir: ".agent" });
     if (base.applied && closure.paths.length) applyRepairPaths(db, root, closure.paths, row.source_clock, sameOuter);
     if (closure.truncated) writeRepairState(db, { path: row.path, remaining: closure.remaining });
     else writeRepairState(db, null);

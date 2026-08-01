@@ -11,6 +11,10 @@ function state(db) {
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
+function pendingDomains(values) {
+  return String(values.domains_pending ?? "").split(",").map((item) => item.trim()).filter(Boolean).sort();
+}
+
 function watcherAlive(pid) {
   const value = Number(pid ?? 0);
   if (!value) return false;
@@ -73,6 +77,7 @@ export async function syncToCurrentSource(db, root, { timeoutMs = 2000, allowDeg
     sourceClock: Number(finalState.source_clock ?? targetClock),
     appliedClock: Number(finalState.applied_clock ?? 0),
     eventGap: finalState.event_gap === "1",
+    domainsPending: pendingDomains(finalState),
     barrierResult,
     details: {
       targetClock,

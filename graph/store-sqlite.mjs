@@ -292,6 +292,17 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_generation_receipt_created ON generation_receipt(created_ms);
     `);
   },
+  // Migration 7 — derived artifact bindings.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS artifact_state (
+        artifact TEXT PRIMARY KEY,
+        generation_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        updated_ms INTEGER NOT NULL
+      );
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -300,6 +311,17 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
 export function getSchemaVersion(db) {
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
   return row ? Number(row.value) : 0;
+}
+
+export function recordArtifactState(db, artifact, generationId, fingerprint, updatedMs = Date.now()) {
+  db.prepare(`INSERT INTO artifact_state(artifact, generation_id, fingerprint, updated_ms)
+    VALUES (?, ?, ?, ?) ON CONFLICT(artifact) DO UPDATE SET generation_id=excluded.generation_id,
+      fingerprint=excluded.fingerprint, updated_ms=excluded.updated_ms`)
+    .run(String(artifact), String(generationId), String(fingerprint), Number(updatedMs));
+}
+
+export function listArtifactState(db) {
+  return db.prepare("SELECT artifact, generation_id AS generationId, fingerprint, updated_ms AS updatedMs FROM artifact_state ORDER BY artifact").all();
 }
 
 export function migrate(db) {

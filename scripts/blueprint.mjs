@@ -73,7 +73,7 @@ import {
 } from "../graph/traverse-store.mjs";
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
-import { applyFileDelta, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
+import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
 import { collectDependents } from "../graph/store-sqlite.mjs";
 import { reconcile as reconcileGraph } from "../watchman/reconcile.mjs";
 import { syncToCurrentSource } from "../graph/barrier.mjs";
@@ -241,6 +241,7 @@ async function queryFreshnessBarrier(root, outDir, args = {}) {
         sourceClock: Number(watch.source_clock ?? 0),
         appliedClock: Number(watch.applied_clock ?? 0),
         eventGap: watch.event_gap === "1",
+        domainsPending: String(watch.domains_pending ?? "").split(",").map((item) => item.trim()).filter(Boolean).sort(),
         barrierResult: caughtUp ? "caught_up" : "timeout",
         details: { readOnly: true, expectedGeneration: args["expected-generation"] ?? null },
       };
@@ -2142,6 +2143,10 @@ function makeDeltaInput(root, sourceFiles, path, eventKind = null, renameTo = nu
     files.push(descriptor);
     parsed = parseFileFacts(root, descriptor, { files });
   }
+  const documentPath = normalizePath(renameTo ?? normalizedPath);
+  const document = read && isDoc(documentPath)
+    ? extractDoc(root, documentPath, new Set(sourceFiles.map((file) => normalizePath(file.path)).concat(documentPath)), loadConfig(root, ".agent"))
+    : null;
   return {
     eventKind: eventKind ?? (!exists ? "delete" : sourceFiles.some((file) => normalizePath(file.path) === normalizedPath) ? "modify" : "create"),
     path: normalizedPath,
@@ -2151,7 +2156,8 @@ function makeDeltaInput(root, sourceFiles, path, eventKind = null, renameTo = nu
     fileIdentity: read?.fileIdentity ?? null,
     size: read?.bytes.length ?? 0,
     mtimeMs: read?.statAfter?.mtimeMs ?? null,
-    provider: { id: "lexical", version: "repo-local-delta-v1" },
+    provider: document ? DOC_PROVIDER : { id: "lexical", version: "repo-local-delta-v1" },
+    ...(document ? { domain: "doc", document } : {}),
   };
 }
 
@@ -2167,7 +2173,7 @@ function writeRepairState(db, value) {
   else db.prepare("DELETE FROM watch_state WHERE key='repair_truncated'").run();
 }
 
-function applyRepairs(db, root, repairPaths, sourceClock, { batched }) {
+function applyRepairs(db, root, repairPaths, sourceClock, { batched, outDir = ".agent" }) {
   const batches = batched ? [] : [repairPaths];
   if (batched) for (let index = 0; index < repairPaths.length; index += 50) batches.push(repairPaths.slice(index, index + 50));
   for (const batch of batches) {
@@ -2176,7 +2182,7 @@ function applyRepairs(db, root, repairPaths, sourceClock, { batched }) {
       const source = scanSourcesPublic(root, 0, {});
       for (const path of batch) {
         const input = makeDeltaInput(root, source.files ?? [], path);
-        applyFileDelta(db, { ...input, sourceClock }, { inTransaction: !batched });
+        applyFileDelta(db, { ...input, sourceClock }, { inTransaction: !batched, repoRoot: root, outDir, writeJsonAtomic });
       }
       if (batched) db.exec("COMMIT");
     } catch (error) {
@@ -2211,8 +2217,8 @@ async function runDelta(root, outDir, args) {
       const sameOuter = closure.paths.length <= 50;
       if (sameOuter) db.exec("BEGIN IMMEDIATE");
       try {
-        const base = applyFileDelta(db, makeDeltaInput(root, source.files ?? [], path), { inTransaction: sameOuter });
-        if (base.applied && closure.paths.length) applyRepairs(db, root, closure.paths, base.appliedClock, { batched: !sameOuter });
+        const base = applyFileDelta(db, makeDeltaInput(root, source.files ?? [], path), { inTransaction: sameOuter, repoRoot: root, outDir, writeJsonAtomic });
+        if (base.applied && closure.paths.length) applyRepairs(db, root, closure.paths, base.appliedClock, { batched: !sameOuter, outDir });
         if (closure.truncated) writeRepairState(db, { path, remaining: closure.remaining });
         else writeRepairState(db, null);
         if (sameOuter) db.exec("COMMIT");
@@ -2920,14 +2926,18 @@ async function main() {
   return 1;
 }
 
-try {
-  process.on("uncaughtException", e => { console.error("STACK:", e.stack); process.exit(1); });
-  process.exitCode = await main();
-} catch (error) {
-  if (error?.code?.startsWith("graph_")) {
-    console.error(JSON.stringify({ schemaVersion: 1, error: { code: error.code, message: error.message, ...error.details } }));
-  } else {
-    console.error(`maprepo: ${error.message}`);
+export { extractDoc, isDoc, isImplementationPath, loadConfig, repoFiles };
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  try {
+    process.on("uncaughtException", e => { console.error("STACK:", e.stack); process.exit(1); });
+    process.exitCode = await main();
+  } catch (error) {
+    if (error?.code?.startsWith("graph_")) {
+      console.error(JSON.stringify({ schemaVersion: 1, error: { code: error.code, message: error.message, ...error.details } }));
+    } else {
+      console.error(`maprepo: ${error.message}`);
+    }
+    process.exitCode = 1;
   }
-  process.exitCode = 1;
 }
