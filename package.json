@@ -11,7 +11,9 @@
   "bin": {
     "blueprint": "./scripts/blueprint.mjs",
     "cortex": "./scripts/blueprint.mjs",
-    "cortex-watch": "./scripts/cortex-watch.mjs"
+    "cortex-watch": "./scripts/cortex-watch.mjs",
+    "cortex-mcp": "./scripts/cortex-mcp.mjs",
+    "cortex-install": "./scripts/cortex-install.mjs"
   },
   "files": [
     "scripts/",
@@ -40,9 +42,11 @@
     "test:all": "node --test \"tests/**/*.test.mjs\""
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@parcel/watcher": "2.6.0",
     "hash-wasm": "4.12.0",
     "tree-sitter-wasms": "0.1.13",
-    "web-tree-sitter": "0.26.11"
+    "web-tree-sitter": "0.26.11",
+    "zod": "4.4.3"
   }
 }
