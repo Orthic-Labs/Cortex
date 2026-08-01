@@ -1,6 +1,6 @@
 # Cortex
 
-Formerly **Blueprint**. `cortex` is the canonical command; `blueprint` remains a compatibility alias. In prose, nodes, edges & flows are branded **Neurons**, **Synapses** & **Circuits**.
+Nodes, edges & flows are branded **Neurons**, **Synapses** & **Circuits**.
 
 > **TL;DR:** Cortex turns code **and** documentation into a local, evidence-backed repository map, so people & agents can find what is true, stale, contradictory or still unknown before changing a system.
 
@@ -128,8 +128,6 @@ cortex graph doc-truth
 cortex graph export
 ```
 
-Every command above also works under the legacy `blueprint` alias.
-
 Cortex can emit a bounded `ContextCandidateSet` for a larger context planner. It sends a relevant
 slice with evidence & freshness—not an entire repository graph.
 
@@ -145,10 +143,9 @@ const decision = await api.orient({ task, sessionId, repoRoot });
 // decision.action: allow | continue | block | noop
 ```
 
-Receipts are host-owned data (`~/.blueprint/receipts` by default — path frozen for installed-agent
-compatibility). Sentinel-consumable `blueprint_orientation` evidence is derived from those receipts.
-Fail-closed hooks, shell classifiers, MCP enforcement, and CodeRight brokers are intentionally out of
-scope of this core library.
+Receipts are host-owned local data. Sentinel-consumable orientation evidence is derived from those
+receipts. Fail-closed hooks, shell classifiers, MCP enforcement, and CodeRight brokers are
+intentionally out of scope of this core library.
 
 ## Install / test
 
@@ -161,8 +158,7 @@ npm run test:all        # both, serialized for watcher/performance isolation
 ```
 
 Requires Node `>=20`; full tests also require Python `>=3.11` + packages in `requirements-test.txt`
-(the workspace context-contract suite shells out to `jsonschema`). CLI entry: `cortex` (or the
-`blueprint` alias) → `scripts/blueprint.mjs`.
+(the workspace context-contract suite shells out to `jsonschema`). CLI entry: `cortex`.
 
 ## Outputs
 
@@ -178,8 +174,7 @@ Machine-readable outputs under `.agent/` include:
 - `graph/graph.db` — complete local SQLite graph.
 
 Portable `.blueprint/manifest.json` exposes repository identity, provider capabilities, generation &
-coverage without committing local database. (Artifact paths `.agent/` and `.blueprint/` are frozen
-so already-installed agents keep working across the rename.)
+coverage without committing local database.
 
 Human outputs are generated at:
 
