@@ -254,6 +254,27 @@ const MIGRATIONS = [
       );
     `);
   },
+  // Migration 5 — durable watcher clocks, cursor/gap state, and event journal.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS watch_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS event_journal (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        observed_ms INTEGER NOT NULL,
+        event_kind TEXT NOT NULL CHECK (event_kind IN ('create','modify','delete','rename')),
+        path TEXT NOT NULL,
+        rename_to TEXT,
+        source_clock INTEGER NOT NULL,
+        applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0,1,2)),
+        applied_clock INTEGER,
+        UNIQUE(observed_ms, event_kind, path, rename_to, source_clock)
+      );
+      CREATE INDEX IF NOT EXISTS idx_event_journal_applied ON event_journal(applied, seq);
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
