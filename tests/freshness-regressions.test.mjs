@@ -77,7 +77,9 @@ test("same-content watcher event advances durable clocks without changing genera
 test("same-basename move normalizes to one rename event", () => {
   const root = makeRepo("cortex-rename-normalize-");
   try {
+    mkdirSync(join(root, "moved"), { recursive: true });
     const events = normalizeEvents(root, [
+      { type: "create", path: join(root, "moved") },
       { type: "delete", path: join(root, "src/service.ts") },
       { type: "create", path: join(root, "moved/service.ts") },
     ], 1000);

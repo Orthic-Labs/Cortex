@@ -1,5 +1,5 @@
 import ParcelWatcher from "@parcel/watcher";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { SCAN_EXCLUSIONS } from "../graph/static-provider.mjs";
 
@@ -23,6 +23,11 @@ function normalizeEvents(root, events, observedMs = Date.now()) {
   const normalizedRoot = canonicalRoot(root);
   const candidates = events
     .filter((event) => EVENT_TYPES.has(event.type))
+    .filter((event) => {
+      if (event.type === "delete") return true;
+      try { return statSync(event.path).isFile(); }
+      catch { return true; }
+    })
     .map((event) => ({
       eventKind: event.type === "update" ? "modify" : event.type,
       path: normalizePath(normalizedRoot, event.path),
