@@ -236,13 +236,25 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   let envelope;
   let recordedHashes = new Map();
   let ledgerPresent = false;
+  let clocks = null;
   try {
     if (!hasGeneration(store)) return { state: "missing", manifestPath };
     envelope = getGenerationEnvelope(store);
     manifest = envelope.manifest;
     if (!manifest?.complete) return { state: "incomplete", manifestPath, manifest };
     recordedHashes = loadFileContentHashes(store, manifest.generationId ?? null);
-    ledgerPresent = Boolean(store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='generation_leaf'").get());
+    ledgerPresent = Boolean(store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='generation_leaf'").get())
+      && store.prepare("SELECT 1 FROM generation_leaf WHERE kind='file' LIMIT 1").get() !== undefined;
+    const hasWatchState = Boolean(store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_state'").get());
+    const watchRows = hasWatchState ? store.prepare("SELECT key,value FROM watch_state").all() : [];
+    if (watchRows.length) {
+      const watchState = Object.fromEntries(watchRows.map((row) => [row.key, row.value]));
+      clocks = {
+        sourceClock: Number(watchState.source_clock ?? 0),
+        appliedClock: Number(watchState.applied_clock ?? 0),
+        eventGap: watchState.event_gap === "1",
+      };
+    }
   } finally {
     closeStore(store);
   }
@@ -309,6 +321,7 @@ export function graphStatus(repoRoot, outDir, options = {}) {
     pendingPaths: ledgerDiff ? [...ledgerDiff.changed, ...ledgerDiff.added, ...ledgerDiff.removed].sort() : [],
     scanTruncated,
     truncationReasons: sources.truncationReasons,
+    clocks,
     capabilities: {
       parsedExtensions: PARSED_LANGUAGE_EXTENSIONS,
       opaqueFileExtensions: [...OPAQUE_FILE_EXTENSIONS].sort(),

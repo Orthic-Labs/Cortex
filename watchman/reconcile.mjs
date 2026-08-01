@@ -21,7 +21,10 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
       pending.push(...fastEvents);
     }
     const source = scanSourcesPublic(root, 0, {});
-    const diff = diffLedgerAgainstTree(db, null, source.files ?? []);
+    const ledgerRows = db.prepare("SELECT COUNT(*) AS n FROM generation_leaf WHERE kind='file'").get().n;
+    const diff = ledgerRows > 0
+      ? diffLedgerAgainstTree(db, null, source.files ?? [])
+      : { changed: [], added: [], removed: [] };
     for (const path of diff.changed) pending.push({ eventKind: "modify", path, observedMs: Date.now() });
     for (const path of diff.added) pending.push({ eventKind: "create", path, observedMs: Date.now() });
     for (const path of diff.removed) pending.push({ eventKind: "delete", path, observedMs: Date.now() });

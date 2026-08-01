@@ -24,7 +24,7 @@ test("Cortex alias exposes orient contract and branded help", () => {
     const orient = spawnSync(process.execPath, [CLI, "orient", "--json", "--out", ".agent"], { cwd: repo, encoding: "utf8" });
     assert.equal(orient.status, 0, orient.stderr || orient.stdout);
     const payload = JSON.parse(orient.stdout);
-    assert.deepEqual(Object.keys(payload).sort(), ["candidates", "entrypoint", "freshness", "generationId", "manifestDigest", "product", "schemaVersion", "topCircuits"].sort());
+    assert.deepEqual(Object.keys(payload).sort(), ["candidates", "entrypoint", "freshness", "freshnessReceipt", "generationId", "manifestDigest", "product", "schemaVersion", "topCircuits"].sort());
     assert.equal(payload.schemaVersion, 1);
     assert.equal(payload.product, "cortex");
     assert.equal(typeof payload.freshness.state, "string");

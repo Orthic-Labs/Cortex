@@ -74,6 +74,7 @@ import { stableRead } from "../graph/stable-read.mjs";
 import { applyFileDelta, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
 import { collectDependents } from "../graph/store-sqlite.mjs";
 import { reconcile as reconcileGraph } from "../watchman/reconcile.mjs";
+import { syncToCurrentSource } from "../graph/barrier.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -203,6 +204,51 @@ function scriptCommand() {
   return "blueprint";
 }
 
+async function queryFreshnessBarrier(root, outDir, args = {}) {
+  const dbPath = join(resolve(root), outDir, "graph", "graph.db");
+  if (!existsSync(dbPath)) throw graphReadError("graph_missing", "Graph store is missing; run blueprint build");
+  const probe = openStoreReadOnly(dbPath);
+  try {
+    const manifestRow = probe.prepare("SELECT value FROM generation WHERE key='manifest'").get();
+    const legacyManifest = manifestRow ? JSON.parse(manifestRow.value) : null;
+    if (legacyManifest && !("fileLimit" in legacyManifest)) {
+      throw graphReadError("graph_rebuild_required", "Legacy graph manifest has no fileLimit; run blueprint build");
+    }
+  } finally { closeStore(probe); }
+  const readOnly = (statSync(dbPath).mode & 0o222) === 0;
+  if (args["expected-generation"] || readOnly) {
+    const db = openStoreReadOnly(dbPath);
+    try {
+      const rows = db.prepare("SELECT key,value FROM watch_state").all();
+      const watch = Object.fromEntries(rows.map((row) => [row.key, row.value]));
+      const envelope = readManifestEnvelope(db);
+      const status = readOnly ? graphStatus(root, outDir) : null;
+      const caughtUp = args["expected-generation"]
+        ? true
+        : status?.state === "fresh" && watch.event_gap !== "1";
+      return {
+        receiptId: `generation-readonly-${envelope?.manifest?.generationId ?? "missing"}`,
+        createdMs: Date.now(),
+        repoRoot: resolve(root),
+        generationId: envelope?.manifest?.generationId ?? null,
+        sourceClock: Number(watch.source_clock ?? 0),
+        appliedClock: Number(watch.applied_clock ?? 0),
+        eventGap: watch.event_gap === "1",
+        barrierResult: caughtUp ? "caught_up" : "timeout",
+        details: { readOnly: true, expectedGeneration: args["expected-generation"] ?? null },
+      };
+    } finally { closeStore(db); }
+  }
+  const db = openStore(dbPath);
+  try {
+    return await syncToCurrentSource(db, root, {
+      timeoutMs: Number(args["timeout-ms"] ?? 2000),
+      allowDegraded: Boolean(args["allow-stale"]),
+      outDir,
+    });
+  } finally { closeStore(db); }
+}
+
 function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -214,7 +260,7 @@ function parseArgs(argv) {
     const [key, inline] = arg.slice(2).split("=", 2);
     if (inline !== undefined) {
       args[key] = inline;
-    } else if (["check", "refresh", "complete", "json", "full", "offline", "no-readme-link"].includes(key)) {
+    } else if (["check", "refresh", "complete", "json", "full", "offline", "no-readme-link", "allow-stale"].includes(key)) {
       args[key] = true;
     } else {
       args[key] = argv[++i];
@@ -1813,6 +1859,20 @@ function doctor(root, outDir, options = {}) {
 }
 
 async function runGraphCommand(root, outDir, subcommand, args) {
+  const barrierCommands = new Set(["search", "neighbors", "path", "impact", "candidates", "architecture", "flows"]);
+  let freshnessReceipt = null;
+  if (barrierCommands.has(subcommand)) {
+    freshnessReceipt = await queryFreshnessBarrier(root, outDir, args);
+    if (freshnessReceipt.barrierResult !== "caught_up" && !args["allow-stale"]) {
+      console.error(JSON.stringify({ error: "stale_blocked", barrier: freshnessReceipt }, null, 2));
+      return 3;
+    }
+  }
+  const attach = (payload) => ({
+    ...payload,
+    freshnessReceipt,
+    ...(freshnessReceipt?.barrierResult !== "caught_up" ? { stale: true } : {}),
+  });
   if (subcommand === "build") {
     const generation = buildGraphGeneration(root, { outDir });
     generation.sourceObservation = gitSourceObservation(root);
@@ -1827,21 +1887,25 @@ async function runGraphCommand(root, outDir, subcommand, args) {
       return 2;
     }
     const provider = status.manifest?.provider?.id ?? "unknown";
+    if (args.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return status.state === "fresh" ? 0 : 2;
+    }
     console.log(`graph ${status.state} provider=${provider} generation=${status.manifest?.generationId ?? "none"}`);
     return status.state === "fresh" ? 0 : 2;
   }
   if (subcommand === "search") {
     const query = String(args.query ?? args._.join(" ")).trim();
-    const result = withFreshIndexedGraph(root, outDir, {}, ({ db, meta }) => {
+    const result = withFreshIndexedGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) }, ({ db, meta }) => {
       const generation = indexedQueryGeneration(db, query, { limit: Number(args.limit ?? 20) });
-      return { schemaVersion: 1, provider: meta.provider.id ?? meta.provider, query, results: queryGraph(generation, { query, limit: Number(args.limit ?? 20) }) };
+      return attach({ schemaVersion: 1, provider: meta.provider.id ?? meta.provider, query, results: queryGraph(generation, { query, limit: Number(args.limit ?? 20) }) });
     });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   }
   if (subcommand === "candidates") {
     const query = String(args.query ?? args.task ?? args._.join(" ")).trim();
-    const candidateSet = withFreshIndexedGraph(root, outDir, { expectedGeneration: args["expected-generation"] }, ({ db }) => {
+    const candidateSet = withFreshIndexedGraph(root, outDir, { expectedGeneration: args["expected-generation"], allowStale: Boolean(args["allow-stale"]) }, ({ db }) => {
       const anchors = args.anchors ? String(args.anchors).split(",").map((path) => path.trim()).filter(Boolean) : [];
       const generation = indexedQueryGeneration(db, query, { limit: Number(args.limit ?? 40), anchors });
       const repoCodeScanStarted = process.hrtime.bigint();
@@ -1853,7 +1917,7 @@ async function runGraphCommand(root, outDir, subcommand, args) {
       });
       const repoCodeScanMs = Number(process.hrtime.bigint() - repoCodeScanStarted) / 1_000_000;
       result._rightcontext = { stageElapsedMs: { repo_code_scan: Math.max(0, repoCodeScanMs) } };
-      return result;
+      return attach(result);
     });
     console.log(JSON.stringify(candidateSet, null, 2));
     return 0;
@@ -1926,7 +1990,7 @@ async function runGraphCommand(root, outDir, subcommand, args) {
     return 0;
   }
   if (subcommand === "neighbors") {
-    const payload = withFreshIndexedGraph(root, outDir, {}, ({ db, freshness }) => boundedNeighbors(db, {
+    const payload = withFreshIndexedGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) }, ({ db, freshness }) => boundedNeighbors(db, {
       nodeId: String(args.node ?? args._[0] ?? ""),
       direction: args.direction ?? "both",
       depth: Number(args.depth ?? 1),
@@ -1934,11 +1998,11 @@ async function runGraphCommand(root, outDir, subcommand, args) {
       cursor: args.cursor,
       freshness,
     }));
-    printGraphPayload(payload, args);
+    printGraphPayload(attach(payload), args);
     return 0;
   }
   if (subcommand === "path") {
-    const payload = withFreshIndexedGraph(root, outDir, {}, ({ db, freshness }) => boundedPath(db, {
+    const payload = withFreshIndexedGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) }, ({ db, freshness }) => boundedPath(db, {
       from: args.from,
       to: args.to,
       maxDepth: Number(args["max-depth"] ?? 5),
@@ -1946,31 +2010,31 @@ async function runGraphCommand(root, outDir, subcommand, args) {
       cursor: args.cursor,
       freshness,
     }));
-    printGraphPayload(payload, args);
+    printGraphPayload(attach(payload), args);
     return 0;
   }
   if (subcommand === "architecture") {
-    const payload = withFreshIndexedGraph(root, outDir, {}, ({ db, freshness }) => boundedArchitecture(db, {
+    const payload = withFreshIndexedGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) }, ({ db, freshness }) => boundedArchitecture(db, {
       budget: Number(args.budget ?? 2000),
       freshness,
     }));
-    printGraphPayload(payload, args);
+    printGraphPayload(attach(payload), args);
     return 0;
   }
   if (subcommand === "impact") {
-    const payload = withFreshIndexedGraph(root, outDir, {}, ({ db, freshness }) => boundedImpact(db, {
+    const payload = withFreshIndexedGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) }, ({ db, freshness }) => boundedImpact(db, {
       nodeId: String(args.node ?? args._[0] ?? ""),
       depth: Number(args.depth ?? 3),
       budget: Number(args.budget ?? 2000),
       cursor: args.cursor,
       freshness,
     }));
-    printGraphPayload(payload, args);
+    printGraphPayload(attach(payload), args);
     return 0;
   }
   if (subcommand === "flows") {
-    const generation = readFreshGraph(root, outDir);
-    const inventory = graphFlowInventory(generation, { complete: Boolean(args.complete), maxFlows: args.limit ? Number(args.limit) : undefined });
+    const generation = readFreshGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) });
+    const inventory = attach(graphFlowInventory(generation, { complete: Boolean(args.complete), maxFlows: args.limit ? Number(args.limit) : undefined }));
     writeJson(join(root, outDir, "flows.json"), inventory);
     console.log(JSON.stringify(inventory, null, 2));
     return 0;
@@ -2187,6 +2251,8 @@ function orientPayload(root, outDir, args = {}) {
     entrypoint: map.entrypoint ?? manifest.entrypoint ?? null,
     topCircuits,
     candidates: candidateSet,
+    ...(args.freshnessReceipt ? { freshnessReceipt: args.freshnessReceipt } : {}),
+    ...(args.freshnessReceipt?.barrierResult !== "caught_up" ? { stale: true } : {}),
   };
 }
 
@@ -2339,7 +2405,7 @@ function withFreshIndexedGraph(root, outDir, options = {}, callback) {
   const expectedMatchesManifest = Boolean(expectedGeneration)
     && status.manifest?.complete === true
     && status.manifest?.generationId === expectedGeneration;
-  if (status.state !== "fresh" && !expectedMatchesManifest) {
+  if (status.state !== "fresh" && !expectedMatchesManifest && !options.allowStale) {
     throw graphReadError("graph_rebuild_required", `Graph is ${status.state}; run blueprint build`, { state: status.state });
   }
   const dbPath = join(resolve(root, outDir), "graph", "graph.db");
@@ -2761,7 +2827,12 @@ async function main() {
   }
   if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json), full: Boolean(args.full) });
   if (command === "orient") {
-    console.log(JSON.stringify(orientPayload(root, outDir, args), null, 2));
+    const freshnessReceipt = await queryFreshnessBarrier(root, outDir, args);
+    if (freshnessReceipt.barrierResult !== "caught_up" && !args["allow-stale"]) {
+      console.error(JSON.stringify({ error: "stale_blocked", barrier: freshnessReceipt }, null, 2));
+      return 3;
+    }
+    console.log(JSON.stringify(orientPayload(root, outDir, { ...args, freshnessReceipt }), null, 2));
     return 0;
   }
   if (command === "reconcile") return await runReconcile(root, outDir, args);

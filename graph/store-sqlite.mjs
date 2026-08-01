@@ -275,6 +275,23 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_event_journal_applied ON event_journal(applied, seq);
     `);
   },
+  // Migration 6 — query-time freshness barrier receipts.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS generation_receipt (
+        receipt_id TEXT PRIMARY KEY,
+        created_ms INTEGER NOT NULL,
+        repo_root TEXT NOT NULL,
+        generation_id TEXT,
+        source_clock INTEGER NOT NULL,
+        applied_clock INTEGER NOT NULL,
+        event_gap INTEGER NOT NULL,
+        barrier_result TEXT NOT NULL CHECK (barrier_result IN ('caught_up','gap_blocked','timeout')),
+        details_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_generation_receipt_created ON generation_receipt(created_ms);
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -590,6 +607,38 @@ export function collectDependents(db, path, options = {}) {
 
 export function dependentsOf(db, path, maxHops = 2, maxFiles = 500) {
   return collectDependents(db, path, { maxHops, maxFiles }).paths;
+}
+
+export function insertGenerationReceipt(db, receipt) {
+  db.prepare(`INSERT INTO generation_receipt(receipt_id, created_ms, repo_root, generation_id, source_clock, applied_clock, event_gap, barrier_result, details_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    receipt.receiptId,
+    receipt.createdMs,
+    receipt.repoRoot,
+    receipt.generationId ?? null,
+    receipt.sourceClock,
+    receipt.appliedClock,
+    receipt.eventGap ? 1 : 0,
+    receipt.barrierResult,
+    JSON.stringify(receipt.details ?? {}),
+  );
+  return receipt;
+}
+
+export function loadGenerationReceipt(db, receiptId) {
+  const row = db.prepare("SELECT * FROM generation_receipt WHERE receipt_id=?").get(receiptId);
+  if (!row) return null;
+  return {
+    receiptId: row.receipt_id,
+    createdMs: row.created_ms,
+    repoRoot: row.repo_root,
+    generationId: row.generation_id,
+    sourceClock: row.source_clock,
+    appliedClock: row.applied_clock,
+    eventGap: Boolean(row.event_gap),
+    barrierResult: row.barrier_result,
+    details: JSON.parse(row.details_json),
+  };
 }
 
 /**
