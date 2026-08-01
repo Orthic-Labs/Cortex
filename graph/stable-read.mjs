@@ -11,15 +11,16 @@ function changed(before, after) {
   return before.size !== after.size || before.mtimeMs !== after.mtimeMs;
 }
 
-export function stableRead(absPath) {
-  const statBefore = statSync(absPath);
-  let bytes = readFileSync(absPath);
-  let statAfter = statSync(absPath);
-  let unstable = false;
-  if (changed(statBefore, statAfter)) {
-    bytes = readFileSync(absPath);
-    statAfter = statSync(absPath);
-    unstable = changed(statBefore, statAfter) || changed(statAfter, statBefore);
+export function stableRead(absPath, fs = { readFileSync, statSync }) {
+  let statBefore = fs.statSync(absPath);
+  let bytes = fs.readFileSync(absPath);
+  let statAfter = fs.statSync(absPath);
+  let unstable = changed(statBefore, statAfter);
+  if (unstable) {
+    statBefore = fs.statSync(absPath);
+    bytes = fs.readFileSync(absPath);
+    statAfter = fs.statSync(absPath);
+    unstable = changed(statBefore, statAfter);
   }
   return {
     bytes,

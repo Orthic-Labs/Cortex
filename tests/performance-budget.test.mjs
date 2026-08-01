@@ -41,7 +41,7 @@ test("PR11 performance budgets stay within four-times CI slack", async () => {
 
     const source = join(repo, "src/service.ts");
     writeFileSync(source, `${readFileSync(source, "utf8")}\nexport const performanceProbe = true;\n`);
-    const delta = elapsed(() => new CortexRepositoryWorker({ root: repo }).ingest("src/service.ts"));
+    const delta = await elapsedAsync(() => new CortexRepositoryWorker({ root: repo }).ingest("src/service.ts"));
     assert.equal(delta.value.applied, true);
     const orient = elapsed(() => run(repo, ["orient", "--query", "placeOrder", "--json"]));
     assert.equal(orient.value.status, 0, orient.value.stderr);

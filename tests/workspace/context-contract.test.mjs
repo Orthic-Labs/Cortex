@@ -13,7 +13,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = findWorkspaceRoot(HERE, { required: false });
 const SCHEMA_PATH = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
 const FIXTURES = ROOT ? path.join(ROOT, "tools/tests/context_contracts/fixtures") : null;
-const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
+import { PYTHON } from "../python-test-runtime.mjs";
 const CONTRACT_FIXTURES = [
   ["ContextCandidateSet", "context-candidate-set-v1.json"],
   ["ContextPacket", "context-packet-v1.json"],

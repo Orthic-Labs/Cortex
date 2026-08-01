@@ -13,7 +13,7 @@ const BLUEPRINT = path.resolve(HERE, "../..");
 const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
 const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
 const SCHEMA = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
-const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
+import { PYTHON } from "../python-test-runtime.mjs";
 const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
 
 test("graph candidates CLI validates as ContextCandidateSet v1", { skip: workspaceSkip }, () => {

@@ -10,8 +10,9 @@ import {
   recordArtifactState,
 } from "./store-sqlite.mjs";
 import { incrementTelemetry } from "../lib/telemetry.mjs";
+import { STATIC_PROVIDER } from "./provider-identity.mjs";
 
-export const STRUCTURAL_PROVIDER = Object.freeze({ id: "lexical", version: "repo-local-delta-v1" });
+export const STRUCTURAL_PROVIDER = Object.freeze({ id: "lexical", version: STATIC_PROVIDER.version });
 export const DOC_PROVIDER = Object.freeze({ id: "doctruth", version: "repo-local-doc-v1", freshnessDomain: "doc" });
 export const MAX_HOPS = 2;
 export const MAX_DEPENDENT_FILES = 500;
@@ -42,11 +43,22 @@ function setClock(db, key, value) {
   db.prepare("INSERT INTO watch_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value));
 }
 
-function markDomainPending(db, domain) {
-  const current = String(db.prepare("SELECT value FROM watch_state WHERE key='domains_pending'").get()?.value ?? "")
-    .split(",").map((item) => item.trim()).filter(Boolean);
+export function readPendingDomains(db) {
+  ensureWatchState(db);
+  return String(db.prepare("SELECT value FROM watch_state WHERE key='domains_pending'").get()?.value ?? "")
+    .split(",").map((item) => item.trim()).filter(Boolean).sort();
+}
+
+export function markDomainPending(db, domain) {
+  const current = readPendingDomains(db);
   if (!current.includes(domain)) current.push(domain);
   setClock(db, "domains_pending", current.sort().join(","));
+}
+
+export function clearDomainPending(db, domain) {
+  const next = readPendingDomains(db).filter((item) => item !== domain);
+  if (next.length) setClock(db, "domains_pending", next.join(","));
+  else db.prepare("DELETE FROM watch_state WHERE key='domains_pending'").run();
 }
 
 function isDocPath(path) {
@@ -84,66 +96,83 @@ function writeJsonAtomic(path, value, writer = null) {
   renameSync(temp, path);
 }
 
+function restoreTextAtomic(path, text) {
+  const temp = `${path}.rollback-${process.pid}`;
+  writeFileSync(temp, text);
+  renameSync(temp, path);
+}
+
 function replaceDocumentArtifacts(db, delta, generationId, options = {}) {
   const root = options.repoRoot;
   const outDir = options.outDir ?? ".agent";
-  const document = delta.document;
-  if (!root || !document) return;
+  if (!root) return;
+  const deleting = delta.eventKind === "delete";
+  const document = deleting ? { claims: [], codeRefs: [], lifecycle: null, contentHash: "tombstone" } : (delta.document ?? { claims: [], codeRefs: [], lifecycle: null });
   const artifactRoot = join(root, outDir);
-  const source = normalizePath(delta.path);
+  const oldSource = normalizePath(delta.path);
+  const source = delta.eventKind === "rename" ? normalizePath(delta.renameTo ?? delta.path) : oldSource;
   const claimsPath = join(artifactRoot, "claims.json");
   const stalePath = join(artifactRoot, "stale.json");
   const queuePath = join(artifactRoot, "queue.json");
-  const fingerprint = normalizeDigest(delta.contentDigest ?? document.contentHash ?? "");
+  const originals = new Map([claimsPath, stalePath, queuePath]
+    .filter((path) => existsSync(path))
+    .map((path) => [path, readFileSync(path, "utf8")]));
+  const fingerprint = normalizeDigest(delta.contentDigest ?? document.contentHash ?? "tombstone");
   const claims = document.claims ?? [];
   const staleClaims = claims.filter((claim) => claim.status === "stale");
   const stale = readJsonIfPresent(stalePath, { missingReferences: [], staleClaims: [], invalidSupersessionMarkers: [] });
   const nextStale = {
     ...stale,
     missingReferences: [
-      ...(stale.missingReferences ?? []).filter((item) => item.source !== source),
+      ...(stale.missingReferences ?? []).filter((item) => ![oldSource, source].includes(item.source)),
       ...(document.codeRefs ?? []).filter((ref) => ref.exists === false).map((ref) => ({ source, path: ref.path })),
     ],
-    staleClaims: replaceBySource(stale.staleClaims, source, staleClaims),
+    staleClaims: replaceBySource(replaceBySource(stale.staleClaims, oldSource, []), source, staleClaims),
     invalidSupersessionMarkers: [
-      ...(stale.invalidSupersessionMarkers ?? []).filter((item) => item.source !== source),
+      ...(stale.invalidSupersessionMarkers ?? []).filter((item) => ![oldSource, source].includes(item.source)),
       ...(document.lifecycle?.invalidMarker ? [{ source, ...document.lifecycle.invalidMarker }] : []),
     ],
   };
-  if (existsSync(claimsPath)) {
-    writeJsonAtomic(claimsPath, replaceBySource(readJsonIfPresent(claimsPath, []), source, claims), options.writeJsonAtomic);
-    recordArtifactState(db, "claims.json", generationId, fingerprint);
-  }
-  if (existsSync(stalePath)) {
-    writeJsonAtomic(stalePath, nextStale, options.writeJsonAtomic);
-    recordArtifactState(db, "stale.json", generationId, fingerprint);
-  }
-  if (existsSync(queuePath)) {
-    const candidateFiles = (document.codeRefs ?? []).filter((ref) => ref.exists !== false).map((ref) => ref.path);
-    const queueClaims = claims.map((claim) => ({
-      id: claim.id,
-      source: claim.source,
-      line: claim.line,
-      status: claim.status,
-      text: claim.text,
-      candidateFiles,
-    }));
-    writeJsonAtomic(queuePath, {
-      ...readJsonIfPresent(queuePath, {}),
-      claims: replaceBySource(readJsonIfPresent(queuePath, {}).claims, source, queueClaims),
-    }, options.writeJsonAtomic);
-    recordArtifactState(db, "queue.json", generationId, fingerprint);
+  try {
+    if (existsSync(claimsPath)) {
+      writeJsonAtomic(claimsPath, replaceBySource(replaceBySource(readJsonIfPresent(claimsPath, []), oldSource, []), source, claims), options.writeJsonAtomic);
+      recordArtifactState(db, "claims.json", generationId, fingerprint);
+    }
+    if (existsSync(stalePath)) {
+      writeJsonAtomic(stalePath, nextStale, options.writeJsonAtomic);
+      recordArtifactState(db, "stale.json", generationId, fingerprint);
+    }
+    if (existsSync(queuePath)) {
+      const candidateFiles = (document.codeRefs ?? []).filter((ref) => ref.exists !== false).map((ref) => ref.path);
+      const queueClaims = claims.map((claim) => ({
+        id: claim.id,
+        source: claim.source,
+        line: claim.line,
+        status: claim.status,
+        text: claim.text,
+        candidateFiles,
+      }));
+      writeJsonAtomic(queuePath, {
+        ...readJsonIfPresent(queuePath, {}),
+        claims: replaceBySource(replaceBySource(readJsonIfPresent(queuePath, {}).claims, oldSource, []), source, queueClaims),
+      }, options.writeJsonAtomic);
+      recordArtifactState(db, "queue.json", generationId, fingerprint);
+    }
+  } catch (error) {
+    for (const [path, text] of originals) restoreTextAtomic(path, text);
+    throw error;
   }
 }
 
-function fileNode(node, generationId, digest) {
+function fileNode(node, generationId, digest, provider, fileReport = null) {
+  const extra = Object.fromEntries(Object.entries(node).filter(([key]) => !["id", "kind", "labels", "name", "qualifiedName", "path", "confidence", "evidence"].includes(key)));
   return {
     path: node.path,
     contentHash: String(digest).replace(/^xxh128:/, ""),
-    language: null,
-    provider: STRUCTURAL_PROVIDER.id,
-    parseStatus: null,
-    errorNodeCount: null,
+    language: fileReport?.language ?? null,
+    provider: fileReport && Object.hasOwn(fileReport, "provider") ? fileReport.provider : provider.id,
+    parseStatus: fileReport?.parseStatus ?? null,
+    errorNodeCount: fileReport?.errorNodeCount ?? null,
     generationId,
     nodeId: node.id,
     labels: JSON.stringify(node.labels ?? ["File"]),
@@ -151,14 +180,15 @@ function fileNode(node, generationId, digest) {
     qualifiedName: node.qualifiedName ?? node.path,
     confidence: node.confidence ?? 1,
     evidence: JSON.stringify(node.evidence ?? []),
-    extra: null,
+    extra: Object.keys(extra).length ? JSON.stringify(extra) : null,
   };
 }
 
-function insertParsedFacts(db, parsed, generationId, sourceDigest, provider) {
+function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fileReport = null) {
   const insertFile = db.prepare(`INSERT INTO files(path, content_hash, language, provider, parse_status, error_node_count, generation_id, node_id, labels, name, qualified_name, confidence, evidence, extra)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, provider=excluded.provider, generation_id=excluded.generation_id,
+    ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, language=excluded.language, provider=excluded.provider,
+      parse_status=excluded.parse_status, error_node_count=excluded.error_node_count, generation_id=excluded.generation_id,
       node_id=excluded.node_id, labels=excluded.labels, name=excluded.name, qualified_name=excluded.qualified_name,
       confidence=excluded.confidence, evidence=excluded.evidence, extra=excluded.extra`);
   const insertSymbol = db.prepare(`INSERT INTO symbols(id, kind, labels, name, qualified_name, path, confidence, evidence, generation_id, extra)
@@ -171,22 +201,34 @@ function insertParsedFacts(db, parsed, generationId, sourceDigest, provider) {
       resolved=excluded.resolved, specifier=excluded.specifier, evidence=excluded.evidence, generation_id=excluded.generation_id,
       confidence_tier=excluded.confidence_tier, extra=excluded.extra`);
   const insertOwner = db.prepare("INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail) VALUES (?, ?, ?, ?, ?, ?, 'structural', ?)");
+  const updateFileReport = db.prepare(`UPDATE files SET content_hash=?, language=?, provider=?, parse_status=?, error_node_count=?, generation_id=? WHERE path=?`);
   const nodes = parsed?.nodes ?? [];
   for (const node of nodes) {
+    let ownsFact = true;
     if (node.kind === "file") {
-      const row = fileNode(node, generationId, sourceDigest);
-      insertFile.run(row.path, row.contentHash, row.language, row.provider, row.parseStatus, row.errorNodeCount, row.generationId, row.nodeId, row.labels, row.name, row.qualifiedName, row.confidence, row.evidence, row.extra);
+      const row = fileNode(node, generationId, sourceDigest, provider, fileReport);
+      if (provider.id !== "lexical" && db.prepare("SELECT 1 FROM files WHERE path=?").get(row.path)) {
+        updateFileReport.run(row.contentHash, row.language, row.provider, row.parseStatus, row.errorNodeCount, row.generationId, row.path);
+        ownsFact = false;
+      } else {
+        insertFile.run(row.path, row.contentHash, row.language, row.provider, row.parseStatus, row.errorNodeCount, row.generationId, row.nodeId, row.labels, row.name, row.qualifiedName, row.confidence, row.evidence, row.extra);
+      }
     } else {
-      insertSymbol.run(node.id, node.kind, JSON.stringify(node.labels ?? []), node.name ?? "", node.qualifiedName ?? node.name ?? "", node.path, node.confidence ?? 1, JSON.stringify(node.evidence ?? []), generationId, null);
+      const exists = provider.id !== "lexical" && db.prepare("SELECT 1 FROM symbols WHERE id=?").get(node.id);
+      if (!exists) {
+        const extra = Object.fromEntries(Object.entries(node).filter(([key]) => !["id", "kind", "labels", "name", "qualifiedName", "path", "confidence", "evidence"].includes(key)));
+        insertSymbol.run(node.id, node.kind, JSON.stringify(node.labels ?? []), node.name ?? "", node.qualifiedName ?? node.name ?? "", node.path, node.confidence ?? 1, JSON.stringify(node.evidence ?? []), generationId, Object.keys(extra).length ? JSON.stringify(extra) : null);
+      } else ownsFact = false;
     }
-    insertOwner.run(node.id, "node", node.path, sourceDigest, provider.id, provider.version, node.kind);
+    if (ownsFact) insertOwner.run(node.id, "node", node.path, sourceDigest, provider.id, provider.version, node.kind);
   }
   for (const edge of parsed?.edges ?? []) {
     const indexed = new Set(["id", "kind", "source", "target", "confidence", "confidenceTier", "evidence"]);
     const extra = Object.fromEntries(Object.entries(edge).filter(([key]) => !indexed.has(key)));
-    insertEdge.run(edge.id, edge.kind, edge.source, edge.target ?? null, edge.confidence ?? 1, edge.resolved === false ? 0 : 1, edge.specifier ?? null, JSON.stringify(edge.evidence ?? []), generationId, edge.confidenceTier ?? null, Object.keys(extra).length ? JSON.stringify(extra) : null);
+    const exists = provider.id !== "lexical" && db.prepare("SELECT 1 FROM edges WHERE id=?").get(edge.id);
+    if (!exists) insertEdge.run(edge.id, edge.kind, edge.source, edge.target ?? null, edge.confidence ?? 1, edge.resolved === false ? 0 : 1, edge.specifier ?? null, JSON.stringify(edge.evidence ?? []), generationId, edge.confidenceTier ?? null, Object.keys(extra).length ? JSON.stringify(extra) : null);
     const sourceNode = nodes.find((node) => node.id === edge.source);
-    if (sourceNode) insertOwner.run(edge.id, "edge", sourceNode.path, sourceDigest, provider.id, provider.version, edge.kind);
+    if (sourceNode && !exists) insertOwner.run(edge.id, "edge", sourceNode.path, sourceDigest, provider.id, provider.version, edge.kind);
   }
 }
 
@@ -217,43 +259,76 @@ export function applyFileDelta(db, delta, options = {}) {
   const isDocumentDelta = delta.domain === "doc" || provider.id === DOC_PROVIDER.id || Boolean(delta.document) || isDocPath(path);
   const contentDigestValue = delta.contentDigest == null ? null : normalizeDigest(delta.contentDigest);
   const prior = loadFileState(db, path);
-  if (contentDigestValue && prior?.content_digest === contentDigestValue && eventKind !== "delete" && eventKind !== "rename") return { noop: true, path, appliedClock: prior.applied_clock, rootDigest: null };
   ensureWatchState(db);
   const previousApplied = clock(db, "applied_clock", 0);
   const appliedClock = Number(delta.sourceClock ?? previousApplied + 1);
   const newPath = eventKind === "rename" ? normalizePath(delta.renameTo ?? delta.parsed?.nodes?.find((node) => node.kind === "file")?.path ?? path) : path;
+  const factBatches = Array.isArray(delta.factBatches) && delta.factBatches.length
+    ? delta.factBatches
+    : (delta.parsed ? [{ provider, parsed: delta.parsed, fileReport: delta.fileReport ?? null }] : []);
   const ownsTransaction = options.inTransaction !== true;
   if (ownsTransaction) db.exec("BEGIN IMMEDIATE");
   try {
-    const oldOwners = db.prepare("SELECT fact_id, fact_kind FROM fact_owner WHERE source_path = ? AND (? OR provider_id = ?)").all(path, isDocumentDelta ? 1 : 0, provider.id);
+    if (contentDigestValue && prior?.content_digest === contentDigestValue && !["delete", "rename", "repair"].includes(eventKind)) {
+      const acknowledgedClock = Math.max(previousApplied, appliedClock);
+      setClock(db, "applied_clock", acknowledgedClock);
+      db.prepare(`UPDATE file_state SET applied_clock=?, last_event_seq=COALESCE(?, last_event_seq),
+        size=COALESCE(?, size), mtime_ms=COALESCE(?, mtime_ms), file_identity=COALESCE(?, file_identity) WHERE path=?`)
+        .run(acknowledgedClock, delta.journalSeq ?? null, delta.size ?? null, delta.mtimeMs ?? null, delta.fileIdentity ?? null, path);
+      if (delta.journalSeq && hasTable(db, "event_journal")) {
+        db.prepare("UPDATE event_journal SET applied = 1, applied_clock = ? WHERE seq = ?").run(acknowledgedClock, delta.journalSeq);
+      }
+      options.beforeCommit?.(db);
+      if (ownsTransaction) db.exec("COMMIT");
+      return {
+        noop: true,
+        applied: true,
+        path,
+        appliedClock: acknowledgedClock,
+        rootDigest: db.prepare("SELECT digest FROM generation_leaf WHERE path = '' AND kind = 'dir'").get()?.digest ?? null,
+      };
+    }
+    const structuralProviders = [...new Set(factBatches.map((batch) => batch.provider?.id).filter(Boolean))];
+    const oldOwners = (isDocumentDelta || eventKind === "delete" || eventKind === "rename" || structuralProviders.length === 0)
+      ? db.prepare("SELECT fact_id, fact_kind FROM fact_owner WHERE source_path = ?").all(path)
+      : db.prepare(`SELECT fact_id, fact_kind FROM fact_owner WHERE source_path = ? AND provider_id IN (${structuralProviders.map(() => "?").join(",")})`).all(path, ...structuralProviders);
     const oldNodeIds = oldOwners.filter((owner) => owner.fact_kind === "node").map((owner) => owner.fact_id);
     if (eventKind === "delete" || eventKind === "rename") {
       for (const nodeId of oldNodeIds) db.prepare("UPDATE edges SET resolved = 0 WHERE target = ?").run(nodeId);
-      deleteFactsByOwner(db, path, isDocumentDelta ? provider.id : null);
+      deleteFactsByOwner(db, path, null);
       db.prepare("DELETE FROM files WHERE path = ?").run(path);
       db.prepare("DELETE FROM file_state WHERE path = ?").run(path);
-      if (isDocumentDelta) db.prepare("DELETE FROM fact_owner WHERE source_path = ? AND provider_id = ?").run(path, provider.id);
-      if (isDocumentDelta) updateLeafChain(db, path, null);
-    } else if (isDocumentDelta) {
-      db.prepare("DELETE FROM fact_owner WHERE source_path = ? AND provider_id = ?").run(path, provider.id);
+      updateLeafChain(db, path, null);
+    }
+    if (isDocumentDelta && eventKind !== "delete") {
+      const generationId = getGenerationEnvelope(db)?.manifest?.generationId;
+      for (const batch of factBatches) {
+        insertParsedFacts(db, batch.parsed, generationId, contentDigestValue, batch.provider, batch.fileReport ?? { provider: null });
+      }
+      db.prepare("DELETE FROM fact_owner WHERE source_path = ? AND provider_id = ?").run(newPath, provider.id);
       for (const claim of delta.document?.claims ?? []) {
         db.prepare(`INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail)
           VALUES (?, 'node', ?, ?, ?, ?, 'doc', 'claim')`)
-          .run(claim.id, path, contentDigestValue, provider.id, provider.version);
+          .run(claim.id, newPath, contentDigestValue, provider.id, provider.version);
       }
-      updateLeafChain(db, path, contentDigestValue);
-      updateFileState(db, path, contentDigestValue, appliedClock, delta.fileIdentity ?? null, delta.size ?? 0, delta.mtimeMs ?? null, delta.journalSeq ?? null);
-    } else {
-      deleteFactsByOwner(db, path, provider.id);
+      updateLeafChain(db, newPath, contentDigestValue);
+      updateFileState(db, newPath, contentDigestValue, appliedClock, delta.fileIdentity ?? null, delta.size ?? 0, delta.mtimeMs ?? null, delta.journalSeq ?? null);
+    } else if (eventKind !== "delete" && eventKind !== "rename") {
+      for (const providerId of structuralProviders) deleteFactsByOwner(db, path, providerId);
     }
     db.prepare("DELETE FROM dependency_index WHERE source_path = ? OR dependent_path = ?").run(path, path);
-    if (!isDocumentDelta && eventKind !== "delete" && delta.parsed) {
+    if (!isDocumentDelta && eventKind !== "delete" && factBatches.length) {
       const rootBefore = getGenerationEnvelope(db);
       const rootDigest = updateLeafChain(db, newPath, contentDigestValue);
       const envelope = resealGenerationIdentityDelta(rootBefore, rootDigest, appliedClock);
-      insertParsedFacts(db, delta.parsed, envelope.manifest.generationId, contentDigestValue, provider);
-      refreshDependencies(db, newPath, delta.parsed.dependencies);
-      updateFileState(db, newPath, contentDigestValue, appliedClock, delta.fileIdentity ?? null, delta.size ?? delta.parsed.size ?? 0, delta.mtimeMs ?? null, delta.journalSeq ?? null);
+      const dependencies = [];
+      for (const batch of factBatches) {
+        insertParsedFacts(db, batch.parsed, envelope.manifest.generationId, contentDigestValue, batch.provider, batch.fileReport ?? null);
+        dependencies.push(...(batch.parsed?.dependencies ?? []));
+      }
+      const uniqueDependencies = [...new Map(dependencies.map((item) => [`${item.sourcePath}:${item.dependentPath}:${item.reason}`, item])).values()];
+      refreshDependencies(db, newPath, uniqueDependencies);
+      updateFileState(db, newPath, contentDigestValue, appliedClock, delta.fileIdentity ?? null, delta.size ?? factBatches[0]?.parsed?.size ?? 0, delta.mtimeMs ?? null, delta.journalSeq ?? null);
       Object.assign(envelope.manifest, refreshManifestCounts(envelope.manifest, db));
       envelope.manifest.manifestDigest = computeManifestDigest(envelope.manifest, envelope.sourceObservation);
       db.prepare("UPDATE generation SET value = ? WHERE key = 'manifest'").run(JSON.stringify(envelope.manifest));
@@ -265,7 +340,7 @@ export function applyFileDelta(db, delta, options = {}) {
       resealed.manifest.manifestDigest = computeManifestDigest(resealed.manifest, resealed.sourceObservation);
       db.prepare("UPDATE generation SET value = ? WHERE key = 'manifest'").run(JSON.stringify(resealed.manifest));
     }
-    if (isDocumentDelta && eventKind !== "delete") {
+    if (isDocumentDelta) {
       const generationId = getGenerationEnvelope(db)?.manifest?.generationId;
       replaceDocumentArtifacts(db, delta, generationId, options);
       markDomainPending(db, "doc");
@@ -274,7 +349,8 @@ export function applyFileDelta(db, delta, options = {}) {
     if (delta.journalSeq && hasTable(db, "event_journal")) {
       db.prepare("UPDATE event_journal SET applied = 1, applied_clock = ? WHERE seq = ?").run(appliedClock, delta.journalSeq);
     }
-    incrementTelemetry(db, "deltas_applied");
+    if (eventKind !== "repair") incrementTelemetry(db, "deltas_applied");
+    options.beforeCommit?.(db);
     if (ownsTransaction) db.exec("COMMIT");
     return { applied: true, path, appliedClock, rootDigest: db.prepare("SELECT digest FROM generation_leaf WHERE path = '' AND kind = 'dir'").get()?.digest ?? null };
   } catch (error) {

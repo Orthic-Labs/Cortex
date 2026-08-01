@@ -1110,8 +1110,10 @@ export async function buildTreeSitterGraph(files) {
     }
   }
 
-  const cleanNodes = dedupeBy(nodes, (node) => node.id);
-  const cleanEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier}:${item.evidence?.[0]?.path ?? ""}`);
+  const factProvider = { id: "treesitter", version: PROVIDER.version };
+  const cleanNodes = dedupeBy(nodes, (node) => node.id).map((node) => ({ ...node, factProvider }));
+  const cleanEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier}:${item.evidence?.[0]?.path ?? ""}`)
+    .map((edge) => ({ ...edge, factProvider }));
 
   return {
     schemaVersion: 1,
@@ -1119,6 +1121,92 @@ export async function buildTreeSitterGraph(files) {
     nodes: cleanNodes,
     edges: cleanEdges,
     fileReports,
+  };
+}
+
+export async function buildIncrementalTreeSitterFacts(file, context = {}) {
+  const current = { ...file, path: normalizePath(file.path) };
+  const report = await extractFile(current);
+  const extension = current.path.includes(".") ? current.path.slice(current.path.lastIndexOf(".") + 1).toLowerCase() : "";
+  const dialect = LANGUAGES[extension]?.dialect;
+  const filePathSet = new Set([...(context.filePaths ?? []), current.path].map(normalizePath));
+  const nodes = [...report.nodes];
+  const edges = [...report.edges];
+  const dependencies = [];
+  const imported = new Set();
+
+  for (const imp of report.rawImports ?? []) {
+    const targetPath = dialect ? resolveImportSpecifier(current.path, imp, dialect, filePathSet) : null;
+    if (targetPath) {
+      imported.add(targetPath);
+      dependencies.push({ sourcePath: targetPath, dependentPath: current.path, reason: "import" });
+    }
+    edges.push(importEdgeRecord(`file:${current.path}`, targetPath ? `file:${targetPath}` : null, imp.specifier, Boolean(targetPath), [imp.evidence]));
+  }
+
+  const symbols = [
+    ...(context.symbols ?? []).filter((symbol) => normalizePath(symbol.path) !== current.path),
+    ...report.nodes.slice(1),
+  ];
+  const symbolsByShortName = new Map();
+  for (const symbol of symbols) {
+    const shortName = String(symbol.qualifiedName ?? symbol.name ?? "").split(".").at(-1);
+    if (!shortName) continue;
+    const list = symbolsByShortName.get(shortName) ?? [];
+    list.push(symbol);
+    symbolsByShortName.set(shortName, list);
+  }
+  const currentSymbols = new Map(report.nodes.slice(1).map((node) => [node.id, node]));
+  for (const call of report.rawCalls ?? []) {
+    const candidates = (symbolsByShortName.get(call.calleeName) ?? [])
+      .filter((candidate) => candidate.id !== call.sourceId && (candidate.labels ?? []).some((label) => label === "Function" || label === "Method"));
+    const sameFile = candidates.filter((candidate) => normalizePath(candidate.path) === current.path);
+    const importedMatches = candidates.filter((candidate) => imported.has(normalizePath(candidate.path)));
+    const uniqueFallback = candidates.length === 1 ? candidates : [];
+    const [targets, tier] = sameFile.length
+      ? [sameFile, EDGE_CONFIDENCE_TIERS.SAME_FILE_LEXICAL]
+      : importedMatches.length
+        ? [importedMatches, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC]
+        : uniqueFallback.length
+          ? [uniqueFallback, EDGE_CONFIDENCE_TIERS.CROSS_FILE_HEURISTIC]
+          : [[], null];
+    const sourceNode = currentSymbols.get(call.sourceId);
+    if (!sourceNode) continue;
+    const kind = call.isTest ? "TESTS" : "CALLS";
+    for (const target of targets) edges.push(edgeRecord(kind, sourceNode.id, target.id, sourceNode.evidence, tier));
+    if (targets.length === 0 && candidates.length > 1) {
+      edges.push({
+        id: `edge:${kind}:${sourceNode.id}->unresolved:${call.calleeName}`,
+        kind,
+        source: sourceNode.id,
+        target: null,
+        confidence: tierConfidence(EDGE_CONFIDENCE_TIERS.UNRESOLVED),
+        confidenceTier: EDGE_CONFIDENCE_TIERS.UNRESOLVED,
+        resolved: false,
+        specifier: call.calleeName,
+        reason: `${candidates.length} candidate symbol(s) named "${call.calleeName}" exist repo-wide; none is in the same file or an imported file`,
+        evidence: sourceNode.evidence,
+      });
+    }
+  }
+
+  const factProvider = { id: "treesitter", version: PROVIDER.version };
+  return {
+    provider: factProvider,
+    parsed: {
+      nodes: dedupeBy(nodes, (node) => node.id).map((node) => ({ ...node, factProvider })),
+      edges: dedupeBy(edges, (edge) => edge.id).map((edge) => ({ ...edge, factProvider })),
+      dependencies: dedupeBy(dependencies, (item) => `${item.sourcePath}:${item.dependentPath}:${item.reason}`),
+    },
+    fileReport: {
+      path: report.path,
+      language: report.language,
+      provider: report.provider,
+      grammar: report.grammar,
+      parseStatus: report.parseStatus,
+      errorNodeCount: report.errorNodeCount,
+      ...(report.error ? { error: report.error } : {}),
+    },
   };
 }
 
@@ -1196,6 +1284,7 @@ export async function augmentGeneration(generation, repoRoot) {
     summary.parsedFiles += 1;
     if (report.parseStatus in summary.parseStatus) summary.parseStatus[report.parseStatus] += 1;
   }
+  generation.fileReports = graph.fileReports;
   generation.augmentation = { treesitter: summary };
   return { generation, summary };
 }

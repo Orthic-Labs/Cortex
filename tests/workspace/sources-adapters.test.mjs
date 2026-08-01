@@ -26,7 +26,7 @@ const ROOT = findWorkspaceRoot(HERE, { required: false });
 const BLUEPRINT = path.resolve(HERE, "../..");
 const SCHEMA = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
 const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
-const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
+import { PYTHON } from "../python-test-runtime.mjs";
 
 function validateCandidate(candidate) {
   const script = String.raw`

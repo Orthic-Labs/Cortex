@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, appendFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
-import { parseFileFacts, scanSourcesPublic } from "../graph/static-provider.mjs";
+import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS, STRUCTURAL_PROVIDER } from "../graph/delta-store.mjs";
+import { parseFileFacts } from "../graph/static-provider.mjs";
+import { buildIncrementalTreeSitterFacts, SUPPORTED_EXTENSIONS } from "../graph/treesitter-provider.mjs";
 import { extractDoc, isDoc, loadConfig } from "../scripts/blueprint.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
-import { collectDependents, closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { collectDependents, closeStore, listFileMetadata, listSymbolMetadata, openStore } from "../graph/store-sqlite.mjs";
 import { eventsSince, startWatch, writeSnapshot } from "./adapter.mjs";
 
 const REPAIR_BATCH = 50;
@@ -17,6 +18,13 @@ function canonicalRoot(value) { const root = resolve(value); try { return realpa
 function dbPath(root, outDir) { return join(resolve(root), outDir, "graph", "graph.db"); }
 function stateValue(db, key, fallback = null) { return db.prepare("SELECT value FROM watch_state WHERE key=?").get(key)?.value ?? fallback; }
 function setState(db, key, value) { db.prepare("INSERT INTO watch_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value)); }
+function sourceFilesFromStore(db) {
+  return listFileMetadata(db).map((file) => ({
+    path: file.path,
+    contentHash: String(file.contentDigest ?? "").replace(/^xxh128:/, ""),
+    size: Number(file.size ?? 0),
+  }));
+}
 
 export function appendWatchEvents(db, events) {
   let clock = Number(stateValue(db, "source_clock", 0));
@@ -35,12 +43,12 @@ export function appendWatchEvents(db, events) {
   } catch (error) { db.exec("ROLLBACK"); throw error; }
 }
 
-function descriptorFor(root, sourceFiles, path, renameTo = null) {
+function descriptorFor(root, sourceFiles, path, renameTo = null, readStable = stableRead) {
   const normalized = normalizePath(path);
   const target = normalizePath(renameTo ?? normalized);
   const absolute = resolve(root, target);
   if (!existsSync(absolute)) return null;
-  const read = stableRead(absolute);
+  const read = readStable(absolute);
   const text = read.bytes.toString("utf8");
   const descriptor = {
     absolutePath: absolute,
@@ -53,25 +61,36 @@ function descriptorFor(root, sourceFiles, path, renameTo = null) {
   return { descriptor, read, files: sourceFiles.filter((file) => ![normalized, target].includes(normalizePath(file.path))).concat(descriptor) };
 }
 
-function deltaFor(root, sourceFiles, event) {
+async function deltaFor(db, root, event, readStable = stableRead) {
+  const sourceFiles = sourceFilesFromStore(db);
   const normalized = normalizePath(event.path);
   const target = normalizePath(event.renameTo ?? normalized);
-  const current = descriptorFor(root, sourceFiles, normalized, event.renameTo);
+  const current = descriptorFor(root, sourceFiles, normalized, event.renameTo, readStable);
   const document = current && isDoc(target)
     ? extractDoc(root, target, new Set(current.files.map((file) => normalizePath(file.path))), loadConfig(root, ".agent"))
     : null;
   const provider = (document || isDoc(normalized) || isDoc(target)) ? DOC_PROVIDER : { id: "lexical", version: "repo-local-delta-v1" };
   if (!current) return { eventKind: event.eventKind === "rename" ? "rename" : "delete", path: normalized, renameTo: event.renameTo ?? null, parsed: null, provider, ...(provider.id === DOC_PROVIDER.id ? { domain: "doc" } : {}) };
+  const lexical = parseFileFacts(root, current.descriptor, { files: current.files, symbols: listSymbolMetadata(db, "lexical") });
+  const extension = target.includes(".") ? target.slice(target.lastIndexOf(".") + 1).toLowerCase() : "";
+  const factBatches = [{ provider: STRUCTURAL_PROVIDER, parsed: lexical }];
+  if (!document && SUPPORTED_EXTENSIONS.includes(extension)) {
+    factBatches.push(await buildIncrementalTreeSitterFacts(current.descriptor, {
+      filePaths: current.files.map((file) => file.path),
+      symbols: listSymbolMetadata(db, "treesitter"),
+    }));
+  }
   return {
     eventKind: event.eventKind,
     path: normalized,
     renameTo: event.renameTo ?? null,
-    parsed: parseFileFacts(root, current.descriptor, { files: current.files }),
+    parsed: lexical,
+    factBatches,
     contentDigest: current.read.contentDigest,
     fileIdentity: current.read.fileIdentity,
     size: current.read.bytes.length,
     mtimeMs: current.read.statAfter.mtimeMs,
-    provider,
+    provider: document ? provider : STRUCTURAL_PROVIDER,
     ...(document ? { domain: "doc", document } : {}),
   };
 }
@@ -81,15 +100,16 @@ function writeRepairState(db, state) {
   else db.prepare("DELETE FROM watch_state WHERE key='repair_truncated'").run();
 }
 
-function applyRepairPaths(db, root, paths, sourceClock, inOuterTransaction) {
+async function applyRepairPaths(db, root, paths, sourceClock, inOuterTransaction, readStable = stableRead) {
   const batches = [];
   for (let index = 0; index < paths.length; index += REPAIR_BATCH) batches.push(paths.slice(index, index + REPAIR_BATCH));
   for (const batch of batches) {
     const ownBatch = !inOuterTransaction;
     if (ownBatch) db.exec("BEGIN IMMEDIATE");
     try {
-      const source = scanSourcesPublic(root, 0, {});
-      for (const path of batch) applyFileDelta(db, deltaFor(root, source.files ?? [], { eventKind: "modify", path }), { inTransaction: true, sourceClock, repoRoot: root, outDir: ".agent" });
+      for (const path of batch) {
+        applyFileDelta(db, { ...await deltaFor(db, root, { eventKind: "repair", path }, readStable), sourceClock }, { inTransaction: true, repoRoot: root, outDir: ".agent" });
+      }
       if (ownBatch) db.exec("COMMIT");
     } catch (error) {
       if (ownBatch) db.exec("ROLLBACK");
@@ -98,14 +118,14 @@ function applyRepairPaths(db, root, paths, sourceClock, inOuterTransaction) {
   }
 }
 
-function applyJournalEvent(db, root, row, maxDependentFiles = MAX_DEPENDENT_FILES) {
-  const source = scanSourcesPublic(root, 0, {});
+async function applyJournalEvent(db, root, row, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead) {
   const closure = collectDependents(db, row.path, { maxHops: MAX_HOPS, maxFiles: maxDependentFiles });
   const sameOuter = closure.paths.length <= REPAIR_BATCH;
   if (sameOuter) db.exec("BEGIN IMMEDIATE");
   try {
-    const base = applyFileDelta(db, { ...deltaFor(root, source.files ?? [], { ...row, renameTo: row.rename_to }), sourceClock: row.source_clock, journalSeq: row.seq }, { inTransaction: sameOuter, repoRoot: root, outDir: ".agent" });
-    if (base.applied && closure.paths.length) applyRepairPaths(db, root, closure.paths, row.source_clock, sameOuter);
+    const event = { eventKind: row.event_kind, path: row.path, renameTo: row.rename_to };
+    const base = applyFileDelta(db, { ...await deltaFor(db, root, event, readStable), sourceClock: row.source_clock, journalSeq: row.seq }, { inTransaction: sameOuter, repoRoot: root, outDir: ".agent" });
+    if (base.applied && !base.noop && closure.paths.length) await applyRepairPaths(db, root, closure.paths, row.source_clock, sameOuter, readStable);
     if (closure.truncated) writeRepairState(db, { path: row.path, remaining: closure.remaining });
     else writeRepairState(db, null);
     db.prepare("UPDATE event_journal SET applied=1, applied_clock=? WHERE seq=?").run(base.appliedClock ?? row.source_clock, row.seq);
@@ -128,19 +148,19 @@ function pendingRows(db, force = false) {
   return [...latest.values()].sort((left, right) => left.seq - right.seq);
 }
 
-export function drainJournal(db, root, { force = true, maxDependentFiles = MAX_DEPENDENT_FILES } = {}) {
+export async function drainJournal(db, root, { force = true, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead } = {}) {
   let applied = 0;
   for (let pass = 0; pass < MAX_DRAIN_PASSES; pass += 1) {
     const rows = pendingRows(db, force);
     if (!rows.length) break;
-    for (const row of rows) { applyJournalEvent(db, root, row, maxDependentFiles); applied += 1; }
+    for (const row of rows) { await applyJournalEvent(db, root, row, maxDependentFiles, readStable); applied += 1; }
     force = true;
   }
   return applied;
 }
 
 export class RepositoryActor extends EventEmitter {
-  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES }) {
+  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead }) {
     super();
     this.root = canonicalRoot(root);
     this.outDir = outDir;
@@ -150,6 +170,7 @@ export class RepositoryActor extends EventEmitter {
     this.autoReconcileOnGap = Boolean(reconcile);
     this.adapter = adapter;
     this.maxDependentFiles = maxDependentFiles;
+    this.readStable = readStable;
     this.subscription = null;
     this.timer = null;
     this.running = false;
@@ -167,7 +188,7 @@ export class RepositoryActor extends EventEmitter {
     const hadSnapshot = existsSync(this.snapshotPath);
     if (hadSnapshot && !this.autoReconcileOnGap) {
       const events = await this.adapter.eventsSince(this.root, this.snapshotPath);
-      if (events.length) { this.ingest(events); this.flush(true); }
+      if (events.length) { this.ingest(events); await this.flush(true); }
     }
     const db = openStore(this.dbPath);
     try {
@@ -220,17 +241,17 @@ export class RepositoryActor extends EventEmitter {
     } finally { closeStore(db); }
   }
 
-  flush(force = false) {
+  async flush(force = false) {
     const db = openStore(this.dbPath);
     try {
-      return drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles });
+      return await drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles, readStable: this.readStable });
     } finally { closeStore(db); }
   }
 
   scheduleFlush() {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
-      try { this.flush(false); } catch (error) { this.handleFailure(error); }
+      this.flush(false).catch((error) => this.handleFailure(error));
     }, DEBOUNCE_MS);
     this.timer.unref?.();
   }
@@ -260,14 +281,14 @@ export class RepositoryActor extends EventEmitter {
 
 export class CortexRepositoryWorker {
   constructor(options) { this.actor = new RepositoryActor(options); }
-  ingest(path, eventKind = "modify", renameTo = null) {
+  async ingest(path, eventKind = "modify", renameTo = null) {
     const event = { path, eventKind, renameTo, observedMs: Date.now() };
     if (eventKind === "overflow") {
       this.actor.markGap(new Error("watcher overflow"));
       return { eventGap: true, reconciled: false };
     }
     const appended = this.actor.ingest([event]);
-    const appliedCount = this.actor.flush(true);
+    const appliedCount = await this.actor.flush(true);
     const db = openStore(this.actor.dbPath);
     try {
       const row = db.prepare("SELECT * FROM event_journal WHERE seq=?").get(appended[0].seq);

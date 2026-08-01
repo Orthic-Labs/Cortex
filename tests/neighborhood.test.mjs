@@ -11,7 +11,7 @@ const ROOT = join(import.meta.dirname, "..");
 const CLI = join(ROOT, "scripts/blueprint.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 const SCHEMA = join(ROOT, "schemas/repository-neighborhood-v1.schema.json");
-const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
+import { PYTHON } from "./python-test-runtime.mjs";
 
 function handFixture() {
   return {

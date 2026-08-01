@@ -1123,8 +1123,10 @@ function buildGenerationFromSources(root, source, options = {}) {
   addSchemaReferenceEdges(source.files, nodes, edges);
   addCallEdges(source.files, nodes, edges);
   addConfigEdges(source.files, nodes, edges);
-  const cleanNodes = dedupeBy(nodes, (node) => node.id);
-  const rawEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier ?? ""}:${item.evidence?.[0]?.path ?? ""}`);
+  const factProvider = { id: "lexical", version: PROVIDER.version };
+  const cleanNodes = dedupeBy(nodes, (node) => node.id).map((node) => ({ ...node, factProvider }));
+  const rawEdges = dedupeBy(edges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier ?? ""}:${item.evidence?.[0]?.path ?? ""}`)
+    .map((edge) => ({ ...edge, factProvider }));
   const candidateGeneration = { schemaVersion: 1, provider: PROVIDER, manifest: null, nodes: cleanNodes, edges: rawEdges, repoRoot: root };
   const docMap = readDocMap(root, null);
   const docTruth = docMap
@@ -1192,6 +1194,13 @@ export function parseFileFacts(root, file, options = {}) {
   for (const specifier of extractUnresolvedImportSpecifiers(current, [...fileByPath.values()])) {
     edges.push(importEdgeRecord(fileNode, null, specifier, false, [fileEvidence(current, 1, 1)]));
   }
+  const resolutionNodes = [
+    ...nodes,
+    ...(options.symbols ?? [])
+      .filter((symbol) => normalizePath(symbol.path) !== current.path)
+      .map((symbol) => ({ ...symbol, kind: "symbol" })),
+  ];
+  addCallEdges([...fileByPath.values()], resolutionNodes, edges, { sourcePaths: new Set([current.path]) });
   const dependencies = extractImports(current, [...fileByPath.values()]).map((sourcePath) => ({
     dependentPath: current.path,
     sourcePath,
@@ -1199,8 +1208,8 @@ export function parseFileFacts(root, file, options = {}) {
   }));
   const dedupe = (items, key) => [...new Map(items.map((item) => [key(item), item])).values()];
   return {
-    nodes: dedupe(nodes, (node) => node.id),
-    edges: dedupe(edges, (edge) => edge.id),
+    nodes: dedupe(nodes, (node) => node.id).map((node) => ({ ...node, factProvider: { id: "lexical", version: PROVIDER.version } })),
+    edges: dedupe(edges, (edge) => edge.id).map((edge) => ({ ...edge, factProvider: { id: "lexical", version: PROVIDER.version } })),
     dependencies: dedupe(dependencies, (item) => `${item.sourcePath}:${item.dependentPath}:${item.reason}`),
   };
 }
@@ -1407,9 +1416,11 @@ function walk(root, options = {}) {
   return { paths: iteratePaths(), state, reasons };
 }
 
-function addCallEdges(files, nodes, edges) {
+function addCallEdges(files, nodes, edges, options = {}) {
   const targets = nodes.filter((node) => node.kind === "symbol" && ["Method", "Function"].some((label) => node.labels.includes(label)));
-  const sources = nodes.filter((node) => node.kind === "symbol" && ["Method", "Function", "Test"].some((label) => node.labels.includes(label)));
+  const sources = nodes.filter((node) => node.kind === "symbol"
+    && (!options.sourcePaths || options.sourcePaths.has(node.path))
+    && ["Method", "Function", "Test"].some((label) => node.labels.includes(label)));
   const targetsByName = new Map();
   for (const target of targets) {
     const callName = target.qualifiedName.split(".").at(-1);

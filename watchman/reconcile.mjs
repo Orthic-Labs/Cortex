@@ -9,9 +9,9 @@ import { appendWatchEvents, drainJournal } from "./repo-actor.mjs";
 function snapshotPath(root, outDir) { return join(resolve(root), outDir, "graph", "watch.snapshot"); }
 function canonicalRoot(value) { const root = resolve(value); try { return realpathSync(root); } catch { return root; } }
 
-function metadataEvents(db, root) {
+function metadataEvents(db, root, scanMetadata = scanSourceMetadataPublic) {
   const recorded = new Map(db.prepare("SELECT path,size,mtime_ms,file_identity FROM file_state").all().map((row) => [row.path, row]));
-  const current = new Map(scanSourceMetadataPublic(root).files.map((file) => [file.path, file]));
+  const current = new Map(scanMetadata(root).files.map((file) => [file.path, file]));
   const events = [];
   const observedMs = Date.now();
   for (const [path, file] of current) {
@@ -25,20 +25,32 @@ function metadataEvents(db, root) {
   return events;
 }
 
+function coalesceRenameEvents(events) {
+  const renames = events.filter((event) => event.eventKind === "rename" && event.renameTo);
+  return events.filter((event) => event.eventKind === "rename" || !renames.some((rename) => (
+    (event.eventKind === "delete" && event.path === rename.path)
+    || (event.eventKind === "create" && event.path === rename.renameTo)
+  )));
+}
+
 export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
   const root = canonicalRoot(typeof dbOrRoot === "string" ? dbOrRoot : rootOrOptions);
   const db = typeof dbOrRoot === "string" ? openStore(join(root, options.outDir ?? ".agent", "graph", "graph.db")) : dbOrRoot;
   const outDir = options.outDir ?? ".agent";
   const close = typeof dbOrRoot === "string";
   try {
+    const adapter = options.adapter ?? { eventsSince, writeSnapshot };
     const snapshot = options.snapshotPath ?? snapshotPath(root, outDir);
     const hadSnapshot = existsSync(snapshot);
     const repairingGap = db.prepare("SELECT value FROM watch_state WHERE key='event_gap'").get()?.value === "1";
     const pending = [];
     let diff = { changed: [], added: [], removed: [] };
     if (hadSnapshot) {
-      const fastEvents = await eventsSince(root, snapshot);
-      pending.push(...fastEvents, ...metadataEvents(db, root));
+      const fastEvents = await adapter.eventsSince(root, snapshot);
+      pending.push(...coalesceRenameEvents([
+        ...fastEvents,
+        ...metadataEvents(db, root, options.scanSourceMetadata ?? scanSourceMetadataPublic),
+      ]));
       diff = {
         changed: [...new Set(pending.filter((event) => event.eventKind === "modify").map((event) => event.path))].sort(),
         added: [...new Set(pending.filter((event) => event.eventKind === "create").map((event) => event.path))].sort(),
@@ -51,14 +63,16 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
         ? diffLedgerAgainstTree(db, null, source.files ?? [])
         : { changed: [], added: [], removed: [] };
     }
-    for (const path of diff.changed) pending.push({ eventKind: "modify", path, observedMs: Date.now() });
-    for (const path of diff.added) pending.push({ eventKind: "create", path, observedMs: Date.now() });
-    for (const path of diff.removed) pending.push({ eventKind: "delete", path, observedMs: Date.now() });
+    if (!hadSnapshot) {
+      for (const path of diff.changed) pending.push({ eventKind: "modify", path, observedMs: Date.now() });
+      for (const path of diff.added) pending.push({ eventKind: "create", path, observedMs: Date.now() });
+      for (const path of diff.removed) pending.push({ eventKind: "delete", path, observedMs: Date.now() });
+    }
     const unique = new Map();
     for (const event of pending) unique.set(`${event.path}:${event.renameTo ?? ""}`, event);
     if (unique.size) appendWatchEvents(db, [...unique.values()]);
-    const applied = drainJournal(db, root, { force: true, maxDependentFiles: options.maxDependentFiles });
-    if ((hadSnapshot && unique.size > 0) || (!hadSnapshot && repairingGap)) await writeSnapshot(root, snapshot);
+    const applied = await drainJournal(db, root, { force: true, maxDependentFiles: options.maxDependentFiles });
+    if ((hadSnapshot && unique.size > 0) || (!hadSnapshot && repairingGap)) await adapter.writeSnapshot(root, snapshot);
     db.exec("BEGIN;");
     try {
       db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();

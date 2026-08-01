@@ -303,6 +303,20 @@ const MIGRATIONS = [
       );
     `);
   },
+  // Migration 8 — direct-parent Merkle lookups for ancestor-only updates.
+  (db) => {
+    db.exec(`
+      ALTER TABLE generation_leaf ADD COLUMN parent_path TEXT;
+      ALTER TABLE generation_leaf ADD COLUMN name TEXT;
+      CREATE INDEX IF NOT EXISTS idx_generation_leaf_parent ON generation_leaf(parent_path, name);
+    `);
+    const update = db.prepare("UPDATE generation_leaf SET parent_path=?, name=? WHERE path=?");
+    for (const row of db.prepare("SELECT path FROM generation_leaf").all()) {
+      const path = String(row.path).replaceAll("\\", "/");
+      const split = path.lastIndexOf("/");
+      update.run(path === "" ? null : split >= 0 ? path.slice(0, split) : "", path === "" ? "" : split >= 0 ? path.slice(split + 1) : path, row.path);
+    }
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -535,6 +549,16 @@ function providerIdentity(generation) {
   };
 }
 
+function providerForFact(fact, generationProvider) {
+  const declared = fact?.factProvider;
+  if (!declared) return generationProvider;
+  const id = String(declared.id ?? generationProvider.id);
+  return {
+    id: id.includes("treesitter") ? "treesitter" : id.includes("scip") ? "scip" : "lexical",
+    version: String(declared.version ?? generationProvider.version),
+  };
+}
+
 function fileStateForNode(generation, node) {
   const digest = normalizeContentDigest(node.evidence?.[0]?.contentHash ?? "unknown");
   let size = 0;
@@ -566,13 +590,15 @@ function populateGenerationState(db, generation) {
     const path = node.path;
     if (!path) continue;
     const digest = normalizeContentDigest(files.find((file) => file.path === path)?.evidence?.[0]?.contentHash ?? "unknown");
-    insertOwner.run(node.id, "node", path, digest, provider.id, provider.version, node.kind);
+    const owner = providerForFact(node, provider);
+    insertOwner.run(node.id, "node", path, digest, owner.id, owner.version, node.kind);
   }
   for (const edge of generation.edges ?? []) {
     const sourcePath = fileById.get(edge.source) ?? (generation.nodes ?? []).find((node) => node.id === edge.source)?.path;
     if (!sourcePath) continue;
     const digest = normalizeContentDigest(files.find((file) => file.path === sourcePath)?.evidence?.[0]?.contentHash ?? "unknown");
-    insertOwner.run(edge.id, "edge", sourcePath, digest, provider.id, provider.version, edge.kind);
+    const owner = providerForFact(edge, provider);
+    insertOwner.run(edge.id, "edge", sourcePath, digest, owner.id, owner.version, edge.kind);
     if (edge.kind === "IMPORTS" && edge.target) {
       const targetPath = fileById.get(edge.target);
       if (targetPath) db.prepare("INSERT OR IGNORE INTO dependency_index(source_path, dependent_path, reason) VALUES (?, ?, 'import')").run(targetPath, sourcePath);
@@ -586,16 +612,35 @@ export function deleteFactsByOwner(db, path, providerId = null) {
   const params = [String(path)];
   if (providerId) { clauses.push("provider_id = ?"); params.push(String(providerId)); }
   const owners = db.prepare(`SELECT fact_id, fact_kind FROM fact_owner WHERE ${clauses.join(" AND ")}`).all(...params);
+  db.prepare(`DELETE FROM fact_owner WHERE ${clauses.join(" AND ")}`).run(...params);
   for (const owner of owners) {
+    const retained = db.prepare("SELECT 1 FROM fact_owner WHERE fact_id=? AND fact_kind=? LIMIT 1").get(owner.fact_id, owner.fact_kind);
+    if (retained) continue;
     if (owner.fact_kind === "edge") db.prepare("DELETE FROM edges WHERE id = ?").run(owner.fact_id);
     else if (owner.fact_kind === "node") db.prepare("DELETE FROM symbols WHERE id = ?").run(owner.fact_id);
   }
-  db.prepare(`DELETE FROM fact_owner WHERE ${clauses.join(" AND ")}`).run(...params);
   return owners;
 }
 
 export function loadFileState(db, path) {
   return db.prepare("SELECT * FROM file_state WHERE path = ?").get(String(path)) ?? null;
+}
+
+export function listFileMetadata(db) {
+  return db.prepare(`SELECT f.path, f.language, f.provider, f.parse_status AS parseStatus,
+    f.error_node_count AS errorNodeCount, s.content_digest AS contentDigest, s.size,
+    s.mtime_ms AS mtimeMs, s.file_identity AS fileIdentity
+    FROM files f LEFT JOIN file_state s ON s.path=f.path ORDER BY f.path`).all();
+}
+
+export function listSymbolMetadata(db, providerId = null) {
+  const rows = providerId
+    ? db.prepare(`SELECT s.id, s.labels, s.name, s.qualified_name AS qualifiedName, s.path
+      FROM symbols s JOIN fact_owner o ON o.fact_id=s.id AND o.fact_kind='node'
+      WHERE o.provider_id=? ORDER BY s.path,s.id`).all(providerId)
+    : db.prepare("SELECT id, labels, name, qualified_name AS qualifiedName, path FROM symbols ORDER BY path, id").all();
+  return rows
+    .map((row) => ({ ...row, labels: JSON.parse(row.labels || "[]") }));
 }
 
 export function collectDependents(db, path, options = {}) {

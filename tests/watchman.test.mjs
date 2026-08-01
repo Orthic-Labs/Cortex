@@ -20,14 +20,14 @@ test("watch paths survive macOS /var to /private/var canonicalization", { skip: 
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("watch worker persists source/apply clocks and applies one-file delta", () => {
+test("watch worker persists source/apply clocks and applies one-file delta", async () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-"));
   cpSync(FIXTURE, repo, { recursive: true });
   try {
     buildGraphGeneration(repo, { outDir: ".agent", persist: true });
     const path = join(repo, "src/service.ts");
     writeFileSync(path, `${readFileSync(path, "utf8")}\nexport const watchmanChange = true;\n`);
-    const result = new CortexRepositoryWorker({ root: repo }).ingest("src/service.ts");
+    const result = await new CortexRepositoryWorker({ root: repo }).ingest("src/service.ts");
     assert.equal(result.applied, true);
     assert.equal(result.sourceClock, 1);
     const db = openStore(join(repo, ".agent/graph/graph.db"));
@@ -39,12 +39,12 @@ test("watch worker persists source/apply clocks and applies one-file delta", () 
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("overflow is durable and does not claim reconciliation", () => {
+test("overflow is durable and does not claim reconciliation", async () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-gap-"));
   cpSync(FIXTURE, repo, { recursive: true });
   try {
     buildGraphGeneration(repo, { outDir: ".agent", persist: true });
-    const result = new CortexRepositoryWorker({ root: repo }).ingest(".", "overflow");
+    const result = await new CortexRepositoryWorker({ root: repo }).ingest(".", "overflow");
     assert.equal(result.eventGap, true);
     const db = openStore(join(repo, ".agent/graph/graph.db"));
     try { assert.equal(db.prepare("SELECT value FROM watch_state WHERE key='event_gap'").get().value, "1"); }
@@ -52,7 +52,7 @@ test("overflow is durable and does not claim reconciliation", () => {
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("burst coalesces to one applied delta and marks superseded rows", () => {
+test("burst coalesces to one applied delta and marks superseded rows", async () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-burst-"));
   cpSync(FIXTURE, repo, { recursive: true });
   try {
@@ -63,7 +63,7 @@ test("burst coalesces to one applied delta and marks superseded rows", () => {
       writeFileSync(path, `${readFileSync(path, "utf8")}\nexport const burst${index} = true;\n`);
       actor.ingest([{ eventKind: "modify", path: "src/service.ts", observedMs: Date.now() }]);
     }
-    actor.flush(true);
+    await actor.flush(true);
     const db = openStore(join(repo, ".agent/graph/graph.db"));
     try {
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=1").get().n, 1);
@@ -72,7 +72,7 @@ test("burst coalesces to one applied delta and marks superseded rows", () => {
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("two files arriving during one drain are both applied", () => {
+test("two files arriving during one drain are both applied", async () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-drain-"));
   cpSync(FIXTURE, repo, { recursive: true });
   try {
@@ -84,14 +84,14 @@ test("two files arriving during one drain are both applied", () => {
       { eventKind: "modify", path: "src/service.ts", observedMs: Date.now() },
       { eventKind: "modify", path: "src/store.ts", observedMs: Date.now() },
     ]);
-    assert.equal(actor.flush(true), 2);
+    assert.equal(await actor.flush(true), 2);
     const db = openStore(join(repo, ".agent/graph/graph.db"));
     try { assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=1").get().n, 2); }
     finally { closeStore(db); }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("failed batch remains pending and resumes on next drain", () => {
+test("failed batch remains pending and resumes on next drain", async () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-retry-"));
   cpSync(FIXTURE, repo, { recursive: true });
   try {
@@ -103,7 +103,7 @@ test("failed batch remains pending and resumes on next drain", () => {
       db.prepare("UPDATE event_journal SET applied=0 WHERE seq=1").run();
       db.prepare("UPDATE watch_state SET value='0' WHERE key='applied_clock'").run();
     } finally { closeStore(db); }
-    assert.equal(actor.flush(true), 1);
+    assert.equal(await actor.flush(true), 1);
     const reopened = openStore(join(repo, ".agent/graph/graph.db"));
     try { assert.equal(reopened.prepare("SELECT applied FROM event_journal WHERE seq=1").get().applied, 1); }
     finally { closeStore(reopened); }

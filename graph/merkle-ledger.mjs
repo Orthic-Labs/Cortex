@@ -23,61 +23,64 @@ function parentDirectories(path) {
   return parents;
 }
 
+function pathMetadata(path) {
+  const normalized = String(path).replaceAll("\\", "/");
+  if (normalized === "") return { parentPath: null, name: "" };
+  const split = normalized.lastIndexOf("/");
+  return { parentPath: split >= 0 ? normalized.slice(0, split) : "", name: split >= 0 ? normalized.slice(split + 1) : normalized };
+}
+
+function writeDirectory(db, directory) {
+  const children = db.prepare("SELECT name, digest FROM generation_leaf WHERE parent_path = ? ORDER BY name").all(directory);
+  if (directory !== "" && children.length === 0) {
+    db.prepare("DELETE FROM generation_leaf WHERE path = ? AND kind = 'dir'").run(directory);
+    return null;
+  }
+  const digest = dirDigest(children);
+  const { parentPath, name } = pathMetadata(directory);
+  db.prepare(`INSERT INTO generation_leaf(path, kind, digest, parent_path, name) VALUES (?, 'dir', ?, ?, ?)
+    ON CONFLICT(path) DO UPDATE SET kind='dir', digest=excluded.digest, parent_path=excluded.parent_path, name=excluded.name`)
+    .run(directory, digest, parentPath, name);
+  return digest;
+}
+
 function rebuildDirectories(db) {
-  const files = db.prepare("SELECT path, digest FROM generation_leaf WHERE kind = 'file' ORDER BY path").all();
-  const children = new Map();
-  const ensure = (path) => {
-    if (!children.has(path)) children.set(path, new Map());
-    return children.get(path);
-  };
-  for (const file of files) {
-    const parts = file.path.split("/");
-    let directory = "";
-    for (let index = 0; index < parts.length - 1; index += 1) {
-      const childPath = parts.slice(0, index + 1).join("/");
-      ensure(directory).set(parts[index], { kind: "dir", path: childPath });
-      directory = childPath;
-    }
-    ensure(directory).set(parts.at(-1), { kind: "file", digest: file.digest, path: file.path });
+  db.prepare("DELETE FROM generation_leaf WHERE kind = 'dir'").run();
+  const directories = new Set([""]);
+  for (const row of db.prepare("SELECT path FROM generation_leaf WHERE kind = 'file'").all()) {
+    for (const parent of parentDirectories(row.path)) directories.add(parent);
   }
-  db.exec("DELETE FROM generation_leaf WHERE kind = 'dir'");
-  const directories = [...children.keys()].sort((left, right) => right.split("/").length - left.split("/").length || right.localeCompare(left));
-  const upsert = db.prepare("INSERT INTO generation_leaf(path, kind, digest) VALUES (?, 'dir', ?) ON CONFLICT(path) DO UPDATE SET kind='dir', digest=excluded.digest");
-  for (const directory of directories) {
-    const entries = [...children.get(directory).entries()].map(([name, entry]) => ({
-      name,
-      digest: entry.kind === "file" ? entry.digest : db.prepare("SELECT digest FROM generation_leaf WHERE path = ? AND kind = 'dir'").get(entry.path)?.digest,
-    }));
-    const digest = dirDigest(entries);
-    upsert.run(directory, digest);
-    if (directory !== "") {
-      const parent = directory.includes("/") ? directory.slice(0, directory.lastIndexOf("/")) : "";
-      const parentEntry = children.get(parent)?.get(directory.split("/").at(-1));
-      if (parentEntry) parentEntry.digest = digest;
-    }
+  for (const directory of [...directories].sort((left, right) => right.split("/").length - left.split("/").length || right.localeCompare(left))) {
+    writeDirectory(db, directory);
   }
-  if (!children.has("")) return dirDigest([]);
-  const rootEntries = [...children.get("").entries()].map(([name, entry]) => ({ name, digest: entry.kind === "file" ? entry.digest : db.prepare("SELECT digest FROM generation_leaf WHERE path = ? AND kind = 'dir'").get(entry.path)?.digest }));
-  const rootDigest = dirDigest(rootEntries);
-  upsert.run("", rootDigest);
-  return rootDigest;
+  return db.prepare("SELECT digest FROM generation_leaf WHERE path = '' AND kind = 'dir'").get()?.digest ?? dirDigest([]);
 }
 
 export function updateLeafChain(db, path, contentDigestOrNull) {
+  const normalized = String(path).replaceAll("\\", "/");
   if (contentDigestOrNull === null || contentDigestOrNull === undefined) {
-    db.prepare("DELETE FROM generation_leaf WHERE path = ? AND kind = 'file'").run(String(path));
+    db.prepare("DELETE FROM generation_leaf WHERE path = ? AND kind = 'file'").run(normalized);
   } else {
-    db.prepare("INSERT INTO generation_leaf(path, kind, digest) VALUES (?, 'file', ?) ON CONFLICT(path) DO UPDATE SET kind='file', digest=excluded.digest").run(String(path), leafDigestForFile(contentDigestOrNull));
+    const { parentPath, name } = pathMetadata(normalized);
+    db.prepare(`INSERT INTO generation_leaf(path, kind, digest, parent_path, name) VALUES (?, 'file', ?, ?, ?)
+      ON CONFLICT(path) DO UPDATE SET kind='file', digest=excluded.digest, parent_path=excluded.parent_path, name=excluded.name`)
+      .run(normalized, leafDigestForFile(contentDigestOrNull), parentPath, name);
   }
-  return rebuildDirectories(db);
+  const parents = parentDirectories(normalized).sort((left, right) => right.split("/").length - left.split("/").length || right.localeCompare(left));
+  for (const directory of parents) writeDirectory(db, directory);
+  return db.prepare("SELECT digest FROM generation_leaf WHERE path = '' AND kind = 'dir'").get()?.digest ?? dirDigest([]);
 }
 
 export function computeFullLedger(db, files) {
   db.exec("DELETE FROM generation_leaf");
-  const insert = db.prepare("INSERT INTO generation_leaf(path, kind, digest) VALUES (?, 'file', ?)");
+  const insert = db.prepare("INSERT INTO generation_leaf(path, kind, digest, parent_path, name) VALUES (?, 'file', ?, ?, ?)");
   for (const file of files ?? []) {
     const digest = file.contentDigest ?? file.content_digest ?? file.contentHash;
-    if (digest) insert.run(String(file.path), leafDigestForFile(digest));
+    if (digest) {
+      const path = String(file.path).replaceAll("\\", "/");
+      const { parentPath, name } = pathMetadata(path);
+      insert.run(path, leafDigestForFile(digest), parentPath, name);
+    }
   }
   return rebuildDirectories(db);
 }

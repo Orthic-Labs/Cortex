@@ -43,10 +43,9 @@ function normalizeEvents(root, events, observedMs = Date.now()) {
     paired.add(index);
     deletion.eventKind = "rename";
     deletion.renameTo = match.path;
-    match.eventKind = "modify";
-    match.renameTo = null;
   }
-  return candidates;
+  const pairedCreates = new Set([...paired].map((index) => creates[index]));
+  return candidates.filter((event) => !pairedCreates.has(event));
 }
 
 function options(ignore) {

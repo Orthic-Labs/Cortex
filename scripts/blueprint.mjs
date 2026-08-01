@@ -57,7 +57,7 @@ import {
   sealPhase2Artifacts,
 } from "../lib/incremental-phase2.mjs";
 import { CODE_EXTENSIONS } from "../graph/language-extractors.mjs";
-import { openStore, openStoreReadOnly, closeStore, saveGeneration, countRows, readManifestEnvelope } from "../graph/store-sqlite.mjs";
+import { openStore, openStoreReadOnly, closeStore, saveGeneration, countRows, listFileMetadata, listSymbolMetadata, readManifestEnvelope } from "../graph/store-sqlite.mjs";
 import {
   readIndexedMeta,
   indexedQueryGeneration,
@@ -73,8 +73,9 @@ import {
 } from "../graph/traverse-store.mjs";
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
-import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
+import { applyFileDelta, clearDomainPending, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
 import { collectDependents } from "../graph/store-sqlite.mjs";
+import { buildIncrementalTreeSitterFacts, SUPPORTED_EXTENSIONS } from "../graph/treesitter-provider.mjs";
 import { reconcile as reconcileGraph } from "../watchman/reconcile.mjs";
 import { syncToCurrentSource } from "../graph/barrier.mjs";
 import { checkScopeGrant, issueScopeGrant } from "../lib/receipt-store.mjs";
@@ -2230,9 +2231,15 @@ async function runGraphCommand(root, outDir, subcommand, args) {
   return 1;
 }
 
-function makeDeltaInput(root, sourceFiles, path, eventKind = null, renameTo = null) {
+async function makeDeltaInput(root, db, path, eventKind = null, renameTo = null) {
+  const sourceFiles = listFileMetadata(db).map((file) => ({
+    path: file.path,
+    contentHash: String(file.contentDigest ?? "").replace(/^xxh128:/, ""),
+    size: Number(file.size ?? 0),
+  }));
   const normalizedPath = normalizePath(path);
-  const absPath = resolve(root, normalizedPath);
+  const targetPath = normalizePath(renameTo ?? normalizedPath);
+  const absPath = resolve(root, targetPath);
   const exists = existsSync(absPath);
   const read = exists ? stableRead(absPath) : null;
   let parsed = null;
@@ -2240,7 +2247,7 @@ function makeDeltaInput(root, sourceFiles, path, eventKind = null, renameTo = nu
     const text = read.bytes.toString("utf8");
     const descriptor = {
       absolutePath: absPath,
-      path: normalizePath(renameTo ?? normalizedPath),
+      path: targetPath,
       text,
       lines: text.split(/\r?\n/),
       contentHash: read.contentDigest.replace(/^xxh128:/, ""),
@@ -2248,17 +2255,30 @@ function makeDeltaInput(root, sourceFiles, path, eventKind = null, renameTo = nu
     };
     const files = sourceFiles.filter((file) => normalizePath(file.path) !== normalizedPath);
     files.push(descriptor);
-    parsed = parseFileFacts(root, descriptor, { files });
+    parsed = parseFileFacts(root, descriptor, { files, symbols: listSymbolMetadata(db, "lexical") });
   }
-  const documentPath = normalizePath(renameTo ?? normalizedPath);
+  const documentPath = targetPath;
   const document = read && isDoc(documentPath)
     ? extractDoc(root, documentPath, new Set(sourceFiles.map((file) => normalizePath(file.path)).concat(documentPath)), loadConfig(root, ".agent"))
     : null;
+  const factBatches = parsed ? [{ provider: { id: "lexical", version: parsed.nodes?.[0]?.factProvider?.version ?? "unknown" }, parsed }] : [];
+  const extension = documentPath.includes(".") ? documentPath.slice(documentPath.lastIndexOf(".") + 1).toLowerCase() : "";
+  if (read && !document && SUPPORTED_EXTENSIONS.includes(extension)) {
+    factBatches.push(await buildIncrementalTreeSitterFacts({
+      absolutePath: absPath,
+      path: documentPath,
+      text: read.bytes.toString("utf8"),
+      lines: read.bytes.toString("utf8").split(/\r?\n/),
+      contentHash: read.contentDigest.replace(/^xxh128:/, ""),
+      size: read.bytes.length,
+    }, { filePaths: sourceFiles.map((file) => file.path).concat(documentPath), symbols: listSymbolMetadata(db, "treesitter") }));
+  }
   return {
     eventKind: eventKind ?? (!exists ? "delete" : sourceFiles.some((file) => normalizePath(file.path) === normalizedPath) ? "modify" : "create"),
     path: normalizedPath,
     renameTo,
     parsed,
+    factBatches,
     contentDigest: read?.contentDigest ?? null,
     fileIdentity: read?.fileIdentity ?? null,
     size: read?.bytes.length ?? 0,
@@ -2280,15 +2300,14 @@ function writeRepairState(db, value) {
   else db.prepare("DELETE FROM watch_state WHERE key='repair_truncated'").run();
 }
 
-function applyRepairs(db, root, repairPaths, sourceClock, { batched, outDir = ".agent" }) {
+async function applyRepairs(db, root, repairPaths, sourceClock, { batched, outDir = ".agent" }) {
   const batches = batched ? [] : [repairPaths];
   if (batched) for (let index = 0; index < repairPaths.length; index += 50) batches.push(repairPaths.slice(index, index + 50));
   for (const batch of batches) {
     if (batched) db.exec("BEGIN IMMEDIATE");
     try {
-      const source = scanSourcesPublic(root, 0, {});
       for (const path of batch) {
-        const input = makeDeltaInput(root, source.files ?? [], path);
+        const input = await makeDeltaInput(root, db, path, "repair");
         applyFileDelta(db, { ...input, sourceClock }, { inTransaction: !batched, repoRoot: root, outDir, writeJsonAtomic });
       }
       if (batched) db.exec("COMMIT");
@@ -2313,19 +2332,18 @@ async function runDelta(root, outDir, args) {
         console.log(JSON.stringify([{ resumed: true, truncated: false, remaining: [] }], null, 2));
         return 0;
       }
-      applyRepairs(db, root, state.remaining, Number(db.prepare("SELECT value FROM watch_state WHERE key='applied_clock'").get()?.value ?? 0), { batched: state.remaining.length > 50 });
+      await applyRepairs(db, root, state.remaining, Number(db.prepare("SELECT value FROM watch_state WHERE key='applied_clock'").get()?.value ?? 0), { batched: state.remaining.length > 50 });
       writeRepairState(db, null);
       console.log(JSON.stringify([{ resumed: true, truncated: false, remaining: [] }], null, 2));
       return 0;
     }
     for (const path of paths) {
-      const source = scanSourcesPublic(root, 0, {});
       const closure = collectDependents(db, path, { maxHops: MAX_HOPS, maxFiles: Number(args["max-dependent-files"] ?? MAX_DEPENDENT_FILES) });
       const sameOuter = closure.paths.length <= 50;
       if (sameOuter) db.exec("BEGIN IMMEDIATE");
       try {
-        const base = applyFileDelta(db, makeDeltaInput(root, source.files ?? [], path), { inTransaction: sameOuter, repoRoot: root, outDir, writeJsonAtomic });
-        if (base.applied && closure.paths.length) applyRepairs(db, root, closure.paths, base.appliedClock, { batched: !sameOuter, outDir });
+        const base = applyFileDelta(db, await makeDeltaInput(root, db, path), { inTransaction: sameOuter, repoRoot: root, outDir, writeJsonAtomic });
+        if (base.applied && !base.noop && closure.paths.length) await applyRepairs(db, root, closure.paths, base.appliedClock, { batched: !sameOuter, outDir });
         if (closure.truncated) writeRepairState(db, { path, remaining: closure.remaining });
         else writeRepairState(db, null);
         if (sameOuter) db.exec("COMMIT");
@@ -2927,6 +2945,18 @@ function runPhase2Command(root, outDir, subcommand, args) {
       verdictEnvelope: sealed.verdicts,
       understanding: sealed.understanding,
     });
+    if (plan.complete) {
+      const db = openStore(join(resolve(root, outDir), "graph", "graph.db"));
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        clearDomainPending(db, "doc");
+        clearDomainPending(db, "semantic");
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      } finally { closeStore(db); }
+    }
     const result = {
       schemaVersion: 1,
       state: plan.complete ? "sealed" : "incomplete",

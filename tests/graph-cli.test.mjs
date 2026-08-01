@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readEnvelope, mutateManifest } from "./_store-helpers.mjs";
+import { closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { markDomainPending, readPendingDomains } from "../graph/delta-store.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -183,11 +185,26 @@ test("doctor --full rejects Phase 1 alone and accepts current complete understan
     assert.equal(staleVerdicts.status, 2, staleVerdicts.stderr || staleVerdicts.stdout);
     assert.ok(JSON.parse(staleVerdicts.stdout).reasons.some((reason) => reason.code === "stale_verdicts"));
 
+    const pendingDb = openStore(path.join(repo, ".agent/graph/graph.db"));
+    try { markDomainPending(pendingDb, "doc"); } finally { closeStore(pendingDb); }
+    const understandingPath = path.join(repo, ".agent/understanding.json");
+    const validUnderstanding = fs.readFileSync(understandingPath, "utf8");
+    const invalidUnderstanding = JSON.parse(validUnderstanding);
+    delete invalidUnderstanding.architecture;
+    fs.writeFileSync(understandingPath, JSON.stringify(invalidUnderstanding, null, 2));
+    const failedSeal = run(["phase2", "seal", "--json", "--out", ".agent"], repo);
+    assert.notEqual(failedSeal.status, 0);
+    const retainedDb = openStore(path.join(repo, ".agent/graph/graph.db"));
+    try { assert.deepEqual(readPendingDomains(retainedDb), ["doc"]); } finally { closeStore(retainedDb); }
+    fs.writeFileSync(understandingPath, validUnderstanding);
+
     const sealResult = run(["phase2", "seal", "--json", "--out", ".agent"], repo);
     assert.equal(sealResult.status, 0, sealResult.stderr || sealResult.stdout);
     const sealed = JSON.parse(sealResult.stdout);
     assert.equal(sealed.state, "sealed");
     assert.equal(sealed.sourceGenerationId, graphManifest.generationId);
+    const clearedDb = openStore(path.join(repo, ".agent/graph/graph.db"));
+    try { assert.deepEqual(readPendingDomains(clearedDb), []); } finally { closeStore(clearedDb); }
 
     const full = run(["doctor", "--full", "--json", "--out", ".agent"], repo);
     assert.equal(full.status, 0, full.stderr || full.stdout);
@@ -249,9 +266,9 @@ test("doctor --full rejects Phase 1 alone and accepts current complete understan
   }
 });
 
-test("Blueprint invocation contract always continues through Phase 2-4", () => {
+test("Cortex invocation contract always continues through Phase 2-4", () => {
   const skill = fs.readFileSync(SKILL, "utf8");
-  assert.match(skill, /run Blueprint[\s\S]{0,300}complete Phase 1–4 workflow/i);
+  assert.match(skill, /run Cortex[\s\S]{0,300}complete Phase 1–4 workflow/i);
   assert.match(skill, /automatic maintenance[\s\S]{0,500}Phase 1 only/i);
   assert.match(skill, /post-commit[\s\S]{0,300}must not start Phase 2/i);
   assert.match(skill, /doctor --full/);
