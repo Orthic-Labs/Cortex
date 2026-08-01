@@ -1,10 +1,10 @@
-# Blueprint
+# Cortex
 
-Product is now **Cortex**: `cortex` is canonical, `blueprint` remains a compatibility alias; prose brands nodes, edges & flows as Neurons, Synapses & Circuits.
+Formerly **Blueprint**. `cortex` is the canonical command; `blueprint` remains a compatibility alias. In prose, nodes, edges & flows are branded **Neurons**, **Synapses** & **Circuits**.
 
-> **TL;DR:** Blueprint turns code **and** documentation into a local, evidence-backed repository map, so people & agents can find what is true, stale, contradictory or still unknown before changing a system.
+> **TL;DR:** Cortex turns code **and** documentation into a local, evidence-backed repository map, so people & agents can find what is true, stale, contradictory or still unknown before changing a system.
 
-Blueprint helps people & AI agents understand a software repository before changing it. It connects
+Cortex helps people & AI agents understand a software repository before changing it. It connects
 architecture docs, plans, ADRs, source files, symbols, calls, tests & configuration, then shows which
 conclusions are supported, stale, contradictory or still unknown.
 
@@ -29,7 +29,7 @@ documents + code + tests + config
                  └── product + architecture docs for humans
 ```
 
-Blueprint runs in two main phases:
+Cortex runs in two main phases:
 
 1. **Map:** deterministic code maps documents, claims, files, symbols & relationships into a
    generation-bound graph.
@@ -40,7 +40,7 @@ Mapping is cheap & repeatable. Higher-level conclusions must remain attached to 
 
 ## Documents are first-class data
 
-Blueprint is not only a code indexer. Its document-truth layer is a core part of the product.
+Cortex is not only a code indexer. Its document-truth layer is a core part of the product.
 
 It reads current documentation, ADRs, plans & configured archives, then:
 
@@ -51,10 +51,10 @@ It reads current documentation, ADRs, plans & configured archives, then:
 - applies explicit precedence so an old plan cannot silently outrank current code;
 - joins evidence as `supports`, `contradicts` or `supersedes`;
 - emits stale references, unsupported claims & code-versus-doc disagreement;
-- excludes Blueprint-generated docs from future claim extraction, preventing a self-confirming loop.
+- excludes Cortex-generated docs from future claim extraction, preventing a self-confirming loop.
 
 Phase 2 seals each verdict to exact document/code fingerprints. If its inputs have not changed,
-Blueprint reuses it. If one claim or file changes, only affected verdicts & synthesis dimensions
+Cortex reuses it. If one claim or file changes, only affected verdicts & synthesis dimensions
 need recomputation. Reconciliation records preserve disagreements until a human decides whether code
 or docs should change.
 
@@ -65,7 +65,7 @@ This makes documentation queryable, testable repository knowledge—not decorati
 Each mapped repository gets one derived, gitignored store:
 `.agent/graph/graph.db`.
 
-Blueprint uses Node's built-in `node:sqlite`, so its core store needs no database server or native
+Cortex uses Node's built-in `node:sqlite`, so its core store needs no database server or native
 SQLite package.
 
 | Table | What it stores | Important indexes |
@@ -86,17 +86,17 @@ edges. `neighbors`, `path`, `impact` & `architecture` responses are bounded by t
 ranked deterministically & can return continuation cursors. Every response carries freshness
 information such as generation ID, source state & dirty-file count.
 
-Vector storage exists, but embeddings are off by default & Blueprint does not currently generate
+Vector storage exists, but embeddings are off by default & Cortex does not currently generate
 them. Structural evidence remains primary.
 
 ## Code intelligence
 
-Blueprint combines several precision levels:
+Cortex combines several precision levels:
 
 - **Tree-sitter / AST:** selected structural layer for supported languages.
 - **Deterministic lexical extraction:** broad, portable fallback across code, scripts & schemas.
 - **SCIP / compiler evidence:** optional exact-reference augmentation when repository already
-  supplies a portable SCIP JSON export; Blueprint never installs or runs an indexer itself.
+  supplies a portable SCIP JSON export; Cortex never installs or runs an indexer itself.
 
 Provider precision is explicit: `COMPILER > AST > LEXICAL`.
 
@@ -115,20 +115,22 @@ confidence tier.
 ## What agents can ask
 
 ```sh
-blueprint                         # complete Blueprint workflow
-blueprint "<task>"                # task-focused repository understanding
-blueprint doctor --full --json    # freshness, coverage & artifact health
+cortex                         # complete Cortex workflow
+cortex "<task>"                # task-focused repository understanding
+cortex doctor --full --json    # freshness, coverage & artifact health
 
-blueprint graph search --query "authentication"
-blueprint graph neighbors --node "<node-id>"
-blueprint graph path --from "<node-id>" --to "<node-id>"
-blueprint graph impact --node "<node-id>"
-blueprint graph architecture
-blueprint graph doc-truth
-blueprint graph export
+cortex graph search --query "authentication"
+cortex graph neighbors --node "<node-id>"
+cortex graph path --from "<node-id>" --to "<node-id>"
+cortex graph impact --node "<node-id>"
+cortex graph architecture
+cortex graph doc-truth
+cortex graph export
 ```
 
-Blueprint can emit a bounded `ContextCandidateSet` for a larger context planner. It sends a relevant
+Every command above also works under the legacy `blueprint` alias.
+
+Cortex can emit a bounded `ContextCandidateSet` for a larger context planner. It sends a relevant
 slice with evidence & freshness—not an entire repository graph.
 
 ## Orientation admission (decision library)
@@ -143,9 +145,10 @@ const decision = await api.orient({ task, sessionId, repoRoot });
 // decision.action: allow | continue | block | noop
 ```
 
-Receipts are host-owned data (`~/.blueprint/receipts` by default). Beacon-consumable
-`blueprint_orientation` evidence is derived from those receipts. Fail-closed hooks, shell
-classifiers, MCP enforcement, and CodeRight brokers are intentionally out of scope.
+Receipts are host-owned data (`~/.blueprint/receipts` by default — path frozen for installed-agent
+compatibility). Sentinel-consumable `blueprint_orientation` evidence is derived from those receipts.
+Fail-closed hooks, shell classifiers, MCP enforcement, and CodeRight brokers are intentionally out of
+scope of this core library.
 
 ## Install / test
 
@@ -157,8 +160,9 @@ npm run test:workspace  # monorepo context-contract suite (tests/workspace/)
 npm run test:all        # both, serialized for watcher/performance isolation
 ```
 
-Requires Node `>=20`; full tests also require Python `>=3.11` + packages in `requirements-test.txt`.
-CLI entry: `blueprint` → `scripts/blueprint.mjs`.
+Requires Node `>=20`; full tests also require Python `>=3.11` + packages in `requirements-test.txt`
+(the workspace context-contract suite shells out to `jsonschema`). CLI entry: `cortex` (or the
+`blueprint` alias) → `scripts/blueprint.mjs`.
 
 ## Outputs
 
@@ -174,7 +178,8 @@ Machine-readable outputs under `.agent/` include:
 - `graph/graph.db` — complete local SQLite graph.
 
 Portable `.blueprint/manifest.json` exposes repository identity, provider capabilities, generation &
-coverage without committing local database.
+coverage without committing local database. (Artifact paths `.agent/` and `.blueprint/` are frozen
+so already-installed agents keep working across the rename.)
 
 Human outputs are generated at:
 
@@ -183,7 +188,7 @@ Human outputs are generated at:
 
 ## What makes it different
 
-Blueprint's advantage is not any single parser or graph database. It is combination:
+Cortex's advantage is not any single parser or graph database. It is combination:
 
 - **Code + document truth:** implementation & stated intent are mapped together.
 - **Evidence lineage:** important claims retain path, span, hash, provider, generation & confidence.
@@ -201,7 +206,7 @@ incrementally maintained infrastructure.
 
 ## Trust model
 
-Repository content is untrusted data, never agent instruction. Blueprint redacts secrets from
+Repository content is untrusted data, never agent instruction. Cortex redacts secrets from
 outputs, confines reads to repository scope & never treats generated prose as primary evidence.
 Current code & executable proof outrank plans or historical documents.
 
@@ -210,7 +215,7 @@ release or destructive changes.
 
 ## Current scope
 
-Blueprint is live as a repository mapper, SQLite graph, bounded query surface, document-truth layer,
+Cortex is live as a repository mapper, SQLite graph, bounded query surface, document-truth layer,
 incremental Phase-2 planner & human/machine artifact generator.
 
 Current limits:

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Renamed the product **Blueprint → Cortex**: `cortex` is the canonical CLI, `blueprint` remains a
+  compatibility alias. README, SKILL, IMPLEMENTATION-STATUS, and package description rebranded; prose
+  brands nodes/edges/flows as Neurons/Synapses/Circuits. Frozen for installed-agent compatibility:
+  the `blueprint` bin alias, artifact paths `.agent/` and `.blueprint/manifest.json`, provider IDs
+  `blueprint-treesitter`/`blueprint-static`, the `blueprint_orientation` evidence key, and the
+  `<!-- blueprint:docs -->` README fence markers.
+
 - P1 orientation admission library: `lib/admission.mjs` (`orient`/`expand`/`status`/`revoke`),
   host-owned `lib/receipt-store.mjs`, Beacon-consumable `lib/orientation-evidence.mjs` (no hooks /
   shell classifier / MCP).

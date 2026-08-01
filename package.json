@@ -1,7 +1,7 @@
 {
   "name": "@orthic-labs/cortex",
   "version": "0.2.0",
-  "description": "Local evidence-backed repository map: documents, claims, code graph, and orientation admission library.",
+  "description": "Cortex (formerly Blueprint): local evidence-backed repository map — documents, claims, code graph (Neurons/Synapses/Circuits), and orientation admission library.",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "packageManager": "pnpm@11.18.0",

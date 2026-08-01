@@ -1,28 +1,28 @@
-# Blueprint — Runtime Ownership and Current Implementation Truth
+# Cortex — Runtime Ownership and Current Implementation Truth
 
 Product is now **Cortex**: `cortex` is canonical, `blueprint` remains a compatibility alias; prose brands nodes, edges & flows as Neurons, Synapses & Circuits.
 
 What the live implementation actually does, which commands exist, and where it is still PARTIAL.
 Extracted from `SKILL.md`.
 
-**Keep this file current.** A stale entry here is precisely the `CODE-FELL-SHORT` class Blueprint
+**Keep this file current.** A stale entry here is precisely the `CODE-FELL-SHORT` class Cortex
 exists to catch — a document claiming a capability the code does not have. If you change the
 engine, change this file in the same commit.
 
 ## Runtime ownership
 
-Blueprint is installed once by the workspace setup, then run **separately from the root of each
+Cortex is installed once by the workspace setup, then run **separately from the root of each
 repository**. Its `.agent/` artifacts and any derived index/cache belong to that repository, are
 regenerable, and are not MemRight storage. The only allowed integration is a bounded, source-backed
 `ContextCandidateSet v1` submitted to MemRight's global admission planner, which combines it with
 durable recall/other layers and emits the final `ContextPacket v1`; verified `KnowledgeEmission v1`
 may enter the durable output path. Raw graph nodes, embeddings, edges, and visual layouts never
-enter MemRight. Blueprint never owns the final cross-layer token budget.
+enter MemRight. Cortex never owns the final cross-layer token budget.
 
 ## What Phase 1 writes (verified 2026-07-26)
 
 The live Phase-1 implementation writes both the original document truth map and the
-Blueprint-owned code graph:
+Cortex-owned code graph:
 
 - bootstrap node kinds remain `repo|doc|claim|code_ref`;
 - bootstrap edge kinds remain `contains|mentions-code`;
@@ -41,7 +41,7 @@ Blueprint-owned code graph:
 - `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
   planner boundary;
 - `graph planner-status` proves the current MemRight join state: `ready` when `memright plan-context`
-  exists, `missing_command` when Blueprint can emit candidates but MemRight has not shipped the
+  exists, `missing_command` when Cortex can emit candidates but MemRight has not shipped the
   admission command, and `unavailable` when the local binary cannot be inspected;
 - `graph mermaid` emits a bounded deterministic Mermaid view for static visual inspection;
 - `graph flows --complete` asks for complete flow enumeration up to the explicit safety cap instead
@@ -58,7 +58,7 @@ Blueprint-owned code graph:
   opaque assets remain file nodes and do not masquerade as unsupported languages; vendor trees are
   excluded.
 - `hygiene refresh` reuses Audit's existing scanner implementations but makes their reusable output
-  Blueprint-owned and graph-generation-bound. Default facts cover dependency freshness, dead-code
+  Cortex-owned and graph-generation-bound. Default facts cover dependency freshness, dead-code
   and duplication scanners, oversized/mechanical-split structure, binary pins, dependency pinning,
   negative space, and debt markers. Decomposition candidates carry LOC, bytes, symbol/span, and graph
   relationship metrics; crossing the configurable review threshold never proves bloat. The full
@@ -80,12 +80,12 @@ semantic retrieval is not active, and an interactive visual explorer is not ship
 advertise complete compiler precision, active vector search, an interactive explorer or raw graph
 ingestion into MemRight as live.
 
-**Confirmed 2026-07-26:** Blueprint uses `node:sqlite` as its sole graph store at
+**Confirmed 2026-07-26:** Cortex uses `node:sqlite` as its sole graph store at
 `.agent/graph/graph.db`. The schema persists files, symbols, edges, generation metadata and an
 optional vectors table, with indexes on generation, symbol path, edge source/target/kind/confidence
 tier and vector model. WAL plus transactional generation writes keep read-only consumers on the
 last complete generation during a build. There is no `graph.json`; `blueprint graph export` emits
-JSON on demand. Embeddings remain off by default and no Blueprint path currently generates them.
+JSON on demand. Embeddings remain off by default and no Cortex path currently generates them.
 
 **Publish identity (P0, 2026-08-01):** `generationId` and `manifestDigest` are sealed only after
 tree-sitter augmentation via `finalizeGenerationIdentity()`. `saveGeneration()` writes relational
@@ -190,7 +190,7 @@ ceiling), orthogonal to the per-edge confidence tier above. `static-provider.mjs
 declares `LEXICAL`; `treesitter-provider.mjs`'s `PROVIDER` declares `AST`; both surface
 `precisionTier` on their `graphCapabilities()` probe output.
 
-`graph/scip-provider.mjs` is the `COMPILER` tier. Blueprint never vendors, installs, or invokes a
+`graph/scip-provider.mjs` is the `COMPILER` tier. Cortex never vendors, installs, or invokes a
 SCIP indexer — it only READS a portable JSON export (`{ documents: [{ relativePath, occurrences:
 [{ symbol, roles, range }] }] }`, e.g. from `scip print --json`) if the repo already produced one at
 `index.scip.json`, `.blueprint/index.scip.json`, or `$BLUEPRINT_SCIP_INDEX`. `probeScip()` reports
