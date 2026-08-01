@@ -88,8 +88,15 @@ export async function syncToCurrentSource(db, root, { timeoutMs = 2000, allowDeg
       error: error?.message ?? null,
     },
   };
-  recordBarrierDuration(db, receipt.details.elapsedMs);
-  insertGenerationReceipt(db, receipt);
+  db.exec("BEGIN;");
+  try {
+    recordBarrierDuration(db, receipt.details.elapsedMs);
+    insertGenerationReceipt(db, receipt);
+    db.exec("COMMIT;");
+  } catch (persistError) {
+    db.exec("ROLLBACK;");
+    throw persistError;
+  }
   return receipt;
 }
 

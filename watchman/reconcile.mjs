@@ -35,8 +35,15 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
     if (unique.size) appendWatchEvents(db, [...unique.values()]);
     const applied = drainJournal(db, root, { force: true, maxDependentFiles: options.maxDependentFiles });
     if (hadSnapshot) await writeSnapshot(root, snapshot);
-    db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
-    db.prepare("INSERT INTO watch_state(key,value) VALUES ('last_reconcile_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Date.now()));
+    db.exec("BEGIN;");
+    try {
+      db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
+      db.prepare("INSERT INTO watch_state(key,value) VALUES ('last_reconcile_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Date.now()));
+      db.exec("COMMIT;");
+    } catch (error) {
+      db.exec("ROLLBACK;");
+      throw error;
+    }
     return { ok: true, changed: diff.changed, added: diff.added, removed: diff.removed, queued: unique.size, applied, eventGap: 0 };
   } finally { if (close) closeStore(db); }
 }

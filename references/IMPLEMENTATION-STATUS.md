@@ -110,7 +110,8 @@ broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with
 subscription and relative-path calculation, including macOS `/var` to `/private/var` events. Graph,
 barrier, reconciliation, and repository identity use the same canonical root; no-repo fixture scans
 skip a doomed Git probe. Watcher startup owns initial Parcel snapshot creation; reconciliation only
-refreshes an existing watcher snapshot, preserving the no-op barrier budget. Full qualification
+refreshes an existing watcher snapshot. Reconciliation state plus receipt telemetry use bounded
+transactions, preserving the no-op barrier budget on Windows filesystems. Full qualification
 declares its Python `jsonschema` dependency in `requirements-test.txt`; CI installs it under Python
 3.11 before serialized `pnpm test:all` on macOS and Windows.
 
