@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +36,7 @@ test("reconcile applies exactly changed files and leaves unrelated facts intact"
       assert.deepEqual(db.prepare("SELECT path, content_hash FROM files WHERE path='src/config.ts'").all(), unrelated);
       assert.equal(db.prepare("SELECT value FROM watch_state WHERE key='event_gap'").get().value, "0");
       assert.ok(db.prepare("SELECT value FROM watch_state WHERE key='last_reconcile_ms'").get());
+      assert.equal(existsSync(join(repo, ".agent/graph/watch.snapshot")), false);
     } finally { closeStore(db); }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });

@@ -16,8 +16,9 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
   const close = typeof dbOrRoot === "string";
   try {
     const snapshot = options.snapshotPath ?? snapshotPath(root, outDir);
+    const hadSnapshot = existsSync(snapshot);
     const pending = [];
-    if (existsSync(snapshot)) {
+    if (hadSnapshot) {
       const fastEvents = await eventsSince(root, snapshot);
       pending.push(...fastEvents);
     }
@@ -33,7 +34,7 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
     for (const event of pending) unique.set(`${event.path}:${event.renameTo ?? ""}`, event);
     if (unique.size) appendWatchEvents(db, [...unique.values()]);
     const applied = drainJournal(db, root, { force: true, maxDependentFiles: options.maxDependentFiles });
-    await writeSnapshot(root, snapshot);
+    if (hadSnapshot) await writeSnapshot(root, snapshot);
     db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
     db.prepare("INSERT INTO watch_state(key,value) VALUES ('last_reconcile_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Date.now()));
     return { ok: true, changed: diff.changed, added: diff.added, removed: diff.removed, queued: unique.size, applied, eventGap: 0 };
