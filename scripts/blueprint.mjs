@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createXXHash128 } from "hash-wasm";
 
 // XXH3-128 everywhere in blueprint: these are content/identity digests for
@@ -78,6 +78,7 @@ import { collectDependents } from "../graph/store-sqlite.mjs";
 import { reconcile as reconcileGraph } from "../watchman/reconcile.mjs";
 import { syncToCurrentSource } from "../graph/barrier.mjs";
 import { checkScopeGrant, issueScopeGrant } from "../lib/receipt-store.mjs";
+import { incrementTelemetry, readTelemetry } from "../lib/telemetry.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -327,6 +328,7 @@ function persistGenerationToStore(root, outDir, generation) {
   let rows;
   try {
     summary = saveGeneration(db, generation, { populateState: true });
+    incrementTelemetry(db, "full_rebuilds");
     rows = countRows(db);
     if (rows.files !== summary.fileCount || rows.edges !== summary.edgeCount) {
       throw new Error(`graph publication readback row mismatch: files=${rows.files}/${summary.fileCount} edges=${rows.edges}/${summary.edgeCount}`);
@@ -1709,6 +1711,107 @@ function fullCompletionStatus(root, outDir, graph) {
   return { state: complete ? "complete" : "incomplete", phases, reasons };
 }
 
+function pidAlive(pid) {
+  const value = Number(pid ?? 0);
+  if (!value) return false;
+  try { process.kill(value, 0); return true; } catch { return false; }
+}
+
+function sampleLedger(root, outDir, sampleSize = 100) {
+  const dbPath = join(root, outDir, "graph", "graph.db");
+  if (!existsSync(dbPath)) return { available: false, checked: 0, mismatches: [] };
+  const db = openStoreReadOnly(dbPath);
+  try {
+    const rows = db.prepare("SELECT path, digest FROM generation_leaf WHERE kind='file'").all();
+    const selected = rows.length <= sampleSize ? rows : rows.sort(() => Math.random() - 0.5).slice(0, sampleSize);
+    const mismatches = [];
+    for (const row of selected) {
+      try {
+        const current = stableRead(join(root, row.path));
+        if (current.contentDigest !== row.digest) mismatches.push(row.path);
+      } catch { mismatches.push(row.path); }
+    }
+    return { available: true, checked: selected.length, mismatches };
+  } finally { closeStore(db); }
+}
+
+function mcpHandshake(root) {
+  const request = `${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "cortex-doctor", version: "1" },
+    },
+  })}\n`;
+  const result = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "cortex-mcp.mjs")], {
+    cwd: root,
+    input: request,
+    encoding: "utf8",
+    timeout: 750,
+    windowsHide: true,
+  });
+  const stdout = String(result.stdout ?? "");
+  return {
+    ready: /"result"\s*:/.test(stdout) && /serverInfo/.test(stdout),
+    timedOut: result.error?.code === "ETIMEDOUT",
+    exitCode: result.status,
+  };
+}
+
+function operationalDiagnostics(root, outDir) {
+  const reasons = [];
+  const dbPath = join(root, outDir, "graph", "graph.db");
+  if (!existsSync(dbPath)) return { reasons, telemetry: null, checks: {} };
+  const db = openStoreReadOnly(dbPath);
+  try {
+    const state = Object.fromEntries(db.prepare("SELECT key,value FROM watch_state").all().map((row) => [row.key, row.value]));
+    const backlog = db.prepare("SELECT MIN(observed_ms) AS oldest, COUNT(*) AS count FROM event_journal WHERE applied=0").get();
+    const backlogAgeMs = backlog?.oldest ? Math.max(0, Date.now() - Number(backlog.oldest)) : 0;
+    if (backlog?.count > 0) reasons.push({ code: "journal_backlog_age", severity: backlogAgeMs > 5000 ? "warning" : "info", count: backlog.count, ageMs: backlogAgeMs, message: `event journal has ${backlog.count} unapplied row(s)` });
+    if (state.event_gap === "1") reasons.push({ code: "event_gap", severity: "blocker", message: "watcher continuity is not proven; reconcile before trusting freshness" });
+    const watcherPresent = Boolean(state.watcher_pid);
+    if (watcherPresent && !pidAlive(state.watcher_pid)) reasons.push({ code: "watcher_pid_liveness", severity: "warning", pid: Number(state.watcher_pid), message: "recorded watcher process is not alive" });
+    else if (!watcherPresent) reasons.push({ code: "watcher_pid_liveness", severity: "info", message: "no watcher process is recorded" });
+    const snapshotPath = join(root, outDir, "graph", "watch.snapshot");
+    if (!existsSync(snapshotPath)) reasons.push({ code: "snapshot_presence", severity: "info", message: "watch snapshot is absent; next barrier will reconcile from the ledger" });
+    const ledger = sampleLedger(root, outDir, 100);
+    if (ledger.mismatches.length) reasons.push({ code: "ledger_root_mismatch", severity: "blocker", checked: ledger.checked, mismatches: ledger.mismatches.slice(0, 20), message: "sampled Merkle leaves do not match live source files" });
+    const receiptTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='generation_receipt'").get();
+    let malformedReceipts = 0;
+    if (receiptTable) {
+      for (const row of db.prepare("SELECT details_json FROM generation_receipt ORDER BY created_ms DESC LIMIT 100").all()) {
+        try { JSON.parse(row.details_json); } catch { malformedReceipts += 1; }
+      }
+    }
+    if (!receiptTable || malformedReceipts) reasons.push({ code: "receipt_table_health", severity: "blocker", malformed: malformedReceipts, message: receiptTable ? "generation receipt details contain invalid JSON" : "generation receipt table is missing" });
+    const handshake = mcpHandshake(root);
+    if (!handshake.ready) reasons.push({ code: "mcp_handshake", severity: "warning", ...handshake, message: "MCP server did not complete initialize handshake" });
+    const hooksPath = (() => { try { return resolve(root, execFileSync("git", ["-C", root, "rev-parse", "--git-path", "hooks"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()); } catch { return null; } })();
+    const hookNames = ["post-checkout", "post-merge", "post-rewrite"];
+    const installedHooks = hooksPath ? hookNames.filter((name) => existsSync(join(hooksPath, name)) && readFileSync(join(hooksPath, name), "utf8").includes("cortex-watch.mjs")) : [];
+    if (installedHooks.length !== hookNames.length) reasons.push({ code: "installed_hooks", severity: "info", installed: installedHooks, expected: hookNames, message: "Cortex Git nudge hooks are not all installed" });
+    const grantKey = join(root, outDir, "graph", "grant.key");
+    if (!existsSync(grantKey)) reasons.push({ code: "grant_key_presence", severity: "info", message: "task-scoped grant key has not been created" });
+    return {
+      reasons,
+      telemetry: readTelemetry(db),
+      checks: {
+        journalBacklogAgeMs: backlogAgeMs,
+        watcherPid: state.watcher_pid ? Number(state.watcher_pid) : null,
+        snapshotPresent: existsSync(snapshotPath),
+        ledgerSample: ledger,
+        receiptTable: Boolean(receiptTable) && malformedReceipts === 0,
+        mcpHandshake: handshake,
+        installedHooks,
+        grantKeyPresent: existsSync(grantKey),
+      },
+    };
+  } finally { closeStore(db); }
+}
+
 function doctor(root, outDir, options = {}) {
   const startedAt = new Date().toISOString();
   const jsonMode = Boolean(options.json);
@@ -1795,6 +1898,8 @@ function doctor(root, outDir, options = {}) {
     });
   }
   const graph = graphStatus(root, outDir);
+  const operational = operationalDiagnostics(root, outDir);
+  reasons.push(...operational.reasons);
   const completion = fullMode ? fullCompletionStatus(root, outDir, graph) : null;
   if (completion) reasons.push(...completion.reasons);
   if (graph.state === "stale") {
@@ -1884,6 +1989,8 @@ function doctor(root, outDir, options = {}) {
     errors,
     warnings,
     reasons,
+    telemetry: operational.telemetry,
+    operational: operational.checks,
     capabilities: graphCapabilities(),
     graphCapabilities: {
       parsedExtensions: graph.capabilities?.parsedExtensions ?? graphCapabilities().languageCoverage.parsedExtensions,

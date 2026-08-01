@@ -9,6 +9,7 @@ import {
   loadFileState,
   recordArtifactState,
 } from "./store-sqlite.mjs";
+import { incrementTelemetry } from "../lib/telemetry.mjs";
 
 export const STRUCTURAL_PROVIDER = Object.freeze({ id: "lexical", version: "repo-local-delta-v1" });
 export const DOC_PROVIDER = Object.freeze({ id: "doctruth", version: "repo-local-doc-v1", freshnessDomain: "doc" });
@@ -273,6 +274,7 @@ export function applyFileDelta(db, delta, options = {}) {
     if (delta.journalSeq && hasTable(db, "event_journal")) {
       db.prepare("UPDATE event_journal SET applied = 1, applied_clock = ? WHERE seq = ?").run(appliedClock, delta.journalSeq);
     }
+    incrementTelemetry(db, "deltas_applied");
     if (ownsTransaction) db.exec("COMMIT");
     return { applied: true, path, appliedClock, rootDigest: db.prepare("SELECT digest FROM generation_leaf WHERE path = '' AND kind = 'dir'").get()?.digest ?? null };
   } catch (error) {

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reconcile } from "../watchman/reconcile.mjs";
 import { closeStore, getGenerationEnvelope, insertGenerationReceipt, openStore } from "./store-sqlite.mjs";
+import { recordBarrierDuration } from "../lib/telemetry.mjs";
 
 const POLL_MS = 25;
 
@@ -86,6 +87,7 @@ export async function syncToCurrentSource(db, root, { timeoutMs = 2000, allowDeg
       error: error?.message ?? null,
     },
   };
+  recordBarrierDuration(db, receipt.details.elapsedMs);
   insertGenerationReceipt(db, receipt);
   return receipt;
 }
