@@ -154,7 +154,7 @@ npm install   # or pnpm install
 python3 -m pip install -r requirements-test.txt
 npm test                # standalone package tests (tests/*.test.mjs)
 npm run test:workspace  # monorepo context-contract suite (tests/workspace/)
-npm run test:all        # both
+npm run test:all        # both, serialized for watcher/performance isolation
 ```
 
 Requires Node `>=20`; full tests also require Python `>=3.11` + packages in `requirements-test.txt`.

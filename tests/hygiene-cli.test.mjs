@@ -13,7 +13,20 @@ function run(repo, args) {
   return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8" });
 }
 
-test("Blueprint hygiene facts are cached, generation-bound, and become stale with the graph", () => {
+function findAuditCollector() {
+  let current = HERE;
+  while (true) {
+    const candidate = path.join(current, "tools", "skills", "audit", "collect-facts.mjs");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+test("Blueprint hygiene facts are cached, generation-bound, and become stale with the graph", {
+  skip: findAuditCollector() ? false : "requires workspace Audit collector",
+}, () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-hygiene-"));
   try {
     fs.mkdirSync(path.join(repo, "src"));
@@ -87,4 +100,22 @@ test("Blueprint hygiene facts are cached, generation-bound, and become stale wit
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("standalone hygiene reports a missing Audit collector as unavailable", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "cortex-hygiene-standalone-"));
+  try {
+    fs.mkdirSync(path.join(repo, "src"));
+    fs.writeFileSync(path.join(repo, "src", "index.ts"), "export const value = 1;\n");
+    assert.equal(run(repo, ["graph", "build", "--out", ".agent"]).status, 0);
+    const result = spawnSync(process.execPath, [CLI, "hygiene", "refresh", "--out", ".agent", "--json"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, CORTEX_AUDIT_FACT_COLLECTOR: path.join(repo, "missing-collector.mjs") },
+    });
+    assert.equal(result.status, 2, result.stderr || result.stdout);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.state, "unavailable");
+    assert.equal(payload.reasonCode, "audit_collector_missing");
+  } finally { fs.rmSync(repo, { recursive: true, force: true }); }
 });

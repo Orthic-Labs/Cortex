@@ -142,11 +142,15 @@ try {
   await actor.start();
   const path = join(repo, "src/service.ts");
   writeFileSync(path, \`${"${readFileSync(path, \"utf8\")}"}\\nexport const liveWatch = true;\\n\`);
-  await new Promise((resolve) => setTimeout(resolve, 2200));
+  const deadline = Date.now() + 3000;
+  let applied = 0;
+  while (Date.now() < deadline && applied !== 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pollingDb = openStore(join(repo, ".agent/graph/graph.db"));
+    applied = pollingDb.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE path='src/service.ts' AND applied=1").get().n;
+    closeStore(pollingDb);
+  }
   await actor.stop();
-  const db = openStore(join(repo, ".agent/graph/graph.db"));
-  const applied = db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE path='src/service.ts' AND applied=1").get().n;
-  closeStore(db);
   if (applied !== 1) throw new Error("live watcher applied " + applied + " rows");
   console.log("live-ok");
 } finally { rmSync(repo, { recursive: true, force: true }); }`;

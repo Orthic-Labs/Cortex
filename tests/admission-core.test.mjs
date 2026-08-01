@@ -147,6 +147,13 @@ test("expand unions graph-supported paths and rejects absolute self-approval", a
     });
     assert.equal(blocked.action, "block");
     assert.equal(blocked.reasonCode, "absolute_path_rejected");
+    const blockedWindows = await api.expand({
+      receiptId: oriented.receiptId,
+      paths: ["C:\\Windows\\System32"],
+      repoRoot: "/tmp/demo-repo",
+    });
+    assert.equal(blockedWindows.action, "block");
+    assert.equal(blockedWindows.reasonCode, "absolute_path_rejected");
 
     const expanded = await api.expand({
       receiptId: oriented.receiptId,

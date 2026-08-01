@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ const ROOT = join(import.meta.dirname, "..");
 const CLI = join(ROOT, "scripts/blueprint.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 const SCHEMA = join(ROOT, "schemas/repository-neighborhood-v1.schema.json");
+const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
 
 function handFixture() {
   return {
@@ -60,18 +61,18 @@ test("neighborhood CLI emits a barrier receipt and schema-valid output", () => {
     assert.equal(payload.kind, "RepositoryNeighborhoodV1");
     assert.ok(payload.receiptId);
     assert.ok(payload.repoId);
-    assert.equal(payload.repoRoot, repo);
+    assert.equal(payload.repoRoot, realpathSync(repo).replaceAll("\\", "/"));
     assert.equal(payload.generationId, readGeneration(repo, ".agent").manifest.generationId);
     assert.ok(payload.anchors.some((anchor) => anchor.path === "src/service.ts"));
-    const validation = spawnSync("python3", ["-c", [
+    const validation = spawnSync(PYTHON[0], [...PYTHON.slice(1), "-c", [
       "import json, sys",
       "from jsonschema import Draft202012Validator",
       "schema = json.load(open(sys.argv[1], encoding='utf-8'))",
-      "payload = json.load(open(sys.argv[2], encoding='utf-8'))",
+      "payload = json.load(sys.stdin)",
       "errors = sorted(Draft202012Validator(schema).iter_errors(payload), key=lambda error: list(error.path))",
       "print('\\n'.join(error.message for error in errors))",
       "raise SystemExit(1 if errors else 0)",
-    ].join(";"), SCHEMA, "/dev/stdin"], { input: JSON.stringify(payload), encoding: "utf8" });
+    ].join(";"), SCHEMA], { input: JSON.stringify(payload), encoding: "utf8" });
     assert.equal(validation.status, 0, validation.stderr || validation.stdout);
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });

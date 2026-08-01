@@ -63,6 +63,8 @@ Blueprint-owned code graph:
   negative space, and debt markers. Decomposition candidates carry LOC, bytes, symbol/span, and graph
   relationship metrics; crossing the configurable review threshold never proves bloat. The full
   decomposition verdict/target plan, ponytail/minimize judgment, and severity remain Audit/Architect.
+  A standalone install without the workspace Audit collector returns typed `unavailable` with
+  `reasonCode=audit_collector_missing` instead of throwing.
 - task briefs use graph retrieval as a bounded read-first source before falling back to lexical
   evidence search;
 - product-flow inventory is capped and reports `truncated=true` when capped;
@@ -107,7 +109,7 @@ broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with
 **Resident watcher qualification (2026-08-01):** Parcel event roots are canonicalized before
 relative-path calculation, including macOS `/var` to `/private/var` events. Full qualification
 declares its Python `jsonschema` dependency in `requirements-test.txt`; CI installs it under Python
-3.11 before `pnpm test:all` on macOS and Windows.
+3.11 before serialized `pnpm test:all` on macOS and Windows.
 
 **The qualification harness is built and gated.**
 `evals/run-qualification.mjs` enforces six mandatory gates (`correctness, freshness, security,

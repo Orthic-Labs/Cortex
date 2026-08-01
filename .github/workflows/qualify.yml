@@ -6,6 +6,8 @@ on:
 
 jobs:
   qualify:
+    env:
+      NODE_NO_WARNINGS: "1"
     strategy:
       fail-fast: false
       matrix:

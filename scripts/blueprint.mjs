@@ -98,7 +98,7 @@ function resolveToolsRoot() {
 const TOOLS_ROOT = resolveToolsRoot();
 const CONTEXT_BUDGET_SCRIPT = join(TOOLS_ROOT, "lib/context_budget.py");
 const CONTEXT_BUDGET_LOG = join(TOOLS_ROOT, ".cache/metrics/context-budget.jsonl");
-const AUDIT_FACT_COLLECTOR = join(TOOLS_ROOT, "skills/audit/collect-facts.mjs");
+const AUDIT_FACT_COLLECTOR = resolve(process.env.CORTEX_AUDIT_FACT_COLLECTOR ?? join(TOOLS_ROOT, "skills/audit/collect-facts.mjs"));
 const DEFAULT_HYGIENE_CHECKS = [
   "decomposition",
   "dead_code",
@@ -2744,6 +2744,15 @@ function refreshHygiene(root, outDir, args) {
   const collectorChecks = args.offline
     ? selectedChecks.filter((check) => !NETWORK_ONLY_HYGIENE_CHECKS.has(check))
     : selectedChecks;
+  if (collectorChecks.length > 0 && !existsSync(AUDIT_FACT_COLLECTOR)) {
+    return {
+      schemaVersion: 1,
+      kind: "blueprint-hygiene",
+      state: "unavailable",
+      reasonCode: "audit_collector_missing",
+      collectorPath: AUDIT_FACT_COLLECTOR,
+    };
+  }
   if (collectorChecks.length > 0) {
     const config = loadConfig(root, outDir);
     execFileSync(process.execPath, [

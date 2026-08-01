@@ -28,7 +28,10 @@ test("barrier-all returns independent receipts and candidate identities", () => 
     try { db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','1') ON CONFLICT(key) DO UPDATE SET value='1'").run(); }
     finally { closeStore(db); }
     writeWatchConfig({ repos: [{ root: repoA, enabled: true }, { root: repoB, enabled: true }] }, join(home, ".cortex", "watch.json"));
-    const result = spawnSync(process.execPath, [WATCH, "barrier-all", "--json"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+    const result = spawnSync(process.execPath, [WATCH, "barrier-all", "--json"], {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      encoding: "utf8",
+    });
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.receipts.length, 2);
