@@ -41,7 +41,8 @@ import {
   getGenerationEnvelope,
   loadFileContentHashes,
 } from "./store-sqlite.mjs";
-import { finalizeGenerationIdentity, computeGenerationId } from "./generation-identity.mjs";
+import { finalizeGenerationIdentity, computeGenerationId, computeManifestDigest } from "./generation-identity.mjs";
+import { diffLedgerAgainstTree } from "./merkle-ledger.mjs";
 import { probeScip } from "./scip-provider.mjs";
 
 export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
@@ -93,6 +94,7 @@ const IGNORED = new Set([
   "vendor",
   ".serverless",
 ]);
+export const SCAN_EXCLUSIONS = Object.freeze([...IGNORED].sort());
 const IGNORED_FILE_NAMES = new Set([
   ".DS_Store",
   "Thumbs.db",
@@ -231,13 +233,16 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   if (!existsSync(manifestPath)) return { state: "missing", manifestPath };
   const store = openStoreReadOnly(manifestPath);
   let manifest;
+  let envelope;
   let recordedHashes = new Map();
+  let ledgerPresent = false;
   try {
     if (!hasGeneration(store)) return { state: "missing", manifestPath };
-    const envelope = getGenerationEnvelope(store);
+    envelope = getGenerationEnvelope(store);
     manifest = envelope.manifest;
     if (!manifest?.complete) return { state: "incomplete", manifestPath, manifest };
     recordedHashes = loadFileContentHashes(store, manifest.generationId ?? null);
+    ledgerPresent = Boolean(store.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='generation_leaf'").get());
   } finally {
     closeStore(store);
   }
@@ -252,6 +257,11 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   const scanned = sources.files.length > 0;
   const scanTruncated = Boolean(sources.traversalTruncated);
   const currentHash = scanned && !scanTruncated ? sourceHash(sources.files) : manifest.repo?.sourceHash;
+  let ledgerDiff = null;
+  if (ledgerPresent && scanned && !scanTruncated) {
+    const ledger = openStoreReadOnly(manifestPath);
+    try { ledgerDiff = diffLedgerAgainstTree(ledger, null, sources.files); } finally { closeStore(ledger); }
+  }
   const unsupportedExtensions = new Set();
   let unsupportedFileCount = 0;
   let dirtyOverlayFileCount = 0;
@@ -283,12 +293,20 @@ export function graphStatus(repoRoot, outDir, options = {}) {
     ? manifest.provider?.id !== TREESITTER_PROVIDER.id || manifest.provider?.version !== TREESITTER_PROVIDER.version
     : false;
   const providerMismatch = lexicalMismatch || astMismatch;
-  const fresh = !providerMismatch && (scanned && !scanTruncated ? manifest.repo?.sourceHash === currentHash : true);
+  const manifestDigestValid = !manifest.manifestDigest
+    || manifest.manifestDigest === computeManifestDigest(manifest, envelope?.sourceObservation);
+  const fresh = !providerMismatch && (ledgerDiff
+    ? ledgerDiff.changed.length === 0 && ledgerDiff.added.length === 0 && ledgerDiff.removed.length === 0
+    : scanned && !scanTruncated ? manifest.repo?.sourceHash === currentHash : true)
+    && manifestDigestValid;
   return {
     state: scanTruncated ? "indeterminate" : fresh ? "fresh" : "stale",
     manifestPath,
     manifest,
     providerMismatch,
+    manifestDigestValid,
+    ledger: ledgerPresent,
+    pendingPaths: ledgerDiff ? [...ledgerDiff.changed, ...ledgerDiff.added, ...ledgerDiff.removed].sort() : [],
     scanTruncated,
     truncationReasons: sources.truncationReasons,
     capabilities: {
@@ -968,9 +986,16 @@ export { finalizeGenerationIdentity } from "./generation-identity.mjs";
 function writeGeneration(outDir, generation) {
   const graphDir = join(outDir, "graph");
   mkdirSync(graphDir, { recursive: true });
-  const db = openStore(join(graphDir, "graph.db"));
+  const dbPath = join(graphDir, "graph.db");
+  const db = openStore(dbPath);
   try {
-    saveGeneration(db, generation);
+    saveGeneration(db, generation, { populateState: true });
+    const persisted = loadGeneration(db);
+    if (!persisted
+      || persisted.manifest?.generationId !== generation.manifest?.generationId
+      || persisted.manifest?.manifestDigest !== generation.manifest?.manifestDigest) {
+      throw new Error("graph publication readback identity mismatch");
+    }
   } finally {
     closeStore(db);
   }
@@ -1085,6 +1110,50 @@ function buildGenerationFromSources(root, source, options = {}) {
   };
   const generation = { schemaVersion: 1, provider: PROVIDER, manifest, nodes: cleanNodes, edges: cleanEdges, docTruth, repoRoot: root };
   return { generation, parseCache: nextCache(nextRecords) };
+}
+
+export function parseFileFacts(root, file, options = {}) {
+  const files = options.files ?? [file];
+  const fileByPath = new Map(files.map((item) => [normalizePath(item.path), item]));
+  const current = { ...file, path: normalizePath(file.path) };
+  fileByPath.set(current.path, current);
+  const nodes = [];
+  const edges = [];
+  const fileNode = {
+    id: `file:${current.path}`,
+    kind: "file",
+    labels: ["File"],
+    name: current.path.split("/").at(-1),
+    qualifiedName: current.path,
+    path: current.path,
+    confidence: 1,
+    evidence: [fileEvidence(current, 1, Math.max(1, current.lines?.length ?? 1))],
+  };
+  nodes.push(fileNode);
+  if (isCodeFile(current)) extractSymbols(current, (node) => { nodes.push(node); return node; });
+  for (const imported of extractImports(current, [...fileByPath.values()])) {
+    const target = fileByPath.get(imported);
+    if (target) {
+      edges.push(importEdgeRecord(fileNode, {
+        id: `file:${target.path}`,
+        path: target.path,
+      }, imported, true, [fileEvidence(current, 1, 1)]));
+    }
+  }
+  for (const specifier of extractUnresolvedImportSpecifiers(current, [...fileByPath.values()])) {
+    edges.push(importEdgeRecord(fileNode, null, specifier, false, [fileEvidence(current, 1, 1)]));
+  }
+  const dependencies = extractImports(current, [...fileByPath.values()]).map((sourcePath) => ({
+    dependentPath: current.path,
+    sourcePath,
+    reason: "import",
+  }));
+  const dedupe = (items, key) => [...new Map(items.map((item) => [key(item), item])).values()];
+  return {
+    nodes: dedupe(nodes, (node) => node.id),
+    edges: dedupe(edges, (edge) => edge.id),
+    dependencies: dedupe(dependencies, (item) => `${item.sourcePath}:${item.dependentPath}:${item.reason}`),
+  };
 }
 
 function scanSources(root, fileLimit = 0, walkOptions = {}) {

@@ -17,6 +17,10 @@ function xxh128(value) {
   return xxhasher.digest("hex");
 }
 
+export function contentDigest(bytes) {
+  return `xxh128:${xxh128(bytes)}`;
+}
+
 function stableStringify(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
@@ -34,6 +38,7 @@ export function computeManifestDigest(manifest, sourceObservation = null) {
     provider: manifest?.provider ?? null,
     providerComposition: manifest?.providerComposition ?? null,
     counts: manifest?.counts ?? null,
+    repo: manifest?.repo ?? null,
     sourceObservation: sourceObservation ?? manifest?.sourceObservation ?? null,
   };
   return `sha256:${createHash("sha256").update(stableStringify(payload)).digest("hex")}`;
@@ -54,4 +59,15 @@ export function finalizeGenerationIdentity(generation) {
       : generation.provider.id;
   }
   return generation;
+}
+
+export function resealGenerationIdentityDelta(envelope, rootDigest, appliedClock) {
+  const manifest = envelope?.manifest;
+  if (!manifest) throw new Error("generation envelope is missing manifest");
+  const previousGenerationId = manifest.generationId ?? null;
+  const generationId = `xxh128:${xxh128(stableStringify({ previousGenerationId, rootMerkleDigest: rootDigest, appliedClock }))}`;
+  manifest.generationId = generationId;
+  manifest.generatedAt = `gen:${generationId.replace(/^xxh128:/, "").slice(0, 16)}`;
+  manifest.manifestDigest = computeManifestDigest(manifest, envelope.sourceObservation);
+  return envelope;
 }

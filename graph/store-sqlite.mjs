@@ -8,6 +8,9 @@
 // explicitly given (or ':memory:'); it never resolves or writes outside that.
 
 import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
+import { statSync } from "node:fs";
+import { computeFullLedger } from "./merkle-ledger.mjs";
 
 // Derived from MIGRATIONS below, never hardcoded: a literal here silently
 // desyncs the moment a migration is appended, and migrate() would then stop
@@ -212,6 +215,45 @@ const MIGRATIONS = [
       );
     `);
   },
+  // Migration 4 — per-file ownership and Merkle freshness state.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS file_state (
+        path TEXT PRIMARY KEY,
+        content_digest TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        mtime_ms REAL,
+        file_identity TEXT,
+        last_event_seq INTEGER,
+        applied_clock INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS fact_owner (
+        fact_id TEXT NOT NULL,
+        fact_kind TEXT NOT NULL CHECK (fact_kind IN ('node','edge')),
+        source_path TEXT NOT NULL,
+        source_digest TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        provider_version TEXT NOT NULL,
+        freshness_domain TEXT NOT NULL CHECK (freshness_domain IN ('structural','doc','semantic')),
+        fact_kind_detail TEXT,
+        PRIMARY KEY (fact_id, fact_kind, provider_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_fact_owner_path ON fact_owner(source_path);
+      CREATE INDEX IF NOT EXISTS idx_fact_owner_domain ON fact_owner(freshness_domain);
+      CREATE TABLE IF NOT EXISTS dependency_index (
+        source_path TEXT NOT NULL,
+        dependent_path TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (reason IN ('import','call','route','schema','config','manifest')),
+        PRIMARY KEY (source_path, dependent_path, reason)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dep_source ON dependency_index(source_path);
+      CREATE TABLE IF NOT EXISTS generation_leaf (
+        path TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('file','dir')),
+        digest TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -400,6 +442,7 @@ export function saveGeneration(db, generation, options = {}) {
   db.exec("BEGIN;");
   try {
     const summary = insertGenerationRows(db, generation, options);
+    if (options.populateState) populateGenerationState(db, generation);
     for (const key of envelopeKeysPresent) {
       put.run(key, JSON.stringify(generation[key]));
     }
@@ -415,6 +458,84 @@ export function saveGeneration(db, generation, options = {}) {
     db.exec("ROLLBACK;");
     throw error;
   }
+}
+
+function normalizeContentDigest(value) {
+  const text = String(value ?? "");
+  return text.startsWith("xxh128:") ? text : `xxh128:${text}`;
+}
+
+function providerIdentity(generation) {
+  const provider = generation.provider ?? generation.manifest?.provider ?? {};
+  const id = typeof provider === "string" ? provider : provider.id ?? "lexical";
+  const version = typeof provider === "string" ? "unknown" : provider.version ?? "unknown";
+  return {
+    id: id.includes("treesitter") ? "treesitter" : id.includes("scip") ? "scip" : "lexical",
+    version: String(version),
+  };
+}
+
+function fileStateForNode(generation, node) {
+  const digest = normalizeContentDigest(node.evidence?.[0]?.contentHash ?? "unknown");
+  let size = 0;
+  let mtimeMs = null;
+  let identity = null;
+  try {
+    const stat = statSync(join(generation.repoRoot ?? "", node.path));
+    size = stat.size;
+    mtimeMs = stat.mtimeMs;
+    identity = stat.dev !== undefined && stat.ino !== undefined ? `${stat.dev}:${stat.ino}` : null;
+  } catch {
+    /* a persisted generation may outlive its source tree */
+  }
+  return { digest, size, mtimeMs, identity };
+}
+
+function populateGenerationState(db, generation) {
+  const provider = providerIdentity(generation);
+  const files = (generation.nodes ?? []).filter((node) => node.kind === "file");
+  const fileById = new Map(files.map((node) => [node.id, node.path]));
+  db.exec("DELETE FROM file_state; DELETE FROM fact_owner; DELETE FROM dependency_index; DELETE FROM generation_leaf;");
+  const insertFileState = db.prepare("INSERT INTO file_state(path, content_digest, size, mtime_ms, file_identity, last_event_seq, applied_clock) VALUES (?, ?, ?, ?, ?, NULL, 0)");
+  for (const file of files) {
+    const state = fileStateForNode(generation, file);
+    insertFileState.run(file.path, state.digest, state.size, state.mtimeMs, state.identity);
+  }
+  const insertOwner = db.prepare("INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail) VALUES (?, ?, ?, ?, ?, ?, 'structural', ?)");
+  for (const node of generation.nodes ?? []) {
+    const path = node.path;
+    if (!path) continue;
+    const digest = normalizeContentDigest(files.find((file) => file.path === path)?.evidence?.[0]?.contentHash ?? "unknown");
+    insertOwner.run(node.id, "node", path, digest, provider.id, provider.version, node.kind);
+  }
+  for (const edge of generation.edges ?? []) {
+    const sourcePath = fileById.get(edge.source) ?? (generation.nodes ?? []).find((node) => node.id === edge.source)?.path;
+    if (!sourcePath) continue;
+    const digest = normalizeContentDigest(files.find((file) => file.path === sourcePath)?.evidence?.[0]?.contentHash ?? "unknown");
+    insertOwner.run(edge.id, "edge", sourcePath, digest, provider.id, provider.version, edge.kind);
+    if (edge.kind === "IMPORTS" && edge.target) {
+      const targetPath = fileById.get(edge.target);
+      if (targetPath) db.prepare("INSERT OR IGNORE INTO dependency_index(source_path, dependent_path, reason) VALUES (?, ?, 'import')").run(targetPath, sourcePath);
+    }
+  }
+  computeFullLedger(db, files.map((file) => ({ path: file.path, contentDigest: file.evidence?.[0]?.contentHash })));
+}
+
+export function deleteFactsByOwner(db, path, providerId = null) {
+  const clauses = ["source_path = ?"];
+  const params = [String(path)];
+  if (providerId) { clauses.push("provider_id = ?"); params.push(String(providerId)); }
+  const owners = db.prepare(`SELECT fact_id, fact_kind FROM fact_owner WHERE ${clauses.join(" AND ")}`).all(...params);
+  for (const owner of owners) {
+    if (owner.fact_kind === "edge") db.prepare("DELETE FROM edges WHERE id = ?").run(owner.fact_id);
+    else if (owner.fact_kind === "node") db.prepare("DELETE FROM symbols WHERE id = ?").run(owner.fact_id);
+  }
+  db.prepare(`DELETE FROM fact_owner WHERE ${clauses.join(" AND ")}`).run(...params);
+  return owners;
+}
+
+export function loadFileState(db, path) {
+  return db.prepare("SELECT * FROM file_state WHERE path = ?").get(String(path)) ?? null;
 }
 
 /**

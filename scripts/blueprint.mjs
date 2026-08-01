@@ -41,6 +41,8 @@ import {
   graphNeighbors,
   graphPath,
   graphStatus,
+  parseFileFacts,
+  scanSourcesPublic,
   readGeneration,
   queryGraph,
   resolveGraphNode,
@@ -67,6 +69,8 @@ import {
   encodeTabular,
 } from "../graph/traverse-store.mjs";
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
+import { stableRead } from "../graph/stable-read.mjs";
+import { applyFileDelta } from "../graph/delta-store.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -186,6 +190,7 @@ usage:
   ${command} hygiene status|refresh [--out .agent] [--only check,...] [--offline] [--json]
   ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N] [--budget TOKENS] [--json]
   ${command} orient [--out .agent] [--query TEXT] [--json]
+  ${command} delta <path...> [--out .agent]
 `);
 }
 
@@ -228,12 +233,26 @@ function persistGenerationToStore(root, outDir, generation) {
   const dbPath = join(resolve(root, outDir), "graph", "graph.db");
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = openStore(dbPath);
+  let summary;
+  let rows;
   try {
-    const summary = saveGeneration(db, generation);
-    return { ok: true, path: dbPath, rows: countRows(db), summary };
+    summary = saveGeneration(db, generation, { populateState: true });
+    rows = countRows(db);
+    if (rows.files !== summary.fileCount || rows.edges !== summary.edgeCount) {
+      throw new Error(`graph publication readback row mismatch: files=${rows.files}/${summary.fileCount} edges=${rows.edges}/${summary.edgeCount}`);
+    }
   } finally {
     closeStore(db);
   }
+  const readback = readGeneration(root, outDir);
+  const expectedId = generation.manifest?.generationId ?? null;
+  const actualId = readback?.manifest?.generationId ?? null;
+  const expectedDigest = generation.manifest?.manifestDigest ?? null;
+  const actualDigest = readback?.manifest?.manifestDigest ?? null;
+  if (!readback || actualId !== expectedId || actualDigest !== expectedDigest) {
+    throw new Error(`graph publication readback identity mismatch: generation=${actualId}/${expectedId} manifest=${actualDigest}/${expectedDigest}`);
+  }
+  return { ok: true, path: dbPath, rows, summary, readback: { generationId: actualId, manifestDigest: actualDigest } };
 }
 
 async function finalizeAndPersistGraphGeneration(root, outDir, generation, options = {}) {
@@ -1988,6 +2007,57 @@ async function runGraphCommand(root, outDir, subcommand, args) {
   return 1;
 }
 
+async function runDelta(root, outDir, args) {
+  const dbPath = join(resolve(root, outDir), "graph", "graph.db");
+  if (!existsSync(dbPath)) throw graphReadError("graph_missing", "Graph store is missing; run cortex build");
+  const paths = args._.map(normalizePath).filter(Boolean);
+  if (paths.length === 0) throw new Error("cortex delta requires at least one path");
+  const source = scanSourcesPublic(root, 0, {});
+  const sourceFiles = source.files ?? [];
+  const byPath = new Map(sourceFiles.map((file) => [normalizePath(file.path), file]));
+  const db = openStore(dbPath);
+  try {
+    const results = [];
+    for (const path of paths) {
+      const absPath = resolve(root, path);
+      const exists = existsSync(absPath);
+      let parsed = null;
+      let contentDigestValue = null;
+      let read = null;
+      if (exists) {
+        read = stableRead(absPath);
+        contentDigestValue = read.contentDigest;
+        const descriptor = {
+          absolutePath: absPath,
+          path,
+          text: read.bytes.toString("utf8"),
+          lines: read.bytes.toString("utf8").split(/\r?\n/),
+          contentHash: read.contentDigest.replace(/^xxh128:/, ""),
+          size: read.bytes.length,
+        };
+        const files = sourceFiles.map((file) => normalizePath(file.path) === path ? descriptor : file);
+        if (!files.some((file) => normalizePath(file.path) === path)) files.push(descriptor);
+        parsed = parseFileFacts(root, descriptor, { files });
+      }
+      const eventKind = !exists ? "delete" : byPath.has(path) ? "modify" : "create";
+      results.push(applyFileDelta(db, {
+        eventKind,
+        path,
+        parsed,
+        provider: { id: "lexical", version: "repo-local-delta-v1" },
+        contentDigest: contentDigestValue,
+        fileIdentity: read?.fileIdentity ?? null,
+        size: read?.bytes.length ?? 0,
+        mtimeMs: read?.statAfter?.mtimeMs ?? null,
+      }));
+    }
+    console.log(JSON.stringify(results, null, 2));
+    return 0;
+  } finally {
+    closeStore(db);
+  }
+}
+
 function orientPayload(root, outDir, args = {}) {
   const status = graphStatus(root, outDir);
   const map = readJson(join(root, outDir, "map.json"), {});
@@ -2534,7 +2604,7 @@ async function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -2597,6 +2667,7 @@ async function main() {
     console.log(JSON.stringify(orientPayload(root, outDir, args), null, 2));
     return 0;
   }
+  if (command === "delta") return await runDelta(root, outDir, args);
   usage();
   return 1;
 }
