@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
 import { parseFileFacts, scanSourcesPublic } from "../graph/static-provider.mjs";
@@ -13,6 +13,7 @@ const DEBOUNCE_MS = 1000;
 const MAX_DRAIN_PASSES = 5;
 
 function normalizePath(value) { return String(value).replaceAll("\\", "/").replace(/^\.\//, ""); }
+function canonicalRoot(value) { const root = resolve(value); try { return realpathSync(root); } catch { return root; } }
 function dbPath(root, outDir) { return join(resolve(root), outDir, "graph", "graph.db"); }
 function stateValue(db, key, fallback = null) { return db.prepare("SELECT value FROM watch_state WHERE key=?").get(key)?.value ?? fallback; }
 function setState(db, key, value) { db.prepare("INSERT INTO watch_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value)); }
@@ -141,7 +142,7 @@ export function drainJournal(db, root, { force = true, maxDependentFiles = MAX_D
 export class RepositoryActor extends EventEmitter {
   constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES }) {
     super();
-    this.root = resolve(root);
+    this.root = canonicalRoot(root);
     this.outDir = outDir;
     this.dbPath = dbPath(this.root, outDir);
     this.snapshotPath = snapshotPath ? resolve(snapshotPath) : join(this.root, outDir, "graph", "watch.snapshot");

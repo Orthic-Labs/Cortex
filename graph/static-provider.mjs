@@ -122,8 +122,13 @@ const OPAQUE_FILE_EXTENSIONS = new Set([
 ]);
 const SUPPORTED_EXTENSIONS = new Set([...CODE_EXTENSIONS, ...FILE_ONLY_EXTENSIONS, ...OPAQUE_FILE_EXTENSIONS]);
 
+function canonicalRoot(value) {
+  const root = resolve(value);
+  try { return realpathSync(root); } catch { return root; }
+}
+
 export function scanSourcesPublic(root, fileLimit = 0, walkOptions = {}) {
-  return scanSources(root, fileLimit, walkOptions);
+  return scanSources(canonicalRoot(root), fileLimit, walkOptions);
 }
 
 export function sourceHashPublic(files) {
@@ -131,7 +136,7 @@ export function sourceHashPublic(files) {
 }
 
 export function buildGraphGeneration(repoRoot, options = {}) {
-  const root = resolve(repoRoot);
+  const root = canonicalRoot(repoRoot);
   const outDir = options.outDir ? resolve(root, options.outDir) : null;
   const source = scanSources(root, options.fileLimit || 0, options);
   // B2 incremental: reuse per-file symbol extraction for byte-identical files.
@@ -166,7 +171,7 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
   if (options.treesitter === false || process.env.BLUEPRINT_TREESITTER === "0") {
     return { state: "disabled" };
   }
-  const root = resolve(repoRoot);
+  const root = canonicalRoot(repoRoot);
   try {
     const tsModule = await import("./treesitter-provider.mjs");
     const { augmentGeneration, PROVIDER: TS_PROVIDER, SUPPORTED_EXTENSIONS: TS_EXTENSIONS } = tsModule;
@@ -225,7 +230,7 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
 }
 
 export function graphStatus(repoRoot, outDir, options = {}) {
-  const root = resolve(repoRoot);
+  const root = canonicalRoot(repoRoot);
   // The store IS the manifest now. "missing" means build has never run here,
   // which is a normal first-use state answered by building — not by reaching
   // for a second format.
@@ -341,7 +346,7 @@ export function graphStatus(repoRoot, outDir, options = {}) {
  * carrying a second serialization format forever.
  */
 export function readGeneration(repoRoot, outDir) {
-  const dbPath = join(resolve(repoRoot, outDir), "graph", "graph.db");
+  const dbPath = join(canonicalRoot(repoRoot), outDir, "graph", "graph.db");
   if (!existsSync(dbPath)) return null;
   const db = openStoreReadOnly(dbPath);
   try {
@@ -555,7 +560,7 @@ export function createContextCandidateSet(generation, options = {}) {
 }
 
 export function repositoryIdentity(repoRoot) {
-  const root = resolve(repoRoot).replaceAll("\\", "/");
+  const root = canonicalRoot(repoRoot).replaceAll("\\", "/");
   const gitOrigin = spawnSync("git", ["-C", root, "config", "--get", "remote.origin.url"], { encoding: "utf8" });
   const origin = gitOrigin.status === 0 ? gitOrigin.stdout.trim() : "";
   return { repoId: `xxh128:${xxh128(`${root}\n${origin}`)}`, repoRoot: root, originUrl: origin || null };
@@ -1273,6 +1278,7 @@ function gitEligiblePaths(root, options = {}) {
   // never silently indexed. `trackedOnly:false` keeps the legacy working-tree scan
   // for callers that explicitly want the local dirty view.
   const trackedOnly = options.trackedOnly !== false;
+  if (!existsSync(join(root, ".git"))) return null;
   const lsFilesArgs = trackedOnly
     ? ["-C", root, "ls-files", "-z", "--cached", "--"]
     : ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"];

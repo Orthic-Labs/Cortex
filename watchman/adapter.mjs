@@ -5,6 +5,11 @@ import { SCAN_EXCLUSIONS } from "../graph/static-provider.mjs";
 
 const EVENT_TYPES = new Set(["create", "update", "delete"]);
 
+function canonicalRoot(value) {
+  const root = resolve(value);
+  try { return realpathSync(root); } catch { return root; }
+}
+
 function normalizePath(root, value) {
   return relative(root, resolve(root, String(value))).replaceAll("\\", "/");
 }
@@ -15,12 +20,12 @@ function ignorePatterns(extra = []) {
 }
 
 function normalizeEvents(root, events, observedMs = Date.now()) {
-  const canonicalRoot = realpathSync(resolve(root));
+  const normalizedRoot = canonicalRoot(root);
   const candidates = events
     .filter((event) => EVENT_TYPES.has(event.type))
     .map((event) => ({
       eventKind: event.type === "update" ? "modify" : event.type,
-      path: normalizePath(canonicalRoot, event.path),
+      path: normalizePath(normalizedRoot, event.path),
       renameTo: null,
       observedMs,
     }))
@@ -49,7 +54,7 @@ function options(ignore) {
 }
 
 export async function startWatch(root, onEvents, onGap = () => {}, ignore = []) {
-  const absoluteRoot = resolve(root);
+  const absoluteRoot = canonicalRoot(root);
   const callback = (error, events = []) => {
     if (error) {
       onGap(error);
@@ -67,12 +72,13 @@ export async function startWatch(root, onEvents, onGap = () => {}, ignore = []) 
 }
 
 export async function writeSnapshot(root, snapshotPath, ignore = []) {
-  return ParcelWatcher.writeSnapshot(resolve(root), resolve(snapshotPath), options(ignore));
+  return ParcelWatcher.writeSnapshot(canonicalRoot(root), resolve(snapshotPath), options(ignore));
 }
 
 export async function eventsSince(root, snapshotPath, ignore = []) {
-  const events = await ParcelWatcher.getEventsSince(resolve(root), resolve(snapshotPath), options(ignore));
-  return normalizeEvents(resolve(root), events);
+  const normalizedRoot = canonicalRoot(root);
+  const events = await ParcelWatcher.getEventsSince(normalizedRoot, resolve(snapshotPath), options(ignore));
+  return normalizeEvents(normalizedRoot, events);
 }
 
 export { normalizeEvents };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,15 +34,17 @@ test("barrier-all returns independent receipts and candidate identities", () => 
     });
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
+    const canonicalA = realpathSync(repoA);
+    const canonicalB = realpathSync(repoB);
     assert.equal(payload.receipts.length, 2);
-    assert.deepEqual(payload.receipts.map((entry) => entry.repoRoot).sort(), [repoA, repoB].sort());
+    assert.deepEqual(payload.receipts.map((entry) => entry.repoRoot).sort(), [canonicalA, canonicalB].sort());
     assert.ok(payload.receipts.every((entry) => entry.receipt.receiptId));
     assert.ok(payload.receipts.every((entry) => entry.receipt.barrierResult === "caught_up"));
     const candidateA = createContextCandidateSet(readGeneration(repoA, ".agent"), { task: "a" });
     const candidateB = createContextCandidateSet(readGeneration(repoB, ".agent"), { task: "b" });
     assert.notEqual(candidateA.repoId, candidateB.repoId);
-    assert.equal(candidateA.repoRoot, repoA);
-    assert.equal(candidateB.repoRoot, repoB);
+    assert.equal(candidateA.repoRoot, canonicalA);
+    assert.equal(candidateB.repoRoot, canonicalB);
     assert.equal(candidateA.receiptId, null);
     const cliCandidate = spawnSync(process.execPath, [join(ROOT, "scripts/blueprint.mjs"), "candidates", "--repo-id", "explicit-repo", "--query", "placeOrder", "--json"], { cwd: repoA, encoding: "utf8" });
     assert.equal(cliCandidate.status, 0, cliCandidate.stderr);

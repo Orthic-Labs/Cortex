@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { diffLedgerAgainstTree } from "../graph/merkle-ledger.mjs";
 import { scanSourcesPublic } from "../graph/static-provider.mjs";
@@ -7,10 +7,11 @@ import { eventsSince, writeSnapshot } from "./adapter.mjs";
 import { appendWatchEvents, drainJournal } from "./repo-actor.mjs";
 
 function snapshotPath(root, outDir) { return join(resolve(root), outDir, "graph", "watch.snapshot"); }
+function canonicalRoot(value) { const root = resolve(value); try { return realpathSync(root); } catch { return root; } }
 
 export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
-  const db = typeof dbOrRoot === "string" ? openStore(join(resolve(dbOrRoot), options.outDir ?? ".agent", "graph", "graph.db")) : dbOrRoot;
-  const root = typeof dbOrRoot === "string" ? resolve(dbOrRoot) : resolve(rootOrOptions);
+  const root = canonicalRoot(typeof dbOrRoot === "string" ? dbOrRoot : rootOrOptions);
+  const db = typeof dbOrRoot === "string" ? openStore(join(root, options.outDir ?? ".agent", "graph", "graph.db")) : dbOrRoot;
   const outDir = options.outDir ?? ".agent";
   const close = typeof dbOrRoot === "string";
   try {

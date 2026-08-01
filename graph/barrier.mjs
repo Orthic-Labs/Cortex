@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reconcile } from "../watchman/reconcile.mjs";
 import { closeStore, getGenerationEnvelope, insertGenerationReceipt, openStore } from "./store-sqlite.mjs";
 import { recordBarrierDuration } from "../lib/telemetry.mjs";
 
 const POLL_MS = 25;
+function canonicalRoot(value) { const root = resolve(value); try { return realpathSync(root); } catch { return root; } }
 
 function state(db) {
   const rows = db.prepare("SELECT key,value FROM watch_state").all();
@@ -40,7 +41,7 @@ async function bounded(promise, timeoutMs) {
  */
 export async function syncToCurrentSource(db, root, { timeoutMs = 2000, allowDegraded = false, outDir = ".agent" } = {}) {
   const startedMs = Date.now();
-  const repoRoot = resolve(root);
+  const repoRoot = canonicalRoot(root);
   const initial = state(db);
   const targetClock = Number(initial.source_clock ?? 0);
   let barrierResult = "caught_up";

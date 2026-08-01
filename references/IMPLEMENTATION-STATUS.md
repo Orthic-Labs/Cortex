@@ -107,7 +107,9 @@ broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with
 `tests/workspace/` (`npm run test:workspace` / `test:all`).
 
 **Resident watcher qualification (2026-08-01):** Parcel event roots are canonicalized before
-relative-path calculation, including macOS `/var` to `/private/var` events. Full qualification
+subscription and relative-path calculation, including macOS `/var` to `/private/var` events. Graph,
+barrier, reconciliation, and repository identity use the same canonical root; no-repo fixture scans
+skip a doomed Git probe. Full qualification
 declares its Python `jsonschema` dependency in `requirements-test.txt`; CI installs it under Python
 3.11 before serialized `pnpm test:all` on macOS and Windows.
 

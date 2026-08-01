@@ -59,7 +59,8 @@ async function barrierAll() {
   const repos = readWatchConfig(configPath).repos;
   const receipts = await Promise.all(repos.map(async ({ root }) => {
     try {
-      return { repoRoot: root, receipt: await syncToCurrentSourceAtPath(root, { outDir: ".agent", timeoutMs: 2000 }) };
+      const receipt = await syncToCurrentSourceAtPath(root, { outDir: ".agent", timeoutMs: 2000 });
+      return { repoRoot: receipt.repoRoot, receipt };
     } catch (error) {
       return { repoRoot: root, receipt: { receiptId: null, repoRoot: root, barrierResult: "error", error: String(error?.message ?? error) } };
     }
