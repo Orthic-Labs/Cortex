@@ -165,8 +165,7 @@ export class RepositoryActor extends EventEmitter {
 
   async initialize() {
     const hadSnapshot = existsSync(this.snapshotPath);
-    if (!hadSnapshot) await this.adapter.writeSnapshot(this.root, this.snapshotPath);
-    else {
+    if (hadSnapshot && !this.autoReconcileOnGap) {
       const events = await this.adapter.eventsSince(this.root, this.snapshotPath);
       if (events.length) { this.ingest(events); this.flush(true); }
     }
@@ -174,7 +173,7 @@ export class RepositoryActor extends EventEmitter {
     try {
       setState(db, "watcher_pid", process.pid);
       await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles });
-      await this.adapter.writeSnapshot(this.root, this.snapshotPath);
+      if (!existsSync(this.snapshotPath)) await this.adapter.writeSnapshot(this.root, this.snapshotPath);
       setState(db, "event_gap", 0);
     } finally { closeStore(db); }
   }

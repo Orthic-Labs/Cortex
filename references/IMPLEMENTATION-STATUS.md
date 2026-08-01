@@ -111,7 +111,10 @@ subscription and relative-path calculation, including macOS `/var` to `/private/
 barrier, reconciliation, and repository identity use the same canonical root; no-repo fixture scans
 skip a doomed Git probe. Watcher startup owns initial Parcel snapshot creation; reconciliation only
 refreshes an existing watcher snapshot. Reconciliation state plus receipt telemetry use bounded
-transactions, preserving the no-op barrier budget on Windows filesystems. Full qualification
+transactions. Once established, Parcel events plus an independent metadata tree diff form the
+fast change proof; each detected path still flows through content-hash delta application. A missing
+snapshot falls back to the Merkle/hash authority scan. This preserves the no-op barrier budget on
+Windows filesystems without weakening edit, add, delete, or downtime detection. Full qualification
 declares its Python `jsonschema` dependency in `requirements-test.txt`; CI installs it under Python
 3.11 before serialized `pnpm test:all` on macOS and Windows.
 

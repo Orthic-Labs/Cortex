@@ -51,6 +51,15 @@ test("reconcile clears an overflow gap only after applying authority diff", asyn
       const result = await reconcile(db, repo, { outDir: ".agent" });
       assert.deepEqual(result.changed, ["src/service.ts"]);
       assert.equal(db.prepare("SELECT value FROM watch_state WHERE key='event_gap'").get().value, "0");
+      assert.equal(existsSync(join(repo, ".agent/graph/watch.snapshot")), true);
+      writeFileSync(join(repo, "src/config.ts"), `${readFileSync(join(repo, "src/config.ts"), "utf8")}\nexport const snapshotDiff = true;\n`);
+      writeFileSync(join(repo, "src/added.ts"), "export const addedBySnapshotDiff = true;\n");
+      rmSync(join(repo, "src/store.ts"));
+      const fastResult = await reconcile(db, repo, { outDir: ".agent" });
+      assert.deepEqual(fastResult.changed, ["src/config.ts"]);
+      assert.deepEqual(fastResult.added, ["src/added.ts"]);
+      assert.deepEqual(fastResult.removed, ["src/store.ts"]);
+      assert.equal(fastResult.applied, 3);
     } finally { closeStore(db); }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });

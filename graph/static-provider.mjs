@@ -131,6 +131,27 @@ export function scanSourcesPublic(root, fileLimit = 0, walkOptions = {}) {
   return scanSources(canonicalRoot(root), fileLimit, walkOptions);
 }
 
+export function scanSourceMetadataPublic(root, walkOptions = {}) {
+  const canonical = canonicalRoot(root);
+  const traversal = walk(canonical, walkOptions);
+  const files = [];
+  for (const absolutePath of traversal.paths) {
+    try {
+      const stat = statSync(absolutePath);
+      files.push({
+        path: normalizePath(relative(canonical, absolutePath)),
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        identity: stat.dev !== undefined && stat.ino !== undefined ? `${stat.dev}:${stat.ino}` : null,
+      });
+    } catch {
+      /* concurrent removal is represented by the missing path */
+    }
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return { files, traversalTruncated: traversal.state.truncated, truncationReasons: [...traversal.reasons].sort() };
+}
+
 export function sourceHashPublic(files) {
   return sourceHash(files);
 }
