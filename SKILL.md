@@ -6,6 +6,8 @@ allowed-tools: ["Read", "Bash", "Glob", "Grep", "Write", "Agent", "Workflow"]
 
 # Blueprint
 
+Product is now **Cortex**: `cortex` is canonical, `blueprint` remains a compatibility alias; prose brands nodes, edges & flows as Neurons, Synapses & Circuits.
+
 One tool to make an agent understand a repo. Deterministic mapping first (cheap, complete, grounds everything in real files), then parallel agents to verify and synthesize. Humans get `docs/product.md` and `docs/architecture.md`; agents get structured machine artifacts. This is comprehension — it never modifies application code.
 
 Canonical ownership and workflow boundary: `docs/BLUEPRINT-AUDIT-ARCHITECT-WORKFLOW.md`.

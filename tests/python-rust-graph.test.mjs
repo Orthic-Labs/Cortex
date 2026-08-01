@@ -121,7 +121,7 @@ test("Rust files emit type, impl method, and function symbols plus module and ca
 test("capability reporting treats Python and Rust as parsed languages", () => {
   withLanguageFixture((repo) => {
     const outDir = path.join(repo, ".agent");
-    buildGraphGeneration(repo, { outDir });
+    buildGraphGeneration(repo, { outDir, persist: true });
     const status = graphStatus(repo, outDir);
     const parsedExtensions = graphCapabilities().languageCoverage.parsedExtensions;
 
@@ -137,7 +137,7 @@ test("capability reporting treats Python and Rust as parsed languages", () => {
 test("provider upgrades invalidate generations that predate Python and Rust extraction", () => {
   withLanguageFixture((repo) => {
     const outDir = path.join(repo, ".agent");
-    buildGraphGeneration(repo, { outDir });
+    buildGraphGeneration(repo, { outDir, persist: true });
     // Age the LEXICAL layer's identity: after tree-sitter's promotion the
     // selected provider recorded in `provider` is the AST one, and it is
     // `lexicalProvider` that gates whether persisted lexical nodes are still
@@ -334,7 +334,7 @@ test("opaque assets and framework resource files do not masquerade as unsupporte
     "materials/scene.tres": "[gd_resource]\n",
   }, (repo) => {
     const outDir = path.join(repo, ".agent");
-    buildGraphGeneration(repo, { outDir });
+    buildGraphGeneration(repo, { outDir, persist: true });
     const status = graphStatus(repo, outDir);
     assert.equal(status.capabilities.unsupportedFileCount, 0);
     assert.deepEqual(status.capabilities.unsupportedExtensions, []);

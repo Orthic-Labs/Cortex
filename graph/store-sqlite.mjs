@@ -75,6 +75,7 @@ export function readManifestEnvelope(db) {
     storeSchemaVersion: versionRow ? Number(versionRow.value) : 0,
     schemaVersion: get("schemaVersion") ?? null,
     generationId: manifest.generationId ?? null,
+    manifestDigest: manifest.manifestDigest ?? null,
     provider: manifest.provider ?? null,
     lexicalProvider: manifest.lexicalProvider ?? null,
     providerComposition: manifest.providerComposition ?? null,
@@ -254,7 +255,7 @@ export function migrate(db) {
   // history). `mode: "append"` skips the clear, for callers deliberately
 // keeping multiple generations side by side (e.g. a test asserting
 // generation_id filtering).
-export function bulkInsertGeneration(db, generation, options = {}) {
+function insertGenerationRows(db, generation, options = {}) {
   const mode = options.mode ?? "replace";
   const generationId = String(options.generationId ?? generation.manifest?.generationId ?? generation.generationId ?? "unknown");
   const nodes = generation.nodes ?? [];
@@ -304,66 +305,71 @@ export function bulkInsertGeneration(db, generation, options = {}) {
     return Object.keys(extra).length ? JSON.stringify(extra) : null;
   };
 
-  db.exec("BEGIN;");
-  try {
-    if (mode === "replace") {
-      db.exec("DELETE FROM files; DELETE FROM symbols; DELETE FROM edges;");
-    }
-    for (const node of nodes) {
-      if (node.kind === "file") {
-        const report = fileReportByPath.get(node.path);
-        insertFile.run(
-          node.path,
-          node.evidence?.[0]?.contentHash ?? null,
-          report?.language ?? null,
-          report?.provider ?? null,
-          report?.parseStatus ?? null,
-          report?.errorNodeCount ?? null,
-          generationId,
-          node.id,
-          JSON.stringify(node.labels ?? []),
-          node.name ?? null,
-          node.qualifiedName ?? null,
-          node.confidence ?? 1,
-          JSON.stringify(node.evidence ?? []),
-          extraOf(node, NODE_COLUMN_KEYS),
-        );
-      } else {
-        insertSymbol.run(
-          node.id,
-          node.kind,
-          JSON.stringify(node.labels ?? []),
-          node.name,
-          node.qualifiedName,
-          node.path,
-          node.confidence ?? 1,
-          JSON.stringify(node.evidence ?? []),
-          generationId,
-          extraOf(node, NODE_COLUMN_KEYS),
-        );
-      }
-    }
-    for (const edge of edges) {
-      insertEdge.run(
-        edge.id,
-        edge.kind,
-        edge.source,
-        edge.target ?? null,
-        edge.confidence ?? 1,
-        edge.resolved === false ? 0 : 1,
-        edge.specifier ?? null,
-        JSON.stringify(edge.evidence ?? []),
+  if (mode === "replace") {
+    db.exec("DELETE FROM files; DELETE FROM symbols; DELETE FROM edges; DELETE FROM vectors;");
+  }
+  for (const node of nodes) {
+    if (node.kind === "file") {
+      const report = fileReportByPath.get(node.path);
+      insertFile.run(
+        node.path,
+        node.evidence?.[0]?.contentHash ?? null,
+        report?.language ?? null,
+        report?.provider ?? null,
+        report?.parseStatus ?? null,
+        report?.errorNodeCount ?? null,
         generationId,
-        edge.confidenceTier ?? null,
-        extraOf(edge, EDGE_COLUMN_KEYS),
+        node.id,
+        JSON.stringify(node.labels ?? []),
+        node.name ?? null,
+        node.qualifiedName ?? null,
+        node.confidence ?? 1,
+        JSON.stringify(node.evidence ?? []),
+        extraOf(node, NODE_COLUMN_KEYS),
+      );
+    } else {
+      insertSymbol.run(
+        node.id,
+        node.kind,
+        JSON.stringify(node.labels ?? []),
+        node.name,
+        node.qualifiedName,
+        node.path,
+        node.confidence ?? 1,
+        JSON.stringify(node.evidence ?? []),
+        generationId,
+        extraOf(node, NODE_COLUMN_KEYS),
       );
     }
+  }
+  for (const edge of edges) {
+    insertEdge.run(
+      edge.id,
+      edge.kind,
+      edge.source,
+      edge.target ?? null,
+      edge.confidence ?? 1,
+      edge.resolved === false ? 0 : 1,
+      edge.specifier ?? null,
+      JSON.stringify(edge.evidence ?? []),
+      generationId,
+      edge.confidenceTier ?? null,
+      extraOf(edge, EDGE_COLUMN_KEYS),
+    );
+  }
+  return { generationId, fileCount: nodes.filter((n) => n.kind === "file").length, symbolCount: nodes.filter((n) => n.kind !== "file").length, edgeCount: edges.length };
+}
+
+export function bulkInsertGeneration(db, generation, options = {}) {
+  db.exec("BEGIN;");
+  try {
+    const summary = insertGenerationRows(db, generation, options);
     db.exec("COMMIT;");
+    return summary;
   } catch (error) {
     db.exec("ROLLBACK;");
     throw error;
   }
-  return { generationId, fileCount: nodes.filter((n) => n.kind === "file").length, symbolCount: nodes.filter((n) => n.kind !== "file").length, edgeCount: edges.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -380,30 +386,35 @@ export function bulkInsertGeneration(db, generation, options = {}) {
 const ENVELOPE_KEYS = ["schemaVersion", "provider", "manifest", "docTruth", "repoRoot", "augmentation", "sourceObservation"];
 
 /**
- * Persist a complete generation: nodes and edges into their relational tables,
- * everything else into the `generation` envelope.
+ * Persist a complete generation: nodes, edges, and envelope in ONE transaction.
  *
- * This is the write half of the pair that replaced graph.json. It is one
- * transaction per call site (bulkInsertGeneration opens its own), so a crash
- * mid-write leaves the previous generation intact rather than a torn mixture.
+ * A crash mid-write leaves the prior complete generation intact — never a torn
+ * mixture of fresh rows with a stale envelope (or stale envelope keys surviving
+ * from an older schema).
  */
 export function saveGeneration(db, generation, options = {}) {
-  const summary = bulkInsertGeneration(db, generation, options);
+  const envelopeKeysPresent = ENVELOPE_KEYS.filter((key) => generation[key] !== undefined);
   const put = db.prepare(
     "INSERT INTO generation (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   );
   db.exec("BEGIN;");
   try {
-    for (const key of ENVELOPE_KEYS) {
-      if (generation[key] === undefined) continue;
+    const summary = insertGenerationRows(db, generation, options);
+    for (const key of envelopeKeysPresent) {
       put.run(key, JSON.stringify(generation[key]));
     }
+    if (envelopeKeysPresent.length > 0) {
+      const placeholders = envelopeKeysPresent.map(() => "?").join(", ");
+      db.prepare(`DELETE FROM generation WHERE key NOT IN (${placeholders})`).run(...envelopeKeysPresent);
+    } else {
+      db.exec("DELETE FROM generation;");
+    }
     db.exec("COMMIT;");
+    return summary;
   } catch (error) {
     db.exec("ROLLBACK;");
     throw error;
   }
-  return summary;
 }
 
 /**

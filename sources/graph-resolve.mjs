@@ -22,7 +22,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { openStore, closeStore, loadGeneration as loadStoredGeneration } from "../graph/store-sqlite.mjs";
+import { openStoreReadOnly, closeStore, loadGeneration as loadStoredGeneration } from "../graph/store-sqlite.mjs";
 import {
   SCOPE_PROVIDER,
   isSupportedPath,
@@ -48,7 +48,7 @@ function loadGeneration(repoRoot) {
   const dbPath = join(repoRoot, ".agent", "graph", "graph.db");
   if (existsSync(dbPath)) {
     try {
-      const db = openStore(dbPath);
+      const db = openStoreReadOnly(dbPath);
       try {
         const generation = loadStoredGeneration(db);
         if (generation?.nodes && generation?.manifest) return generation;

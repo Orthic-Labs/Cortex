@@ -1,5 +1,7 @@
 # Blueprint — Runtime Ownership and Current Implementation Truth
 
+Product is now **Cortex**: `cortex` is canonical, `blueprint` remains a compatibility alias; prose brands nodes, edges & flows as Neurons, Synapses & Circuits.
+
 What the live implementation actually does, which commands exist, and where it is still PARTIAL.
 Extracted from `SKILL.md`.
 
@@ -83,6 +85,25 @@ tier and vector model. WAL plus transactional generation writes keep read-only c
 last complete generation during a build. There is no `graph.json`; `blueprint graph export` emits
 JSON on demand. Embeddings remain off by default and no Blueprint path currently generates them.
 
+**Publish identity (P0, 2026-08-01):** `generationId` and `manifestDigest` are sealed only after
+tree-sitter augmentation via `finalizeGenerationIdentity()`. `saveGeneration()` writes relational
+rows and the envelope in one transaction and clears stale envelope keys. Full `blueprint build`
+publishes exactly once after augmentation; `blueprint graph build` is lexical-only (labeled in CLI
+output) and also publishes once. Lexical test helpers pass `persist: true` on
+`buildGraphGeneration()`. Indexed query paths and source adapters open the store read-only via
+`openStoreReadOnly()`. Portable manifest paths are validated through `graph/portable-manifest.mjs`;
+`providerCapabilities` are persisted at build time rather than recomputed live during bootstrap.
+
+**Orientation admission library (P1, 2026-08-01):** Decision-only API in `lib/admission.mjs`
+(`orient` / `expand` / `status` / `revoke`) returns a neutral contract (`allow|continue|block|noop`)
+usable by MemRight hosts. Host-owned receipts live in `lib/receipt-store.mjs` (default
+`~/.blueprint/receipts` or `BLUEPRINT_RECEIPT_STORE`) keyed by session/task/repo/generation — data,
+not enforcement. `lib/orientation-evidence.mjs` emits Beacon-consumable `blueprint_orientation`
+evidence (+ optional JSON file). No fail-closed hooks, shell classifier, MCP server, or CodeRight
+broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with `bin`, `files`,
+`engines`, and `exports`; `npm test` runs `tests/*.test.mjs` only; monorepo contract tests live under
+`tests/workspace/` (`npm run test:workspace` / `test:all`).
+
 **The qualification harness is built and gated.**
 `evals/run-qualification.mjs` enforces six mandatory gates (`correctness, freshness, security,
 contract, portability, operability`) plus performance budgets.
@@ -96,7 +117,7 @@ not be read as current provider selection.
 That came from a truncated read of the qualification JSON and was wrong.)*
 
 **Update (2026-07-25, evening): `blueprint-treesitter` is now registered and measured.** Result of
-`node tools/skills/blueprint/evals/run-qualification.mjs --providers blueprint-static,blueprint-treesitter`:
+`node evals/run-qualification.mjs --providers blueprint-static,blueprint-treesitter`:
 
 - tasks **12/12 passed** (initially 6/12 — registration exposed and fixed three real provider
   defects: unmapped edge endpoints, missing `labels` on endpoints, and no module-level constant

@@ -55,7 +55,7 @@ test("indexed traversal is deep-equal to full-load traversal for neighbors, path
   const repo = copyFixture();
   const outDir = path.join(repo, ".agent");
   try {
-    const generation = buildGraphGeneration(repo, { outDir: ".agent" });
+    const generation = buildGraphGeneration(repo, { outDir: ".agent", persist: true });
     const db = openStore(path.join(outDir, "graph/graph.db"));
     try {
       const nodeId = "symbol:src/service.ts::OrderService.placeOrder";
@@ -91,7 +91,7 @@ test("freshness status reads the envelope and file hashes without changing the g
   const repo = copyFixture();
   const outDir = path.join(repo, ".agent");
   try {
-    buildGraphGeneration(repo, { outDir: ".agent" });
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
     const before = graphStatus(repo, ".agent");
     assert.equal(before.state, "fresh");
     assert.equal(before.capabilities.dirtyOverlayFileCount, 0);

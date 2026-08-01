@@ -33,6 +33,7 @@ import { PRECISION_TIERS, PRECISION_TIER_ORDER } from "./precision-tiers.mjs";
 import { STATIC_PROVIDER, TREESITTER_PROVIDER } from "./provider-identity.mjs";
 import {
   openStore,
+  openStoreReadOnly,
   closeStore,
   saveGeneration,
   loadGeneration,
@@ -40,6 +41,7 @@ import {
   getGenerationEnvelope,
   loadFileContentHashes,
 } from "./store-sqlite.mjs";
+import { finalizeGenerationIdentity, computeGenerationId } from "./generation-identity.mjs";
 import { probeScip } from "./scip-provider.mjs";
 
 export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
@@ -136,8 +138,11 @@ export function buildGraphGeneration(repoRoot, options = {}) {
   const parseCache = outDir ? loadParseCache(outDir) : emptyCache();
   const { generation, parseCache: nextParseCache } = buildGenerationFromSources(root, source, { ...options, parseCache });
   if (outDir) {
-    writeGeneration(outDir, generation);
     writeParseCache(outDir, nextParseCache);
+    if (options.persist) {
+      finalizeGenerationIdentity(generation);
+      writeGeneration(outDir, generation);
+    }
   }
   return generation;
 }
@@ -209,7 +214,6 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
         edges: generation.edges.length,
       };
     }
-    if (options.outDir) writeGeneration(resolve(root, options.outDir), generation);
     return { state: "ok", summary };
   } catch (err) {
     const failure = { provider: "blueprint-treesitter", state: "unavailable", reason: String(err?.message ?? err) };
@@ -225,7 +229,7 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   // for a second format.
   const manifestPath = join(resolve(root, outDir), "graph", "graph.db");
   if (!existsSync(manifestPath)) return { state: "missing", manifestPath };
-  const store = openStore(manifestPath);
+  const store = openStoreReadOnly(manifestPath);
   let manifest;
   let recordedHashes = new Map();
   try {
@@ -308,7 +312,7 @@ export function graphStatus(repoRoot, outDir, options = {}) {
 export function readGeneration(repoRoot, outDir) {
   const dbPath = join(resolve(repoRoot, outDir), "graph", "graph.db");
   if (!existsSync(dbPath)) return null;
-  const db = openStore(dbPath);
+  const db = openStoreReadOnly(dbPath);
   try {
     return loadGeneration(db);
   } finally {
@@ -506,6 +510,7 @@ export function createContextCandidateSet(generation, options = {}) {
     provider: generation.provider.id,
     freshness: {
       revision: generation.manifest.generationId,
+      manifestDigest: generation.manifest.manifestDigest ?? null,
       indexedAt: generation.manifest.generatedAt,
       stale: false,
     },
@@ -958,6 +963,8 @@ function pathPayload(generation, nodeIds) {
 // build`, and if it is absent or stale the answer is to build — never to fall
 // back to a second format. SQLite's transaction gives atomicity directly, so the
 // write-body-then-manifest ordering the JSON path needed is gone with it.
+export { finalizeGenerationIdentity } from "./generation-identity.mjs";
+
 function writeGeneration(outDir, generation) {
   const graphDir = join(outDir, "graph");
   mkdirSync(graphDir, { recursive: true });
@@ -1055,8 +1062,8 @@ function buildGenerationFromSources(root, source, options = {}) {
     provider: PROVIDER,
     // Stable generation stamp derived from the generation id, so byte-identity
     // on unchanged rebuilds is preserved.
-    generatedAt: `gen:${generationId(cleanNodes, cleanEdges, source.files).replace(/^xxh128:/, "").slice(0, 16)}`,
-    generationId: generationId(cleanNodes, cleanEdges, source.files),
+    generatedAt: `gen:${computeGenerationId(cleanNodes, cleanEdges, sourceHash(source.files)).replace(/^xxh128:/, "").slice(0, 16)}`,
+    generationId: computeGenerationId(cleanNodes, cleanEdges, sourceHash(source.files)),
     complete: true,
     // The fileLimit the build was run with (0 = unlimited). graphStatus and
     // downstream consumers use this to scope their re-scan so a huge real
@@ -1437,7 +1444,7 @@ function queryTerms(query) {
 }
 
 function generationId(nodes, edges, files) {
-  return `xxh128:${xxh128(JSON.stringify({ nodes, edges, sourceHash: sourceHash(files) }))}`;
+  return computeGenerationId(nodes, edges, sourceHash(files));
 }
 
 // Blueprint's own generated docs (docs/product.md, docs/architecture.md) carry a

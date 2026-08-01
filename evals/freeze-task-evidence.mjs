@@ -113,7 +113,7 @@ export function freezeTaskEvidence(tasksPath, options = {}) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
   const result = freezeTaskEvidence(
-    args.tasks ?? resolve(process.cwd(), "tools/skills/blueprint/evals/graph-tasks.jsonl"),
+    args.tasks ?? resolve(process.cwd(), "evals/graph-tasks.jsonl"),
     { reposRoot: args["repos-root"], limit: args.limit, write: args.write },
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);

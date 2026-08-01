@@ -1144,9 +1144,9 @@ export function graphCapabilities() {
  * per-file parse quality recorded honestly. Id unification is a listed
  * follow-up, not smuggled into this merge.
  *
- * The generation's identity (manifest.generationId) is computed from SOURCE
- * hashes, which augmentation does not change — so freshness semantics are
- * untouched.
+ * The generation's identity (manifest.generationId) is recomputed after
+ * augmentation via finalizeGenerationIdentity() so the sealed id matches the
+ * published node/edge body.
  */
 export async function augmentGeneration(generation, repoRoot) {
   const fileNodes = (generation?.nodes ?? []).filter((node) => node.kind === "file");

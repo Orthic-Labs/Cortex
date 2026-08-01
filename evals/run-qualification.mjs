@@ -1829,7 +1829,7 @@ function resolveReposRoot(args) {
   if (fixtures) {
     return resolve(dirname(fixtures), "fixture-repos");
   }
-  return resolve(process.cwd(), "tools/skills/blueprint/evals/fixture-repos");
+  return resolve(process.cwd(), "evals/fixture-repos");
 }
 
 function qualificationFingerprint({ fixturesPath, schemaPath, providerNames, realRepos, limit, providerConfig }) {
@@ -1857,7 +1857,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   const providerNames = listArg(args.providers, ["fallback", "blueprint-static", "blueprint-treesitter", "codebase-memory", "graphify"]);
-  const fixturesPath = String(args.fixtures ?? resolve(process.cwd(), "tools/skills/blueprint/evals/graph-tasks.jsonl"));
+  const fixturesPath = String(args.fixtures ?? resolve(process.cwd(), "evals/graph-tasks.jsonl"));
   const outPath = String(args.out ?? resolve(process.cwd(), "qualification.json"));
   const schemaPath = String(
     args["schema"] ?? resolve(process.cwd(), "tools/lib/context-contracts.schema.json"),

@@ -77,7 +77,7 @@ test("graph status distinguishes missing, fresh, and stale generations", () => {
   fs.rmSync(outDir, { recursive: true, force: true });
 
   assert.equal(graphStatus(REPO, outDir).state, "missing");
-  const generation = buildGraphGeneration(REPO, { outDir });
+  const generation = buildGraphGeneration(REPO, { outDir, persist: true });
   assert.equal(graphStatus(REPO, outDir).state, "fresh");
 
   mutateManifest(REPO, (manifest) => { manifest.repo.sourceHash = "xxh128:stale"; }, outDir);
@@ -164,7 +164,7 @@ test("graph status is indeterminate when freshness traversal hits a directory ca
     fs.mkdirSync(path.join(repo, "b"));
     fs.writeFileSync(path.join(repo, "a", "a.ts"), "export const a = 1;\n");
     fs.writeFileSync(path.join(repo, "b", "b.ts"), "export const b = 1;\n");
-    buildGraphGeneration(repo, { outDir, maxDirs: 1 });
+    buildGraphGeneration(repo, { outDir, maxDirs: 1, persist: true });
 
     const status = graphStatus(repo, outDir, { maxDirs: 1 });
     assert.equal(status.state, "indeterminate");

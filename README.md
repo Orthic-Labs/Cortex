@@ -1,5 +1,7 @@
 # Blueprint
 
+Product is now **Cortex**: `cortex` is canonical, `blueprint` remains a compatibility alias; prose brands nodes, edges & flows as Neurons, Synapses & Circuits.
+
 > **TL;DR:** Blueprint turns code **and** documentation into a local, evidence-backed repository map, so people & agents can find what is true, stale, contradictory or still unknown before changing a system.
 
 Blueprint helps people & AI agents understand a software repository before changing it. It connects
@@ -129,6 +131,33 @@ blueprint graph export
 Blueprint can emit a bounded `ContextCandidateSet` for a larger context planner. It sends a relevant
 slice with evidence & freshness—not an entire repository graph.
 
+## Orientation admission (decision library)
+
+`@orthic-labs/cortex` also exports a **decision-only** admission API — not a blocking gate:
+
+```js
+import { createAdmission } from "@orthic-labs/cortex/admission";
+
+const api = createAdmission({ storeDir, evidenceDir });
+const decision = await api.orient({ task, sessionId, repoRoot });
+// decision.action: allow | continue | block | noop
+```
+
+Receipts are host-owned data (`~/.blueprint/receipts` by default). Beacon-consumable
+`blueprint_orientation` evidence is derived from those receipts. Fail-closed hooks, shell
+classifiers, MCP enforcement, and CodeRight brokers are intentionally out of scope.
+
+## Install / test
+
+```sh
+npm install   # or pnpm install
+npm test                # standalone package tests (tests/*.test.mjs)
+npm run test:workspace  # monorepo context-contract suite (tests/workspace/)
+npm run test:all        # both
+```
+
+Requires Node `>=20`. CLI entry: `blueprint` → `scripts/blueprint.mjs`.
+
 ## Outputs
 
 Machine-readable outputs under `.agent/` include:
@@ -197,3 +226,9 @@ Current implementation truth: [`references/IMPLEMENTATION-STATUS.md`](references
 ## License
 
 Source-available proprietary software for internal use & evaluation; redistribution, repackaging & competing use are prohibited. See [LICENSE](LICENSE).
+
+<!-- blueprint:docs:start -->
+## Repository truth docs
+- [Product overview](docs/product.md) — what this is and does (generated, code-grounded)
+- [Architecture](docs/architecture.md) — components, flows, interfaces (generated, code-grounded)
+<!-- blueprint:docs:end -->

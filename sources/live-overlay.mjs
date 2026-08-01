@@ -26,7 +26,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { openStore, closeStore, loadGeneration } from "../graph/store-sqlite.mjs";
+import { openStoreReadOnly, closeStore, loadGeneration } from "../graph/store-sqlite.mjs";
 import {
   IGNORED_DIRS,
   SCOPE_PROVIDER,
@@ -51,7 +51,7 @@ function loadGenerationMeta(repoRoot) {
   const dbPath = join(repoRoot, ".agent", "graph", "graph.db");
   if (existsSync(dbPath)) {
     try {
-      const db = openStore(dbPath);
+      const db = openStoreReadOnly(dbPath);
       try {
         const generation = loadGeneration(db);
         if (generation) {

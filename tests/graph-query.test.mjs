@@ -57,7 +57,7 @@ test("graph query primitives return typed, evidence-backed JSON", () => {
     const build = spawnSync(process.execPath, [CLI, "build", "--out", ".agent"], { cwd: repo, encoding: "utf8" });
     assert.equal(build.status, 0, build.stderr || build.stdout);
     const docTruth = run(["graph", "doc-truth", "--out", ".agent"], repo);
-    assert.equal(docTruth.provider, "blueprint-static");
+    assert.equal(docTruth.provider, "blueprint-treesitter");
     assert.ok(Array.isArray(docTruth.joins));
     assert.ok(docTruth.sourceDocMap.docs >= 1);
 

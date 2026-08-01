@@ -24,7 +24,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { scanSourcesPublic, sourceHashPublic, graphCapabilities } from "./static-provider.mjs";
+import { scanSourcesPublic, sourceHashPublic } from "./static-provider.mjs";
+import { findAbsolutePathIndicators, validatePortableManifest } from "./portable-manifest.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const BLUEPRINT_DIR_NAME = ".blueprint";
@@ -70,20 +71,11 @@ export function bootstrapFromTracked(repoRoot) {
   if (!manifest || typeof manifest !== "object") {
     return { state: "corrupt", manifestPath, errors: ["manifest is not a JSON object"] };
   }
-  if (manifest.schemaVersion !== 1) {
-    return {
-      state: "corrupt",
-      manifestPath,
-      errors: [`unsupported schemaVersion ${manifest.schemaVersion}; expected 1`],
-    };
+  const validationErrors = validatePortableManifest(manifest);
+  if (validationErrors.length > 0) {
+    return { state: "corrupt", manifestPath, errors: validationErrors };
   }
-  // Validate that the manifest carries no absolute machine paths anywhere.
-  const raw = JSON.stringify(manifest);
-  const pathFindings = [];
-  if (/D:[\\/]/.test(raw)) pathFindings.push("windows_drive");
-  if (/C:[\\/]/.test(raw)) pathFindings.push("windows_c_drive");
-  if (/\/Users\//.test(raw)) pathFindings.push("mac_users");
-  if (/\/home\//.test(raw)) pathFindings.push("linux_home");
+  const pathFindings = findAbsolutePathIndicators(manifest);
   if (pathFindings.length > 0) {
     return {
       state: "corrupt",
@@ -95,13 +87,6 @@ export function bootstrapFromTracked(repoRoot) {
   const sources = scanSourcesPublic(resolve(repoRoot));
   const currentHash = sourceHashPublic(sources.files);
   const recordedHash = manifest?.repo?.sourceHash;
-  if (!recordedHash) {
-    return {
-      state: "corrupt",
-      manifestPath,
-      errors: ["manifest is missing repo.sourceHash"],
-    };
-  }
 
   if (recordedHash === currentHash) {
     const gen = manifest.generation ?? {};
@@ -116,7 +101,7 @@ export function bootstrapFromTracked(repoRoot) {
         stale: false,
         sourceKind: "blueprint-tracked",
         toolVersions: gen.toolVersions ?? {},
-        providerCapabilities: graphCapabilities().languageCoverage.parsedExtensions,
+        providerCapabilities: gen.providerCapabilities ?? manifest.capabilities?.outputs ?? [],
         supportedEdgeTypes: gen.supportedEdgeTypes ?? [],
         supportedLanguages: gen.supportedLanguages ?? [],
         fileCount: sources.files.length,

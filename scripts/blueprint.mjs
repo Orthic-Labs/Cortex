@@ -32,6 +32,7 @@ import {
   augmentGenerationWithTreeSitter,
   buildGraphGeneration,
   createContextCandidateSet,
+  finalizeGenerationIdentity,
   graphArchitecture,
   graphCapabilities,
   graphFlowInventory,
@@ -174,7 +175,8 @@ const DEFAULT_CONFIG = {
 
 function usage() {
   const command = scriptCommand();
-  console.log(`usage:
+  console.log(`Cortex (formerly Blueprint) — repository truth and evidence map.
+usage:
   ${command}
   ${command} "task to orient around"
   ${command} build [--out .agent] [--limit N] [--check] [--no-readme-link]
@@ -183,6 +185,7 @@ function usage() {
   ${command} phase2 plan|seal [--out .agent] [--json] [--no-readme-link]
   ${command} hygiene status|refresh [--out .agent] [--only check,...] [--offline] [--json]
   ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N] [--budget TOKENS] [--json]
+  ${command} orient [--out .agent] [--query TEXT] [--json]
 `);
 }
 
@@ -220,31 +223,25 @@ function readJson(path, fallback) {
 // test and NO consumers -- `openStore` was called only from its own test, so no
 // repo ever had a database. This is the wiring.
 //
-// THE AUTHORITATIVE STORE WRITE for a build. It must NEVER fail the build;
-// `node:sqlite` is version-gated, so an older runtime degrades to "unavailable"
-// instead of throwing.
-//
-// Uses saveGeneration, not bulkInsertGeneration: the latter replaces rows while
-// leaving the envelope untouched, so a build could end with fresh nodes and a
-// stale manifest describing them — the undercount class already seen once. This
-// writes rows AND envelope together, which also makes it correct on the paths
-// where tree-sitter augmentation is disabled or degrades (it then does not
-// persist at all, and this call is what seals sourceObservation).
+// THE AUTHORITATIVE STORE WRITE for a build. Publication failure fails the build.
 function persistGenerationToStore(root, outDir, generation) {
   const dbPath = join(resolve(root, outDir), "graph", "graph.db");
-  let db = null;
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = openStore(dbPath);
   try {
-    mkdirSync(dirname(dbPath), { recursive: true });
-    db = openStore(dbPath);
-    saveGeneration(db, generation);
-    return { ok: true, path: dbPath, rows: countRows(db) };
-  } catch (error) {
-    return { ok: false, path: dbPath, reason: String(error?.message ?? error) };
+    const summary = saveGeneration(db, generation);
+    return { ok: true, path: dbPath, rows: countRows(db), summary };
   } finally {
-    if (db) {
-      try { closeStore(db); } catch { /* close failure must not fail the build */ }
-    }
+    closeStore(db);
   }
+}
+
+async function finalizeAndPersistGraphGeneration(root, outDir, generation, options = {}) {
+  if (options.augment !== false) {
+    await augmentGenerationWithTreeSitter(generation, root, {});
+  }
+  finalizeGenerationIdentity(generation);
+  return persistGenerationToStore(root, outDir, generation);
 }
 
 function writeJson(path, value) {
@@ -656,13 +653,7 @@ async function build(root, outDir, options = {}) {
   // Sealed into the store envelope so a downstream consumer can distinguish a
   // committed snapshot from a dirty-overlay build without shelling out to git.
   graphGeneration.sourceObservation = sourceObservation ?? null;
-  // AST layer on top of the lexical graph; re-persists the generation. Never
-  // fails the build — see augmentGenerationWithTreeSitter.
-  // No outDir: augmentation must NOT persist. persistGenerationToStore below is
-  // the single authoritative write, so the generation is not serialised to the
-  // same database twice per build.
-  await augmentGenerationWithTreeSitter(graphGeneration, root, {});
-  persistGenerationToStore(root, outDir, graphGeneration);
+  await finalizeAndPersistGraphGeneration(root, outDir, graphGeneration);
   const queue = buildUnderstandingQueue(root, docs, files, signature, graphGeneration);
   writeJson(join(root, outDir, "queue.json"), queue);
   const flows = graphFlowInventory(graphGeneration);
@@ -748,6 +739,7 @@ function writeBlueprintManifest(root, outDir, {
   const manifestDir = join(root, ".blueprint");
   mkdirSync(manifestDir, { recursive: true });
   const graphManifest = graphGeneration?.manifest ?? {};
+  const capabilities = graphCapabilities(root);
   const sourceEpoch = finalizedSourceEpoch(root, sourceObservation);
   const stableStamp = index?.sourceSignature
     ? `gen:${index.sourceSignature.slice(0, 16)}`
@@ -787,14 +779,14 @@ function writeBlueprintManifest(root, outDir, {
           Object.entries(graphManifest.toolVersions ?? {}).map(([k, v]) => [k, String(v)]),
         ),
       },
-      providerCapabilities: graphCapabilities().outputs ?? [],
+      providerCapabilities: capabilities.outputs ?? [],
       supportedEdgeTypes: Array.isArray(graphManifest.supportedEdgeTypes) ? graphManifest.supportedEdgeTypes : [],
       supportedLanguages: Array.isArray(graphManifest.supportedLanguages) ? graphManifest.supportedLanguages : [],
       fileCount: stats.files,
       contentHash: graphManifest.repo?.sourceHash ?? null,
       frozen: true,
     },
-    capabilities: graphCapabilities(),
+    capabilities,
     stats: {
       files: stats.files,
       docs: stats.docs,
@@ -1799,7 +1791,9 @@ function doctor(root, outDir, options = {}) {
 async function runGraphCommand(root, outDir, subcommand, args) {
   if (subcommand === "build") {
     const generation = buildGraphGeneration(root, { outDir });
-    console.log(`graph built ${outDir}/graph/graph.db provider=${generation.provider.id} nodes=${generation.nodes.length} edges=${generation.edges.length}`);
+    generation.sourceObservation = gitSourceObservation(root);
+    await finalizeAndPersistGraphGeneration(root, outDir, generation, { augment: false });
+    console.log(`graph built ${outDir}/graph/graph.db provider=${generation.provider.id} lexical-only=true nodes=${generation.nodes.length} edges=${generation.edges.length}`);
     return 0;
   }
   if (subcommand === "status") {
@@ -1891,7 +1885,13 @@ async function runGraphCommand(root, outDir, subcommand, args) {
     return 0;
   }
   if (subcommand === "schema") {
-    console.log(JSON.stringify({ schemaVersion: 1, provider: "blueprint-static", artifacts: ["manifest", "nodes", "edges", "graph", "docTruth", "mermaid", "plannerStatus", "ContextCandidateSet"] }, null, 2));
+    const caps = graphCapabilities(root);
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      provider: caps.provider?.id ?? "unknown",
+      precisionTier: caps.precisionTier ?? null,
+      artifacts: ["manifest", "nodes", "edges", "graph", "docTruth", "mermaid", "plannerStatus", "ContextCandidateSet"],
+    }, null, 2));
     return 0;
   }
   if (subcommand === "resolve") {
@@ -1986,6 +1986,41 @@ async function runGraphCommand(root, outDir, subcommand, args) {
   }
   usage();
   return 1;
+}
+
+function orientPayload(root, outDir, args = {}) {
+  const status = graphStatus(root, outDir);
+  const map = readJson(join(root, outDir, "map.json"), {});
+  const manifest = readJson(join(root, ".blueprint/manifest.json"), {});
+  const flowInventory = readJson(join(root, outDir, "flows.json"), { flows: [] });
+  const query = String(args.query ?? args.task ?? args._?.join(" ") ?? "").trim();
+  const candidateSet = withFreshIndexedGraph(root, outDir, {}, ({ db }) => {
+    const generation = indexedQueryGeneration(db, query, { limit: Number(args.limit ?? 40) });
+    return createContextCandidateSet(generation, {
+      task: String(args.task ?? query),
+      query,
+      maxCandidates: Number(args.limit ?? 40),
+    });
+  });
+  const flows = Array.isArray(flowInventory.flows) ? flowInventory.flows : [];
+  const topCircuits = flows.slice(0, 5).map((flow, index) => {
+    const flowNodes = Array.isArray(flow.path) ? flow.path : [];
+    const files = [...new Set(flowNodes.map((node) => node?.path).filter(Boolean))].slice(0, 10);
+    return {
+      name: flow.name ?? flow.entry?.name ?? flow.terminal?.name ?? flow.id ?? `circuit-${index + 1}`,
+      files,
+    };
+  });
+  return {
+    schemaVersion: 1,
+    product: "cortex",
+    generationId: status.manifest?.generationId ?? null,
+    manifestDigest: status.manifest?.manifestDigest ?? null,
+    freshness: { state: status.state, checkedAt: new Date().toISOString() },
+    entrypoint: map.entrypoint ?? manifest.entrypoint ?? null,
+    topCircuits,
+    candidates: candidateSet,
+  };
 }
 
 // Candidate memright executables, in order. execFileSync does not resolve a
@@ -2099,7 +2134,7 @@ function withFreshIndexedGraph(root, outDir, options = {}, callback) {
     if (!existsSync(dbPath)) {
       throw graphReadError("graph_missing", "Graph store is missing; run blueprint build");
     }
-    const db = openStore(dbPath);
+    const db = openStoreReadOnly(dbPath);
     try {
       const meta = readIndexedMeta(db);
       const observed = meta?.manifest?.generationId ?? null;
@@ -2141,7 +2176,7 @@ function withFreshIndexedGraph(root, outDir, options = {}, callback) {
     throw graphReadError("graph_rebuild_required", `Graph is ${status.state}; run blueprint build`, { state: status.state });
   }
   const dbPath = join(resolve(root, outDir), "graph", "graph.db");
-  const db = openStore(dbPath);
+  const db = openStoreReadOnly(dbPath);
   try {
     const meta = readIndexedMeta(db);
     if (!meta || meta.manifest?.generationId !== observedGeneration) {
@@ -2499,7 +2534,7 @@ async function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -2558,6 +2593,10 @@ async function main() {
     return await runBriefAndPrint(root, outDir, args);
   }
   if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json), full: Boolean(args.full) });
+  if (command === "orient") {
+    console.log(JSON.stringify(orientPayload(root, outDir, args), null, 2));
+    return 0;
+  }
   usage();
   return 1;
 }

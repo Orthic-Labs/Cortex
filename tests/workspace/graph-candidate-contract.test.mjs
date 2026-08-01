@@ -5,17 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { findWorkspaceRoot } from "./_workspace-root.mjs";
+import { findWorkspaceRoot } from "../_workspace-root.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = findWorkspaceRoot(HERE);
-const BLUEPRINT = path.resolve(HERE, "..");
+const ROOT = findWorkspaceRoot(HERE, { required: false });
+const BLUEPRINT = path.resolve(HERE, "../..");
 const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
 const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
-const SCHEMA = path.join(ROOT, "tools/lib/context-contracts.schema.json");
+const SCHEMA = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
 const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
+const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
 
-test("graph candidates CLI validates as ContextCandidateSet v1", () => {
+test("graph candidates CLI validates as ContextCandidateSet v1", { skip: workspaceSkip }, () => {
   const repo = path.join(os.tmpdir(), `blueprint-candidate-contract-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
@@ -57,7 +58,7 @@ sys.exit(1 if errors else 0)
 });
 
 test("candidate set applies real tiering: anchors reserved, exact flagged, overflow receipted", async () => {
-  const { buildGraphGeneration, createContextCandidateSet } = await import("../graph/static-provider.mjs");
+  const { buildGraphGeneration, createContextCandidateSet } = await import("../../graph/static-provider.mjs");
   const repo = path.join(os.tmpdir(), `blueprint-tiering-${process.pid}-${Date.now()}`);
   fs.mkdirSync(repo, { recursive: true });
   try {
@@ -66,7 +67,7 @@ test("candidate set applies real tiering: anchors reserved, exact flagged, overf
     fs.writeFileSync(path.join(repo, "orders.ts"), "export function placeOrderRetry(){ return 3; }\nexport function orderQueue(){ return 4; }\n");
     fs.writeFileSync(path.join(repo, "anchor.ts"), "export function unrelatedThing(){ return 5; }\n");
     spawnSync("git", ["add", "-A"], { cwd: repo });
-    const generation = buildGraphGeneration(repo, { outDir: ".agent" });
+    const generation = buildGraphGeneration(repo, { outDir: ".agent", persist: true });
 
     // anchor a file the query does NOT match; force a small ceiling to create overflow.
     const cs = createContextCandidateSet(generation, { query: "placeOrder", anchors: ["anchor.ts"], maxCandidates: 3 });

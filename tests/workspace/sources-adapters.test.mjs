@@ -14,17 +14,18 @@ import {
   gitMetadata,
   rulesDocuments,
   liveOverlay,
-} from "../sources/index.mjs";
+} from "../../sources/index.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 import os from "node:os";
 import path from "node:path";
-import { seedStore } from "./_store-helpers.mjs";
-import { findWorkspaceRoot } from "./_workspace-root.mjs";
+import { seedStore } from "../_store-helpers.mjs";
+import { findWorkspaceRoot } from "../_workspace-root.mjs";
 
-const ROOT = findWorkspaceRoot(HERE);
-const BLUEPRINT = path.resolve(HERE, "..");
-const SCHEMA = path.join(ROOT, "tools/lib/context-contracts.schema.json");
+const ROOT = findWorkspaceRoot(HERE, { required: false });
+const BLUEPRINT = path.resolve(HERE, "../..");
+const SCHEMA = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
+const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
 const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
 
 function validateCandidate(candidate) {
@@ -68,7 +69,7 @@ function withTempRepo(label, fn) {
 
 // ---- task-anchor ----
 
-test("task-anchor: extracts paths and ranges from the task string", () => {
+test("task-anchor: extracts paths and ranges from the task string", { skip: workspaceSkip }, () => {
   withTempRepo("anchor", (repo) => {
     mkdirSync(path.join(repo, "src"), { recursive: true });
     writeFileSync(path.join(repo, "src/routes.ts"), "export const a = 1;\nexport const b = 2;\nexport function handler() { return 1; }\n");
@@ -89,7 +90,7 @@ test("task-anchor: extracts paths and ranges from the task string", () => {
   });
 });
 
-test("task-anchor: rejects out-of-scope paths as omissions", () => {
+test("task-anchor: rejects out-of-scope paths as omissions", { skip: workspaceSkip }, () => {
   withTempRepo("anchor-scope", (repo) => {
     mkdirSync(path.join(repo, "src"), { recursive: true });
     writeFileSync(path.join(repo, "src/inside.ts"), "export const x = 1;\n");
@@ -101,7 +102,7 @@ test("task-anchor: rejects out-of-scope paths as omissions", () => {
 
 // ---- dirty-files ----
 
-test("dirty-files: surfaces modified and untracked files via git status", () => {
+test("dirty-files: surfaces modified and untracked files via git status", { skip: workspaceSkip }, () => {
   withTempRepo("dirty", (repo) => {
     mkdirSync(path.join(repo, "src"), { recursive: true });
     spawnSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
@@ -124,7 +125,7 @@ test("dirty-files: surfaces modified and untracked files via git status", () => 
   });
 });
 
-test("workingTreeSummary buckets modified-tracked vs untracked, sorted", () => {
+test("workingTreeSummary buckets modified-tracked vs untracked, sorted", { skip: workspaceSkip }, () => {
   withTempRepo("wt-summary", (repo) => {
     spawnSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
     spawnSync("git", ["config", "user.email", "ci@example.com"], { cwd: repo, stdio: "ignore" });
@@ -144,7 +145,7 @@ test("workingTreeSummary buckets modified-tracked vs untracked, sorted", () => {
   });
 });
 
-test("workingTreeSummary reports unavailable outside a git repo", () => {
+test("workingTreeSummary reports unavailable outside a git repo", { skip: workspaceSkip }, () => {
   withTempRepo("wt-nogit", (repo) => {
     // No git init.
     const summary = dirtyFiles.workingTreeSummary(repo);
@@ -156,7 +157,7 @@ test("workingTreeSummary reports unavailable outside a git repo", () => {
 
 // ---- graph-resolve ----
 
-test("graph-resolve: emits file and symbol candidates when graph is available", () => {
+test("graph-resolve: emits file and symbol candidates when graph is available", { skip: workspaceSkip }, () => {
   const fixture = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
   withTempRepo("resolve", (repo) => {
     cpSync(fixture, repo, { recursive: true });
@@ -182,7 +183,7 @@ test("graph-resolve: emits file and symbol candidates when graph is available", 
   });
 });
 
-test("graph-resolve: emits omission when no graph is available", () => {
+test("graph-resolve: emits omission when no graph is available", { skip: workspaceSkip }, () => {
   withTempRepo("no-graph", (repo) => {
     mkdirSync(path.join(repo, "src"), { recursive: true });
     writeFileSync(path.join(repo, "src/foo.ts"), "export const x = 1;\n");
@@ -194,7 +195,7 @@ test("graph-resolve: emits omission when no graph is available", () => {
 
 // ---- git-metadata ----
 
-test("git-metadata: emits exactly one summary candidate per repo", () => {
+test("git-metadata: emits exactly one summary candidate per repo", { skip: workspaceSkip }, () => {
   withTempRepo("meta", (repo) => {
     spawnSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
     spawnSync("git", ["config", "user.email", "ci@example.com"], { cwd: repo, stdio: "ignore" });
@@ -213,7 +214,7 @@ test("git-metadata: emits exactly one summary candidate per repo", () => {
 
 // ---- rules-documents ----
 
-test("rules-documents: includes AGENTS.md/CLAUDE.md and applies the per-rule byte cap", () => {
+test("rules-documents: includes AGENTS.md/CLAUDE.md and applies the per-rule byte cap", { skip: workspaceSkip }, () => {
   withTempRepo("rules", (repo) => {
     writeFileSync(path.join(repo, "AGENTS.md"), "a".repeat(4000) + "\n");
     writeFileSync(path.join(repo, "CLAUDE.md"), "short claude\n");
@@ -233,7 +234,7 @@ test("rules-documents: includes AGENTS.md/CLAUDE.md and applies the per-rule byt
   });
 });
 
-test("rules-documents: never floods when many rules exist; respects maxRules", () => {
+test("rules-documents: never floods when many rules exist; respects maxRules", { skip: workspaceSkip }, () => {
   withTempRepo("rules-flood", (repo) => {
     mkdirSync(path.join(repo, ".claude/rules"), { recursive: true });
     for (let i = 0; i < 30; i += 1) writeFileSync(path.join(repo, `.claude/rules/rule-${i}.md`), `body ${i}\n`);
@@ -247,7 +248,7 @@ test("rules-documents: never floods when many rules exist; respects maxRules", (
 
 // ---- live-overlay ----
 
-test("live-overlay: emits candidates for files newer than the graph generation", () => {
+test("live-overlay: emits candidates for files newer than the graph generation", { skip: workspaceSkip }, () => {
   withTempRepo("overlay", (repo) => {
     mkdirSync(path.join(repo, ".agent", "graph"), { recursive: true });
     mkdirSync(path.join(repo, "src"), { recursive: true });
@@ -276,7 +277,7 @@ test("live-overlay: emits candidates for files newer than the graph generation",
 
 // ---- index / fan-out ----
 
-test("index: produceCandidatesWithTelemetry runs every adapter once and dedupes", () => {
+test("index: produceCandidatesWithTelemetry runs every adapter once and dedupes", { skip: workspaceSkip }, () => {
   withTempRepo("index", (repo) => {
     mkdirSync(path.join(repo, "src"), { recursive: true });
     spawnSync("git", ["init", "-q", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
@@ -302,7 +303,7 @@ test("index: produceCandidatesWithTelemetry runs every adapter once and dedupes"
   });
 });
 
-test("index: an adapter that throws still leaves the rest of the fan-out intact", () => {
+test("index: an adapter that throws still leaves the rest of the fan-out intact", { skip: workspaceSkip }, () => {
   withTempRepo("throw", (repo) => {
     writeFileSync(path.join(repo, "AGENTS.md"), "agents\n");
     // Force graphResolve to think a graph is present by seeding a tiny store.

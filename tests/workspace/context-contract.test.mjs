@@ -6,13 +6,13 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { findWorkspaceRoot } from "./_workspace-root.mjs";
+import { findWorkspaceRoot } from "../_workspace-root.mjs";
 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = findWorkspaceRoot(HERE);
-const SCHEMA_PATH = path.join(ROOT, "tools/lib/context-contracts.schema.json");
-const FIXTURES = path.join(ROOT, "tools/tests/context_contracts/fixtures");
+const ROOT = findWorkspaceRoot(HERE, { required: false });
+const SCHEMA_PATH = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
+const FIXTURES = ROOT ? path.join(ROOT, "tools/tests/context_contracts/fixtures") : null;
 const PYTHON = process.platform === "win32" ? ["py", "-3.11"] : ["python3"];
 const CONTRACT_FIXTURES = [
   ["ContextCandidateSet", "context-candidate-set-v1.json"],
@@ -21,6 +21,7 @@ const CONTRACT_FIXTURES = [
   ["KnowledgeEmission", "knowledge-emission-v1.json"],
   ["HandoffEnvelope", "handoff-envelope-v1.json"],
 ];
+const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
 
 
 function readJson(file) {
@@ -46,7 +47,7 @@ sys.exit(1 if errors else 0)
 }
 
 
-test("canonical schema hash is stable and all v1 fixtures validate", () => {
+test("canonical schema hash is stable and all v1 fixtures validate", { skip: workspaceSkip }, () => {
   const schemaBytes = fs.readFileSync(SCHEMA_PATH);
   const schema = JSON.parse(schemaBytes.toString("utf8"));
   const schemaSha256 = crypto.createHash("sha256").update(schemaBytes).digest("hex"); // schema identity is published as sha256; asserting the published form
@@ -61,7 +62,7 @@ test("canonical schema hash is stable and all v1 fixtures validate", () => {
 });
 
 
-test("Blueprint fixture freezes Layer 3 evidence and the provider safety ceiling", () => {
+test("Blueprint fixture freezes Layer 3 evidence and the provider safety ceiling", { skip: workspaceSkip }, () => {
   const payload = readJson(path.join(FIXTURES, "context-candidate-set-v1.json"));
   const candidate = payload.candidates[0];
 
@@ -75,7 +76,7 @@ test("Blueprint fixture freezes Layer 3 evidence and the provider safety ceiling
 });
 
 
-test("renaming a required candidate field fails at its JSON pointer", () => {
+test("renaming a required candidate field fails at its JSON pointer", { skip: workspaceSkip }, () => {
   const payload = readJson(path.join(FIXTURES, "context-candidate-set-v1.json"));
   payload.candidates[0].sourceDigest = payload.candidates[0].sourceHash;
   delete payload.candidates[0].sourceHash;
@@ -87,7 +88,7 @@ test("renaming a required candidate field fails at its JSON pointer", () => {
 });
 
 
-test("durable emission fixture contains no raw graph state", () => {
+test("durable emission fixture contains no raw graph state", { skip: workspaceSkip }, () => {
   const emission = readJson(path.join(FIXTURES, "knowledge-emission-v1.json"));
   for (const forbidden of ["nodes", "edges", "embeddings", "layout", "communities"]) {
     assert.equal(Object.hasOwn(emission, forbidden), false);

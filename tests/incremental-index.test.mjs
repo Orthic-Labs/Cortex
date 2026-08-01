@@ -204,10 +204,10 @@ test("the generation is one store (graph/graph.db), with no JSON twin and no con
     const write = (name, text) => writeFileSync(join(root, name), text);
     write("a.ts", "export function one() { return 1; }");
     execFileSync("git", ["add", "-A"], { cwd: root });
-    buildGraphGeneration(root, { outDir: ".agent" });
+    buildGraphGeneration(root, { outDir: ".agent", persist: true });
     write("a.ts", "export function two() { return 2; }");
     execFileSync("git", ["add", "-A"], { cwd: root });
-    buildGraphGeneration(root, { outDir: ".agent" });
+    buildGraphGeneration(root, { outDir: ".agent", persist: true });
     const graphDir = join(root, ".agent", "graph");
     // The one store exists and holds the current generation…
     assert.ok(existsSync(join(graphDir, "graph.db")), "graph/graph.db must exist");
@@ -232,8 +232,8 @@ test("a cache-warm rebuild is byte-identical to the cold build", () => {
     writeFileSync(join(root, "a.ts"), 'import { helper } from "./b";\nexport function caller() { return helper(); }\n');
     writeFileSync(join(root, "b.ts"), "export function helper() { return 1; }\n");
     execFileSync("git", ["add", "-A"], { cwd: root });
-    const cold = buildGraphGeneration(root, { outDir: ".agent" }); // writes cache
-    const warm = buildGraphGeneration(root, { outDir: ".agent" }); // reuses cache
+    const cold = buildGraphGeneration(root, { outDir: ".agent", persist: true }); // writes cache
+    const warm = buildGraphGeneration(root, { outDir: ".agent", persist: true }); // reuses cache
     assert.equal(JSON.stringify(cold.nodes), JSON.stringify(warm.nodes), "nodes drift between cold and warm");
     assert.equal(JSON.stringify(cold.edges), JSON.stringify(warm.edges), "edges drift between cold and warm");
   } finally {
@@ -250,7 +250,7 @@ test("incremental rebuild after a rename equals a cold rebuild (no ghost edge)",
     execFileSync("git", ["init", "-q"], { cwd: root });
     for (const [name, text] of Object.entries(files)) writeFileSync(join(root, name), text);
     execFileSync("git", ["add", "-A"], { cwd: root });
-    return buildGraphGeneration(root, { outDir: ".agent" });
+    return buildGraphGeneration(root, { outDir: ".agent", persist: true });
   };
   const incRoot = mkdtempSync(join(tmpdir(), "bp-inc-"));
   const coldRoot = mkdtempSync(join(tmpdir(), "bp-cold-"));
@@ -259,7 +259,7 @@ test("incremental rebuild after a rename equals a cold rebuild (no ghost edge)",
     build(incRoot, { "a.ts": caller, "b.ts": "export function helper() { return 1; }\n" });
     // Rename the callee; a.ts (the caller) is untouched and will be served from cache.
     writeFileSync(join(incRoot, "b.ts"), "export function helperRenamed() { return 1; }\n");
-    const incremental = buildGraphGeneration(incRoot, { outDir: ".agent" });
+    const incremental = buildGraphGeneration(incRoot, { outDir: ".agent", persist: true });
 
     const coldFinal = build(coldRoot, { "a.ts": caller, "b.ts": "export function helperRenamed() { return 1; }\n" });
 
