@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { spawn } from "node:child_process";
 import { WatchSupervisor, defaultConfigPath, readWatchConfig, writeWatchConfig } from "../watchman/supervisor.mjs";
+import { reconcile } from "../watchman/reconcile.mjs";
 
 const configPath = defaultConfigPath();
 const pidPath = join(dirname(configPath), "watchman.pid");
@@ -57,6 +58,7 @@ async function main() {
   if (command === "enroll") return enroll(args[0]);
   if (command === "unenroll") return unenroll(args[0]);
   if (command === "status") return json(new WatchSupervisor({ configPath }).status());
+  if (command === "nudge") return json(await reconcile(resolve(args[0] ?? process.cwd())));
   if (command === "logs") {
     const lines = Number(args[args.indexOf("-n") + 1] ?? 50);
     const repos = readWatchConfig(configPath).repos;

@@ -16,7 +16,7 @@ function dbPath(root, outDir) { return join(resolve(root), outDir, "graph", "gra
 function stateValue(db, key, fallback = null) { return db.prepare("SELECT value FROM watch_state WHERE key=?").get(key)?.value ?? fallback; }
 function setState(db, key, value) { db.prepare("INSERT INTO watch_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value)); }
 
-function appendEvents(db, events) {
+export function appendWatchEvents(db, events) {
   let clock = Number(stateValue(db, "source_clock", 0));
   const insert = db.prepare("INSERT INTO event_journal(observed_ms,event_kind,path,rename_to,source_clock) VALUES (?,?,?,?,?)");
   const result = [];
@@ -120,14 +120,26 @@ function pendingRows(db, force = false) {
   return [...latest.values()].sort((left, right) => left.seq - right.seq);
 }
 
+export function drainJournal(db, root, { force = true, maxDependentFiles = MAX_DEPENDENT_FILES } = {}) {
+  let applied = 0;
+  for (let pass = 0; pass < MAX_DRAIN_PASSES; pass += 1) {
+    const rows = pendingRows(db, force);
+    if (!rows.length) break;
+    for (const row of rows) { applyJournalEvent(db, root, row, maxDependentFiles); applied += 1; }
+    force = true;
+  }
+  return applied;
+}
+
 export class RepositoryActor extends EventEmitter {
-  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = async () => ({ ok: true }), adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES }) {
+  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES }) {
     super();
     this.root = resolve(root);
     this.outDir = outDir;
     this.dbPath = dbPath(this.root, outDir);
     this.snapshotPath = snapshotPath ? resolve(snapshotPath) : join(this.root, outDir, "graph", "watch.snapshot");
-    this.reconcile = reconcile;
+    this.reconcile = reconcile ?? (async () => ({ ok: true }));
+    this.autoReconcileOnGap = Boolean(reconcile);
     this.adapter = adapter;
     this.maxDependentFiles = maxDependentFiles;
     this.subscription = null;
@@ -153,7 +165,7 @@ export class RepositoryActor extends EventEmitter {
     const db = openStore(this.dbPath);
     try {
       setState(db, "watcher_pid", process.pid);
-      await this.reconcile(this.root, db);
+      await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles });
       await this.adapter.writeSnapshot(this.root, this.snapshotPath);
       setState(db, "event_gap", 0);
     } finally { closeStore(db); }
@@ -178,6 +190,13 @@ export class RepositoryActor extends EventEmitter {
     try { setState(db, "event_gap", 1); } finally { closeStore(db); }
     if (error) this.log(error);
     this.emit("gap", error);
+    if (!this.autoReconcileOnGap) return;
+    Promise.resolve().then(async () => {
+      const repairDb = openStore(this.dbPath);
+      try { await this.reconcile(repairDb, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles }); }
+      catch (reconcileError) { this.log(reconcileError); }
+      finally { closeStore(repairDb); }
+    });
   }
 
   ingest(events) {
@@ -188,7 +207,7 @@ export class RepositoryActor extends EventEmitter {
     }
     const db = openStore(this.dbPath);
     try {
-      const appended = appendEvents(db, events);
+      const appended = appendWatchEvents(db, events);
       this.scheduleFlush();
       return appended;
     } finally { closeStore(db); }
@@ -197,14 +216,7 @@ export class RepositoryActor extends EventEmitter {
   flush(force = false) {
     const db = openStore(this.dbPath);
     try {
-      let applied = 0;
-      for (let pass = 0; pass < MAX_DRAIN_PASSES; pass += 1) {
-        const rows = pendingRows(db, force);
-        if (!rows.length) break;
-        for (const row of rows) { applyJournalEvent(db, this.root, row, this.maxDependentFiles); applied += 1; }
-        force = true;
-      }
-      return applied;
+      return drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles });
     } finally { closeStore(db); }
   }
 

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { closeStore, openStore } from "../graph/store-sqlite.mjs";
 import { RepositoryActor } from "./repo-actor.mjs";
+import { reconcile as defaultReconcile } from "./reconcile.mjs";
 
 export function defaultConfigPath() { return resolve(homedir(), ".cortex", "watch.json"); }
 
@@ -32,7 +33,7 @@ function repoStatus(root, outDir = ".agent") {
 }
 
 export class WatchSupervisor {
-  constructor({ configPath = defaultConfigPath(), actorFactory = (options) => new RepositoryActor(options), reconcile = async () => ({ ok: true }), pollMs = 30000 } = {}) {
+  constructor({ configPath = defaultConfigPath(), actorFactory = (options) => new RepositoryActor(options), reconcile = defaultReconcile, pollMs = 30000 } = {}) {
     this.configPath = resolve(configPath);
     this.actorFactory = actorFactory;
     this.reconcile = reconcile;

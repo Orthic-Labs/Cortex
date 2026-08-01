@@ -14,6 +14,7 @@ function xxh3Hex(value) {
 }
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -72,6 +73,7 @@ import { workingTreeSummary } from "../sources/dirty-files.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
 import { applyFileDelta, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
 import { collectDependents } from "../graph/store-sqlite.mjs";
+import { reconcile as reconcileGraph } from "../watchman/reconcile.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -191,6 +193,8 @@ usage:
   ${command} hygiene status|refresh [--out .agent] [--only check,...] [--offline] [--json]
   ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N] [--budget TOKENS] [--json]
   ${command} orient [--out .agent] [--query TEXT] [--json]
+  ${command} reconcile [--out .agent] [--json]
+  ${command} hooks install-git [--out .agent]
   ${command} delta <path...> [--out .agent]
 `);
 }
@@ -2115,6 +2119,42 @@ async function runDelta(root, outDir, args) {
   }
 }
 
+async function runReconcile(root, outDir, args) {
+  const dbPath = join(resolve(root, outDir), "graph", "graph.db");
+  if (!existsSync(dbPath)) throw graphReadError("graph_missing", "Graph store is missing; run cortex build");
+  const db = openStore(dbPath);
+  try {
+    const result = await reconcileGraph(db, root, { outDir });
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`reconciled changed=${result.changed.length} added=${result.added.length} removed=${result.removed.length} applied=${result.applied}`);
+    return 0;
+  } finally { closeStore(db); }
+}
+
+function installGitHooks(root) {
+  let hooksDir = execFileSync("git", ["-C", root, "rev-parse", "--git-path", "hooks"], { encoding: "utf8" }).trim();
+  if (!hooksDir) throw new Error("git hooks directory unavailable");
+  if (!hooksDir.startsWith("/")) hooksDir = resolve(root, hooksDir);
+  mkdirSync(hooksDir, { recursive: true });
+  const node = process.execPath;
+  const watchScript = resolve(SCRIPT_DIR, "cortex-watch.mjs");
+  const installed = [];
+  for (const name of ["post-checkout", "post-merge", "post-rewrite"]) {
+    const posix = join(hooksDir, name);
+    const line = `"${node}" "${watchScript}" nudge "$PWD"`;
+    const prior = existsSync(posix) ? readFileSync(posix, "utf8") : "";
+    const content = prior.includes("cortex-watch.mjs") ? prior : `${prior}${prior && !prior.endsWith("\n") ? "\n" : ""}${line} >/dev/null 2>&1 &\n`;
+    writeFileSync(posix, content);
+    chmodSync(posix, 0o755);
+    const cmd = join(hooksDir, `${name}.cmd`);
+    const cmdLine = `start "" /b "${node}" "${watchScript}" nudge "%CD%" >nul 2>&1`;
+    const cmdPrior = existsSync(cmd) ? readFileSync(cmd, "utf8") : "";
+    writeFileSync(cmd, cmdPrior.includes("cortex-watch.mjs") ? cmdPrior : `@echo off\n${cmdLine}\n`);
+    installed.push(name);
+  }
+  return { hooksDir, installed, node, watchScript };
+}
+
 function orientPayload(root, outDir, args = {}) {
   const status = graphStatus(root, outDir);
   const map = readJson(join(root, outDir, "map.json"), {});
@@ -2661,7 +2701,7 @@ async function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -2722,6 +2762,13 @@ async function main() {
   if (command === "doctor") return doctor(root, outDir, { json: Boolean(args.json), full: Boolean(args.full) });
   if (command === "orient") {
     console.log(JSON.stringify(orientPayload(root, outDir, args), null, 2));
+    return 0;
+  }
+  if (command === "reconcile") return await runReconcile(root, outDir, args);
+  if (command === "hooks") {
+    const [subcommand] = rest;
+    if (subcommand !== "install-git") { usage(); return 1; }
+    console.log(JSON.stringify(installGitHooks(root), null, 2));
     return 0;
   }
   if (command === "delta") return await runDelta(root, outDir, args);

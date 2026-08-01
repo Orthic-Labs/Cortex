@@ -1,0 +1,37 @@
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { diffLedgerAgainstTree } from "../graph/merkle-ledger.mjs";
+import { scanSourcesPublic } from "../graph/static-provider.mjs";
+import { closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { eventsSince, writeSnapshot } from "./adapter.mjs";
+import { appendWatchEvents, drainJournal } from "./repo-actor.mjs";
+
+function snapshotPath(root, outDir) { return join(resolve(root), outDir, "graph", "watch.snapshot"); }
+
+export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
+  const db = typeof dbOrRoot === "string" ? openStore(join(resolve(dbOrRoot), options.outDir ?? ".agent", "graph", "graph.db")) : dbOrRoot;
+  const root = typeof dbOrRoot === "string" ? resolve(dbOrRoot) : resolve(rootOrOptions);
+  const outDir = options.outDir ?? ".agent";
+  const close = typeof dbOrRoot === "string";
+  try {
+    const snapshot = options.snapshotPath ?? snapshotPath(root, outDir);
+    const pending = [];
+    if (existsSync(snapshot)) {
+      const fastEvents = await eventsSince(root, snapshot);
+      pending.push(...fastEvents);
+    }
+    const source = scanSourcesPublic(root, 0, {});
+    const diff = diffLedgerAgainstTree(db, null, source.files ?? []);
+    for (const path of diff.changed) pending.push({ eventKind: "modify", path, observedMs: Date.now() });
+    for (const path of diff.added) pending.push({ eventKind: "create", path, observedMs: Date.now() });
+    for (const path of diff.removed) pending.push({ eventKind: "delete", path, observedMs: Date.now() });
+    const unique = new Map();
+    for (const event of pending) unique.set(`${event.path}:${event.renameTo ?? ""}`, event);
+    if (unique.size) appendWatchEvents(db, [...unique.values()]);
+    const applied = drainJournal(db, root, { force: true, maxDependentFiles: options.maxDependentFiles });
+    await writeSnapshot(root, snapshot);
+    db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
+    db.prepare("INSERT INTO watch_state(key,value) VALUES ('last_reconcile_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Date.now()));
+    return { ok: true, changed: diff.changed, added: diff.added, removed: diff.removed, queued: unique.size, applied, eventGap: 0 };
+  } finally { if (close) closeStore(db); }
+}
