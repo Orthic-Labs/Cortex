@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,9 +7,18 @@ import test from "node:test";
 import { buildGraphGeneration } from "../graph/static-provider.mjs";
 import { CortexRepositoryWorker, RepositoryActor } from "../graph/watchman.mjs";
 import { closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { normalizeEvents } from "../watchman/adapter.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
+
+test("watch paths survive macOS /var to /private/var canonicalization", { skip: process.platform !== "darwin" }, () => {
+  const repo = mkdtempSync("/var/tmp/cortex-watchman-path-");
+  try {
+    const eventPath = join(realpathSync(repo), "src/service.ts");
+    assert.equal(normalizeEvents(repo, [{ type: "update", path: eventPath }])[0].path, "src/service.ts");
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
 
 test("watch worker persists source/apply clocks and applies one-file delta", () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-"));

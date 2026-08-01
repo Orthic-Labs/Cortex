@@ -1,4 +1,5 @@
 import ParcelWatcher from "@parcel/watcher";
+import { realpathSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { SCAN_EXCLUSIONS } from "../graph/static-provider.mjs";
 
@@ -14,11 +15,12 @@ function ignorePatterns(extra = []) {
 }
 
 function normalizeEvents(root, events, observedMs = Date.now()) {
+  const canonicalRoot = realpathSync(resolve(root));
   const candidates = events
     .filter((event) => EVENT_TYPES.has(event.type))
     .map((event) => ({
       eventKind: event.type === "update" ? "modify" : event.type,
-      path: normalizePath(root, event.path),
+      path: normalizePath(canonicalRoot, event.path),
       renameTo: null,
       observedMs,
     }))

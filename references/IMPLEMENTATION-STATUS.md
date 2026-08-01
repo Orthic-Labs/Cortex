@@ -104,6 +104,11 @@ broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with
 `engines`, and `exports`; `npm test` runs `tests/*.test.mjs` only; monorepo contract tests live under
 `tests/workspace/` (`npm run test:workspace` / `test:all`).
 
+**Resident watcher qualification (2026-08-01):** Parcel event roots are canonicalized before
+relative-path calculation, including macOS `/var` to `/private/var` events. Full qualification
+declares its Python `jsonschema` dependency in `requirements-test.txt`; CI installs it under Python
+3.11 before `pnpm test:all` on macOS and Windows.
+
 **The qualification harness is built and gated.**
 `evals/run-qualification.mjs` enforces six mandatory gates (`correctness, freshness, security,
 contract, portability, operability`) plus performance budgets.

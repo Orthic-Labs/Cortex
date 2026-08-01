@@ -151,12 +151,14 @@ classifiers, MCP enforcement, and CodeRight brokers are intentionally out of sco
 
 ```sh
 npm install   # or pnpm install
+python3 -m pip install -r requirements-test.txt
 npm test                # standalone package tests (tests/*.test.mjs)
 npm run test:workspace  # monorepo context-contract suite (tests/workspace/)
 npm run test:all        # both
 ```
 
-Requires Node `>=20`. CLI entry: `blueprint` → `scripts/blueprint.mjs`.
+Requires Node `>=20`; full tests also require Python `>=3.11` + packages in `requirements-test.txt`.
+CLI entry: `blueprint` → `scripts/blueprint.mjs`.
 
 ## Outputs
 
