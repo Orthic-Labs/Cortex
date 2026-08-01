@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orthic.labs/schemas/repository-neighborhood-v1.json",
+  "title": "RepositoryNeighborhoodV1",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "generationId", "receiptId", "anchors", "neurons", "synapses", "circuits", "bounds", "omissions"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "RepositoryNeighborhoodV1" },
+    "generationId": { "type": ["string", "null"] },
+    "receiptId": { "type": ["string", "null"] },
+    "anchors": { "type": "array", "items": { "type": "object", "required": ["path", "symbol", "protected"] } },
+    "neurons": { "type": "array", "items": { "type": "object", "required": ["id", "kind", "path", "span", "score"] } },
+    "synapses": { "type": "array", "items": { "type": "object", "required": ["id", "kind", "source", "target", "confidenceTier", "resolved"] } },
+    "circuits": { "type": "array", "items": { "type": "object", "required": ["name", "neuronIds"] } },
+    "bounds": { "type": "object", "required": ["budgetTokens", "usedTokens", "maxHops"] },
+    "omissions": { "type": "array", "items": { "type": "object", "required": ["reason", "count", "recovery"] } }
+  },
+  "additionalProperties": true
+}

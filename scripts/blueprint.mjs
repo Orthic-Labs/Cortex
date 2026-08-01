@@ -48,6 +48,7 @@ import {
   queryGraph,
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
+import { buildNeighborhood } from "../graph/neighborhood.mjs";
 import { generateDocs } from "../lib/generated-docs.mjs";
 import {
   buildIncrementalPhase2Plan,
@@ -196,6 +197,7 @@ usage:
   ${command} orient [--out .agent] [--query TEXT] [--json]
   ${command} reconcile [--out .agent] [--json]
   ${command} hooks install-git [--out .agent]
+  ${command} neighborhood <anchor...> [--budget-tokens N] [--json]
   ${command} delta <path...> [--out .agent]
 `);
 }
@@ -2195,6 +2197,22 @@ async function runReconcile(root, outDir, args) {
   } finally { closeStore(db); }
 }
 
+async function runNeighborhood(root, outDir, args) {
+  const freshnessReceipt = await queryFreshnessBarrier(root, outDir, args);
+  if (freshnessReceipt.barrierResult !== "caught_up" && !args["allow-stale"]) {
+    console.error(JSON.stringify({ error: "stale_blocked", barrier: freshnessReceipt }, null, 2));
+    return 3;
+  }
+  const generation = readFreshGraph(root, outDir, { allowStale: Boolean(args["allow-stale"]) });
+  const neighborhood = buildNeighborhood(generation, args._, {
+    budgetTokens: Number(args["budget-tokens"] ?? 8000),
+    receiptId: freshnessReceipt.receiptId,
+  });
+  if (freshnessReceipt.barrierResult !== "caught_up") neighborhood.stale = true;
+  console.log(JSON.stringify(neighborhood, null, 2));
+  return 0;
+}
+
 function installGitHooks(root) {
   let hooksDir = execFileSync("git", ["-C", root, "rev-parse", "--git-path", "hooks"], { encoding: "utf8" }).trim();
   if (!hooksDir) throw new Error("git hooks directory unavailable");
@@ -2767,7 +2785,7 @@ async function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks", "neighborhood"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -2836,6 +2854,7 @@ async function main() {
     return 0;
   }
   if (command === "reconcile") return await runReconcile(root, outDir, args);
+  if (command === "neighborhood") return await runNeighborhood(root, outDir, args);
   if (command === "hooks") {
     const [subcommand] = rest;
     if (subcommand !== "install-git") { usage(); return 1; }
