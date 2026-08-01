@@ -11,6 +11,7 @@ import {
   graphStatus,
   queryGraph,
   readGeneration,
+  repositoryIdentity,
 } from "../graph/static-provider.mjs";
 import { buildNeighborhood } from "../graph/neighborhood.mjs";
 import { syncToCurrentSourceAtPath } from "../graph/barrier.mjs";
@@ -54,7 +55,8 @@ function orientPayload(root, generation, receipt) {
   const manifest = readJson(join(root, ".blueprint/manifest.json"), {});
   const flowInventory = readJson(join(root, OUT_DIR, "flows.json"), { flows: [] });
   const query = "";
-  const candidates = createContextCandidateSet(generation, { task: query, query, maxCandidates: 40 });
+  const identity = repositoryIdentity(root);
+  const candidates = createContextCandidateSet(generation, { task: query, query, maxCandidates: 40, ...identity, repoRoot: root, receiptId: receipt.receiptId });
   const flows = Array.isArray(flowInventory.flows) ? flowInventory.flows : [];
   const topCircuits = flows.slice(0, 5).map((flow, index) => ({
     name: flow.name ?? flow.entry?.name ?? flow.terminal?.name ?? flow.id ?? `circuit-${index + 1}`,
@@ -90,7 +92,7 @@ async function cortexExpand(repoRoot, anchors, budgetTokens) {
     const payload = { error: state.receipt.barrierResult === "missing" ? "graph_missing" : "stale_blocked", receiptId: state.receipt.receiptId, barrier: state.receipt };
     return result(payload, true);
   }
-  const payload = buildNeighborhood(state.generation, anchors, { budgetTokens, receiptId: state.receipt.receiptId });
+  const payload = buildNeighborhood(state.generation, anchors, { budgetTokens, receiptId: state.receipt.receiptId, ...repositoryIdentity(state.root) });
   return result(payload);
 }
 

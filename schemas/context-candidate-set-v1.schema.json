@@ -3,9 +3,12 @@
   "$id": "https://orthic.labs/schemas/context-candidate-set-v1.json",
   "title": "ContextCandidateSetV1",
   "type": "object",
-  "required": ["schemaVersion", "traceId", "task", "mode", "provider", "freshness", "providerCeiling", "candidates", "omissions"],
+  "required": ["schemaVersion", "repoId", "repoRoot", "receiptId", "traceId", "task", "mode", "provider", "freshness", "providerCeiling", "candidates", "omissions"],
   "properties": {
     "schemaVersion": { "const": 1 },
+    "repoId": { "type": ["string", "null"] },
+    "repoRoot": { "type": ["string", "null"] },
+    "receiptId": { "type": ["string", "null"] },
     "traceId": { "type": "string", "minLength": 1 },
     "task": { "type": "string" },
     "mode": { "type": "string" },

@@ -59,6 +59,8 @@ test("neighborhood CLI emits a barrier receipt and schema-valid output", () => {
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.kind, "RepositoryNeighborhoodV1");
     assert.ok(payload.receiptId);
+    assert.ok(payload.repoId);
+    assert.equal(payload.repoRoot, repo);
     assert.equal(payload.generationId, readGeneration(repo, ".agent").manifest.generationId);
     assert.ok(payload.anchors.some((anchor) => anchor.path === "src/service.ts"));
     const validation = spawnSync("python3", ["-c", [

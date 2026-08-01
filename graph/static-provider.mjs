@@ -535,6 +535,9 @@ export function createContextCandidateSet(generation, options = {}) {
 
   return {
     schemaVersion: 1,
+    repoId: options.repoId ?? (generation.repoRoot ? repositoryIdentity(generation.repoRoot).repoId : null),
+    repoRoot: options.repoRoot ?? generation.repoRoot ?? null,
+    receiptId: options.receiptId ?? null,
     traceId: options.traceId ?? randomUUID(),
     task: String(options.task ?? options.query ?? "Blueprint graph retrieval"),
     mode: options.mode ?? "survey",
@@ -549,6 +552,13 @@ export function createContextCandidateSet(generation, options = {}) {
     candidates,
     omissions,
   };
+}
+
+export function repositoryIdentity(repoRoot) {
+  const root = resolve(repoRoot).replaceAll("\\", "/");
+  const gitOrigin = spawnSync("git", ["-C", root, "config", "--get", "remote.origin.url"], { encoding: "utf8" });
+  const origin = gitOrigin.status === 0 ? gitOrigin.stdout.trim() : "";
+  return { repoId: `xxh128:${xxh128(`${root}\n${origin}`)}`, repoRoot: root, originUrl: origin || null };
 }
 
 export function resolveGraphNode(generation, nodeId) {

@@ -3,10 +3,12 @@
   "$id": "https://orthic.labs/schemas/repository-neighborhood-v1.json",
   "title": "RepositoryNeighborhoodV1",
   "type": "object",
-  "required": ["schemaVersion", "kind", "generationId", "receiptId", "anchors", "neurons", "synapses", "circuits", "bounds", "omissions"],
+  "required": ["schemaVersion", "kind", "repoId", "repoRoot", "generationId", "receiptId", "anchors", "neurons", "synapses", "circuits", "bounds", "omissions"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "kind": { "const": "RepositoryNeighborhoodV1" },
+    "repoId": { "type": ["string", "null"] },
+    "repoRoot": { "type": ["string", "null"] },
     "generationId": { "type": ["string", "null"] },
     "receiptId": { "type": ["string", "null"] },
     "anchors": { "type": "array", "items": { "type": "object", "required": ["path", "symbol", "protected"] } },

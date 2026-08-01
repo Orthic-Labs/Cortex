@@ -5,6 +5,7 @@ import { dirname, resolve, join } from "node:path";
 import { spawn } from "node:child_process";
 import { WatchSupervisor, defaultConfigPath, readWatchConfig, writeWatchConfig } from "../watchman/supervisor.mjs";
 import { reconcile } from "../watchman/reconcile.mjs";
+import { syncToCurrentSourceAtPath } from "../graph/barrier.mjs";
 
 const configPath = defaultConfigPath();
 const pidPath = join(dirname(configPath), "watchman.pid");
@@ -54,10 +55,23 @@ async function stop() {
   json({ stopped: true, pid });
 }
 
+async function barrierAll() {
+  const repos = readWatchConfig(configPath).repos;
+  const receipts = await Promise.all(repos.map(async ({ root }) => {
+    try {
+      return { repoRoot: root, receipt: await syncToCurrentSourceAtPath(root, { outDir: ".agent", timeoutMs: 2000 }) };
+    } catch (error) {
+      return { repoRoot: root, receipt: { receiptId: null, repoRoot: root, barrierResult: "error", error: String(error?.message ?? error) } };
+    }
+  }));
+  return json({ schemaVersion: 1, receipts });
+}
+
 async function main() {
   if (command === "enroll") return enroll(args[0]);
   if (command === "unenroll") return unenroll(args[0]);
   if (command === "status") return json(new WatchSupervisor({ configPath }).status());
+  if (command === "barrier-all") return barrierAll();
   if (command === "nudge") return json(await reconcile(resolve(args[0] ?? process.cwd())));
   if (command === "logs") {
     const lines = Number(args[args.indexOf("-n") + 1] ?? 50);

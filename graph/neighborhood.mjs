@@ -72,7 +72,7 @@ function hopsFrom(nodes, edges, anchorIds) {
   return distances;
 }
 
-export function buildNeighborhood(generation, anchors, { budgetTokens = 8000, receiptId = null, maxHops = MAX_HOPS } = {}) {
+export function buildNeighborhood(generation, anchors, { budgetTokens = 8000, receiptId = null, repoId = null, repoRoot = null, maxHops = MAX_HOPS } = {}) {
   const nodes = generation.nodes ?? [];
   const edges = generation.edges ?? [];
   const resolvedAnchors = resolveAnchors(generation, anchors);
@@ -112,6 +112,8 @@ export function buildNeighborhood(generation, anchors, { budgetTokens = 8000, re
   return {
     schemaVersion: 1,
     kind: "RepositoryNeighborhoodV1",
+    repoId: repoId ?? generation.repoId ?? null,
+    repoRoot: repoRoot ?? generation.repoRoot ?? null,
     generationId: generation.manifest?.generationId ?? null,
     receiptId,
     anchors: resolvedAnchors.map(({ path, symbol, protected: isProtected }) => ({ path, symbol, protected: isProtected })),

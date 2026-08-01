@@ -45,6 +45,7 @@ import {
   parseFileFacts,
   scanSourcesPublic,
   readGeneration,
+  repositoryIdentity,
   queryGraph,
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
@@ -195,6 +196,7 @@ usage:
   ${command} phase2 plan|seal [--out .agent] [--json] [--no-readme-link]
   ${command} hygiene status|refresh [--out .agent] [--only check,...] [--offline] [--json]
   ${command} graph build|status|schema|search|neighbors|path|impact|resolve|architecture|flows|doc-truth|mermaid|planner-status|candidates [--out .agent] [--limit N] [--budget TOKENS] [--json]
+  ${command} candidates --repo-id <id> [--query TEXT] [--json]
   ${command} orient [--out .agent] [--query TEXT] [--json]
   ${command} reconcile [--out .agent] [--json]
   ${command} hooks install-git [--out .agent]
@@ -1950,6 +1952,10 @@ async function runGraphCommand(root, outDir, subcommand, args) {
         query,
         maxCandidates: Number(args.limit ?? 40),
         anchors,
+        ...repositoryIdentity(root),
+        repoId: args["repo-id"] ?? repositoryIdentity(root).repoId,
+        repoRoot: root,
+        receiptId: freshnessReceipt?.receiptId ?? null,
       });
       const repoCodeScanMs = Number(process.hrtime.bigint() - repoCodeScanStarted) / 1_000_000;
       result._rightcontext = { stageElapsedMs: { repo_code_scan: Math.max(0, repoCodeScanMs) } };
@@ -1970,6 +1976,10 @@ async function runGraphCommand(root, outDir, subcommand, args) {
           task: String(args.task ?? query),
           query,
           maxCandidates: Number(args.limit ?? 40),
+          ...repositoryIdentity(root),
+          repoId: args["repo-id"] ?? repositoryIdentity(root).repoId,
+          repoRoot: root,
+          receiptId: freshnessReceipt?.receiptId ?? null,
         }),
       };
     });
@@ -2241,6 +2251,7 @@ async function runNeighborhood(root, outDir, args) {
   const neighborhood = buildNeighborhood(generation, args._, {
     budgetTokens: Number(args["budget-tokens"] ?? 8000),
     receiptId: freshnessReceipt.receiptId,
+    ...repositoryIdentity(root),
   });
   if (freshnessReceipt.barrierResult !== "caught_up") neighborhood.stale = true;
   console.log(JSON.stringify(neighborhood, null, 2));
@@ -2279,10 +2290,14 @@ function orientPayload(root, outDir, args = {}) {
   const query = String(args.query ?? args.task ?? args._?.join(" ") ?? "").trim();
   const candidateSet = withFreshIndexedGraph(root, outDir, {}, ({ db }) => {
     const generation = indexedQueryGeneration(db, query, { limit: Number(args.limit ?? 40) });
+    const identity = repositoryIdentity(root);
     return createContextCandidateSet(generation, {
       task: String(args.task ?? query),
       query,
       maxCandidates: Number(args.limit ?? 40),
+      ...identity,
+      repoRoot: root,
+      receiptId: args.freshnessReceipt?.receiptId ?? null,
     });
   });
   const flows = Array.isArray(flowInventory.flows) ? flowInventory.flows : [];
@@ -2819,7 +2834,7 @@ async function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks", "neighborhood", "grant"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks", "neighborhood", "grant", "candidates"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -2840,6 +2855,7 @@ async function main() {
     const graphArgs = parseArgs(graphRest);
     return await runGraphCommand(root, outDir, subcommand, graphArgs);
   }
+  if (command === "candidates") return await runGraphCommand(root, outDir, "candidates", args);
   if (command === "hygiene") {
     const [subcommand, ...hygieneRest] = rest;
     const hygieneArgs = parseArgs(hygieneRest);
