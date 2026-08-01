@@ -4,4 +4,6 @@ node_modules/
 .agent/graph/graph.db
 .agent/graph/graph.db-shm
 .agent/graph/graph.db-wal
+.agent/graph/grant.key
+.agent/graph/grants/
 .agent/cache/

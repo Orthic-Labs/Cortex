@@ -18,8 +18,11 @@ function parseArgs(argv) {
     const value = argv[index];
     if (value === "--project") args.scope = "project";
     else if (value === "--global") args.scope = "global";
-    else if (value === "--redirect" || value === "--uninstall" || value === "--redirect-check") args[value.slice(2)] = true;
-    else if (value.startsWith("--")) args[value.slice(2)] = argv[++index];
+    else if (value === "--redirect" || value === "--uninstall" || value === "--redirect-check" || value === "--grant-check") args[value.slice(2)] = true;
+    else if (value.startsWith("--")) {
+      const [key, inline] = value.slice(2).split("=", 2);
+      args[key] = inline === undefined ? argv[++index] : inline;
+    }
     else args._.push(value);
   }
   return args;
@@ -87,22 +90,22 @@ function installMcpEntry(state, root) {
   }));
 }
 
-function redirectCommand(root) {
-  return `${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --redirect-check --root ${shellQuote(root)}`;
+function redirectCommand(root, grants = false) {
+  return `${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))} --${grants ? "grant-check" : "redirect-check"} --root ${shellQuote(root)}`;
 }
 
-function installRedirect(state, root) {
+function installRedirect(state, root, { grants = false } = {}) {
   const path = join(root, ".claude", "settings.json");
   mergeJsonFile(state, path, (value) => {
     const hooks = Array.isArray(value.hooks?.PreToolUse) ? value.hooks.PreToolUse : [];
-    const filtered = hooks.filter((entry) => !JSON.stringify(entry).includes("--redirect-check"));
+    const filtered = hooks.filter((entry) => !JSON.stringify(entry).includes("--redirect-check") && !JSON.stringify(entry).includes("--grant-check"));
     return {
       ...value,
       hooks: {
         ...(value.hooks ?? {}),
         PreToolUse: [...filtered, {
-          matcher: "^(Read|Grep|Glob)$",
-          hooks: [{ type: "command", command: redirectCommand(root) }],
+          matcher: grants ? "^(Read|Edit)$" : "^(Read|Grep|Glob)$",
+          hooks: [{ type: "command", command: redirectCommand(root, grants) }],
         }],
       },
     };
@@ -138,13 +141,30 @@ function redirectCheck(root) {
   return 0;
 }
 
+function grantCheck(root) {
+  let request = {};
+  try { request = JSON.parse(readFileSync(0, "utf8") || "{}"); } catch {}
+  const task = String(request.task_id ?? request.taskId ?? request.session_id ?? request.sessionId ?? "default");
+  const input = request.tool_input ?? request.input ?? {};
+  const requestedPath = String(input.path ?? input.file_path ?? input.filePath ?? request.path ?? "");
+  let allowed = false;
+  if (requestedPath) {
+    try {
+      execFileSync(process.execPath, [BLUEPRINT_SCRIPT, "grant", "check", "--task", task, "--path", requestedPath], { cwd: root, stdio: "ignore" });
+      allowed = true;
+    } catch {}
+  }
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: allowed ? "allow" : "deny", permissionDecisionReason: allowed ? "Cortex task-scoped grant present." : "Run cortex_expand for this path to issue a widened Cortex grant." } }));
+  return 0;
+}
+
 function install(root, host, args) {
   const state = loadState(root);
   const instruction = instructionPath(root, host);
   const current = existsSync(instruction) ? readFileSync(instruction, "utf8") : "";
   writeManaged(state, instruction, mergeBlock(current));
   if (host === "claude-code" && args.scope !== "global") installMcpEntry(state, root);
-  if (args.redirect) installRedirect(state, root);
+  if (args.redirect) installRedirect(state, root, { grants: args.redirect === "grants" });
   if (args.scope !== "global") installGitHooks(state, root);
   saveState(root, state);
   const output = { action: "installed", host, scope: args.scope, root, instruction, redirect: Boolean(args.redirect) };
@@ -156,6 +176,7 @@ function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const host = args.host;
   if (args["redirect-check"]) return redirectCheck(resolve(args.root ?? process.cwd()));
+  if (args["grant-check"]) return grantCheck(resolve(args.root ?? process.cwd()));
   if (!host || !["claude-code", "codex", "cursor", "generic"].includes(host)) throw new Error("--host must be claude-code, codex, cursor, or generic");
   const root = resolve(args.root ?? (args.scope === "global" ? homedir() : process.cwd()));
   if (args.uninstall) {

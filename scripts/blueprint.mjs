@@ -76,6 +76,7 @@ import { applyFileDelta, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-st
 import { collectDependents } from "../graph/store-sqlite.mjs";
 import { reconcile as reconcileGraph } from "../watchman/reconcile.mjs";
 import { syncToCurrentSource } from "../graph/barrier.mjs";
+import { checkScopeGrant, issueScopeGrant } from "../lib/receipt-store.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -198,6 +199,8 @@ usage:
   ${command} reconcile [--out .agent] [--json]
   ${command} hooks install-git [--out .agent]
   ${command} neighborhood <anchor...> [--budget-tokens N] [--json]
+  ${command} grant issue --task <id> --paths <glob...> [--ttl-minutes N]
+  ${command} grant check --task <id> --path <path>
   ${command} delta <path...> [--out .agent]
 `);
 }
@@ -269,6 +272,37 @@ function parseArgs(argv) {
     }
   }
   return args;
+}
+
+function runGrantCommand(root, outDir, subcommand, args) {
+  const generation = readGeneration(root, outDir);
+  if (!generation?.manifest?.generationId) throw graphReadError("graph_missing", "Graph store is missing; run blueprint build");
+  if (subcommand === "issue") {
+    const paths = [args.paths, ...args._].filter(Boolean);
+    const issued = issueScopeGrant({
+      repoRoot: root,
+      generationId: generation.manifest.generationId,
+      taskId: args.task,
+      paths,
+      ttlMinutes: Number(args["ttl-minutes"] ?? 120),
+      outDir,
+    });
+    console.log(JSON.stringify(issued.grant, null, 2));
+    return 0;
+  }
+  if (subcommand === "check") {
+    const checked = checkScopeGrant({
+      repoRoot: root,
+      generationId: generation.manifest.generationId,
+      taskId: args.task,
+      path: args.path,
+      outDir,
+    });
+    console.log(JSON.stringify(checked, null, 2));
+    return checked.allowed ? 0 : 4;
+  }
+  usage();
+  return 1;
 }
 
 function readJson(path, fallback) {
@@ -2785,7 +2819,7 @@ async function main() {
     usage();
     return 0;
   }
-  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks", "neighborhood"]);
+  const knownCommands = new Set(["build", "brief", "doctor", "graph", "hygiene", "phase2", "orient", "delta", "reconcile", "hooks", "neighborhood", "grant"]);
   if (!knownCommands.has(command)) {
     const args = parseArgs(argv);
     const task = String(args.task ?? args._.join(" ")).trim();
@@ -2815,6 +2849,10 @@ async function main() {
     const [subcommand, ...phase2Rest] = rest;
     const phase2Args = parseArgs(phase2Rest);
     return runPhase2Command(root, outDir, subcommand, phase2Args);
+  }
+  if (command === "grant") {
+    const [subcommand, ...grantRest] = rest;
+    return runGrantCommand(root, outDir, subcommand, parseArgs(grantRest));
   }
   if (command === "build") {
     const result = await build(root, outDir, args);
