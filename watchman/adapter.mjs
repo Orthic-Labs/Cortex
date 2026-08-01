@@ -1,6 +1,6 @@
 import ParcelWatcher from "@parcel/watcher";
 import { realpathSync, statSync } from "node:fs";
-import { basename, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { SCAN_EXCLUSIONS } from "../graph/static-provider.mjs";
 
 const EVENT_TYPES = new Set(["create", "update", "delete"]);
@@ -10,8 +10,17 @@ function canonicalRoot(value) {
   try { return realpathSync(root); } catch { return root; }
 }
 
+function canonicalAbsolute(value) {
+  const absolute = resolve(value);
+  try { return realpathSync(absolute); }
+  catch {
+    const parent = dirname(absolute);
+    return parent === absolute ? absolute : resolve(canonicalAbsolute(parent), basename(absolute));
+  }
+}
+
 function normalizePath(root, value) {
-  return relative(root, resolve(root, String(value))).replaceAll("\\", "/");
+  return relative(root, canonicalAbsolute(resolve(root, String(value)))).replaceAll("\\", "/");
 }
 
 function ignorePatterns(extra = []) {
