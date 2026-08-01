@@ -70,7 +70,8 @@ import {
 } from "../graph/traverse-store.mjs";
 import { workingTreeSummary } from "../sources/dirty-files.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
-import { applyFileDelta } from "../graph/delta-store.mjs";
+import { applyFileDelta, MAX_DEPENDENT_FILES, MAX_HOPS } from "../graph/delta-store.mjs";
+import { collectDependents } from "../graph/store-sqlite.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -2007,49 +2008,105 @@ async function runGraphCommand(root, outDir, subcommand, args) {
   return 1;
 }
 
+function makeDeltaInput(root, sourceFiles, path, eventKind = null, renameTo = null) {
+  const normalizedPath = normalizePath(path);
+  const absPath = resolve(root, normalizedPath);
+  const exists = existsSync(absPath);
+  const read = exists ? stableRead(absPath) : null;
+  let parsed = null;
+  if (read) {
+    const text = read.bytes.toString("utf8");
+    const descriptor = {
+      absolutePath: absPath,
+      path: normalizePath(renameTo ?? normalizedPath),
+      text,
+      lines: text.split(/\r?\n/),
+      contentHash: read.contentDigest.replace(/^xxh128:/, ""),
+      size: read.bytes.length,
+    };
+    const files = sourceFiles.filter((file) => normalizePath(file.path) !== normalizedPath);
+    files.push(descriptor);
+    parsed = parseFileFacts(root, descriptor, { files });
+  }
+  return {
+    eventKind: eventKind ?? (!exists ? "delete" : sourceFiles.some((file) => normalizePath(file.path) === normalizedPath) ? "modify" : "create"),
+    path: normalizedPath,
+    renameTo,
+    parsed,
+    contentDigest: read?.contentDigest ?? null,
+    fileIdentity: read?.fileIdentity ?? null,
+    size: read?.bytes.length ?? 0,
+    mtimeMs: read?.statAfter?.mtimeMs ?? null,
+    provider: { id: "lexical", version: "repo-local-delta-v1" },
+  };
+}
+
+function readRepairState(db) {
+  db.exec("CREATE TABLE IF NOT EXISTS watch_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  const row = db.prepare("SELECT value FROM watch_state WHERE key='repair_truncated'").get();
+  if (!row) return null;
+  try { return JSON.parse(row.value); } catch { return null; }
+}
+
+function writeRepairState(db, value) {
+  if (value) db.prepare("INSERT INTO watch_state(key, value) VALUES ('repair_truncated', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(value));
+  else db.prepare("DELETE FROM watch_state WHERE key='repair_truncated'").run();
+}
+
+function applyRepairs(db, root, repairPaths, sourceClock, { batched }) {
+  const batches = batched ? [] : [repairPaths];
+  if (batched) for (let index = 0; index < repairPaths.length; index += 50) batches.push(repairPaths.slice(index, index + 50));
+  for (const batch of batches) {
+    if (batched) db.exec("BEGIN IMMEDIATE");
+    try {
+      const source = scanSourcesPublic(root, 0, {});
+      for (const path of batch) {
+        const input = makeDeltaInput(root, source.files ?? [], path);
+        applyFileDelta(db, { ...input, sourceClock }, { inTransaction: !batched });
+      }
+      if (batched) db.exec("COMMIT");
+    } catch (error) {
+      if (batched) db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+}
+
 async function runDelta(root, outDir, args) {
   const dbPath = join(resolve(root, outDir), "graph", "graph.db");
   if (!existsSync(dbPath)) throw graphReadError("graph_missing", "Graph store is missing; run cortex build");
   const paths = args._.map(normalizePath).filter(Boolean);
-  if (paths.length === 0) throw new Error("cortex delta requires at least one path");
-  const source = scanSourcesPublic(root, 0, {});
-  const sourceFiles = source.files ?? [];
-  const byPath = new Map(sourceFiles.map((file) => [normalizePath(file.path), file]));
+  if (paths.length === 0 && !args["resume-repair"]) throw new Error("cortex delta requires at least one path");
   const db = openStore(dbPath);
   try {
     const results = [];
-    for (const path of paths) {
-      const absPath = resolve(root, path);
-      const exists = existsSync(absPath);
-      let parsed = null;
-      let contentDigestValue = null;
-      let read = null;
-      if (exists) {
-        read = stableRead(absPath);
-        contentDigestValue = read.contentDigest;
-        const descriptor = {
-          absolutePath: absPath,
-          path,
-          text: read.bytes.toString("utf8"),
-          lines: read.bytes.toString("utf8").split(/\r?\n/),
-          contentHash: read.contentDigest.replace(/^xxh128:/, ""),
-          size: read.bytes.length,
-        };
-        const files = sourceFiles.map((file) => normalizePath(file.path) === path ? descriptor : file);
-        if (!files.some((file) => normalizePath(file.path) === path)) files.push(descriptor);
-        parsed = parseFileFacts(root, descriptor, { files });
+    if (args["resume-repair"]) {
+      const state = readRepairState(db);
+      if (!state?.remaining?.length) {
+        console.log(JSON.stringify([{ resumed: true, truncated: false, remaining: [] }], null, 2));
+        return 0;
       }
-      const eventKind = !exists ? "delete" : byPath.has(path) ? "modify" : "create";
-      results.push(applyFileDelta(db, {
-        eventKind,
-        path,
-        parsed,
-        provider: { id: "lexical", version: "repo-local-delta-v1" },
-        contentDigest: contentDigestValue,
-        fileIdentity: read?.fileIdentity ?? null,
-        size: read?.bytes.length ?? 0,
-        mtimeMs: read?.statAfter?.mtimeMs ?? null,
-      }));
+      applyRepairs(db, root, state.remaining, Number(db.prepare("SELECT value FROM watch_state WHERE key='applied_clock'").get()?.value ?? 0), { batched: state.remaining.length > 50 });
+      writeRepairState(db, null);
+      console.log(JSON.stringify([{ resumed: true, truncated: false, remaining: [] }], null, 2));
+      return 0;
+    }
+    for (const path of paths) {
+      const source = scanSourcesPublic(root, 0, {});
+      const closure = collectDependents(db, path, { maxHops: MAX_HOPS, maxFiles: Number(args["max-dependent-files"] ?? MAX_DEPENDENT_FILES) });
+      const sameOuter = closure.paths.length <= 50;
+      if (sameOuter) db.exec("BEGIN IMMEDIATE");
+      try {
+        const base = applyFileDelta(db, makeDeltaInput(root, source.files ?? [], path), { inTransaction: sameOuter });
+        if (base.applied && closure.paths.length) applyRepairs(db, root, closure.paths, base.appliedClock, { batched: !sameOuter });
+        if (closure.truncated) writeRepairState(db, { path, remaining: closure.remaining });
+        else writeRepairState(db, null);
+        if (sameOuter) db.exec("COMMIT");
+        results.push({ ...base, ...(closure.truncated ? { truncated: true, remaining: closure.remaining } : { truncated: false, remaining: [] }) });
+      } catch (error) {
+        if (sameOuter) db.exec("ROLLBACK");
+        throw error;
+      }
     }
     console.log(JSON.stringify(results, null, 2));
     return 0;

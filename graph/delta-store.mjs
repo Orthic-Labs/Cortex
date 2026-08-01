@@ -8,6 +8,8 @@ import {
 } from "./store-sqlite.mjs";
 
 export const STRUCTURAL_PROVIDER = Object.freeze({ id: "lexical", version: "repo-local-delta-v1" });
+export const MAX_HOPS = 2;
+export const MAX_DEPENDENT_FILES = 500;
 
 function normalizePath(value) {
   return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
@@ -104,7 +106,12 @@ function updateFileState(db, path, digest, sourceClock, fileIdentity = null, siz
     .run(path, normalizeDigest(digest), size, mtimeMs, fileIdentity, eventSeq, sourceClock);
 }
 
-export function applyFileDelta(db, delta) {
+function refreshManifestCounts(manifest, db) {
+  const counts = countRows(db);
+  return { ...manifest, counts: { ...manifest.counts, nodes: counts.files + counts.symbols, edges: counts.edges } };
+}
+
+export function applyFileDelta(db, delta, options = {}) {
   const path = normalizePath(delta.path);
   const eventKind = delta.eventKind ?? "modify";
   const provider = delta.provider ?? STRUCTURAL_PROVIDER;
@@ -115,7 +122,8 @@ export function applyFileDelta(db, delta) {
   const previousApplied = clock(db, "applied_clock", 0);
   const appliedClock = Number(delta.sourceClock ?? previousApplied + 1);
   const newPath = eventKind === "rename" ? normalizePath(delta.renameTo ?? delta.parsed?.nodes?.find((node) => node.kind === "file")?.path ?? path) : path;
-  db.exec("BEGIN IMMEDIATE");
+  const ownsTransaction = options.inTransaction !== true;
+  if (ownsTransaction) db.exec("BEGIN IMMEDIATE");
   try {
     const oldOwners = db.prepare("SELECT fact_id, fact_kind FROM fact_owner WHERE source_path = ?").all(path);
     const oldNodeIds = oldOwners.filter((owner) => owner.fact_kind === "node").map((owner) => owner.fact_id);
@@ -135,14 +143,14 @@ export function applyFileDelta(db, delta) {
       insertParsedFacts(db, delta.parsed, envelope.manifest.generationId, contentDigestValue, provider);
       refreshDependencies(db, newPath, delta.parsed.dependencies);
       updateFileState(db, newPath, contentDigestValue, appliedClock, delta.fileIdentity ?? null, delta.size ?? delta.parsed.size ?? 0, delta.mtimeMs ?? null, delta.journalSeq ?? null);
-      envelope.manifest.counts = { ...envelope.manifest.counts, ...countRows(db) };
+      Object.assign(envelope.manifest, refreshManifestCounts(envelope.manifest, db));
       envelope.manifest.manifestDigest = computeManifestDigest(envelope.manifest, envelope.sourceObservation);
       db.prepare("UPDATE generation SET value = ? WHERE key = 'manifest'").run(JSON.stringify(envelope.manifest));
     } else {
       const envelope = getGenerationEnvelope(db);
       const rootDigest = updateLeafChain(db, path, null);
       const resealed = resealGenerationIdentityDelta(envelope, rootDigest, appliedClock);
-      resealed.manifest.counts = { ...resealed.manifest.counts, ...countRows(db) };
+      Object.assign(resealed.manifest, refreshManifestCounts(resealed.manifest, db));
       resealed.manifest.manifestDigest = computeManifestDigest(resealed.manifest, resealed.sourceObservation);
       db.prepare("UPDATE generation SET value = ? WHERE key = 'manifest'").run(JSON.stringify(resealed.manifest));
     }
@@ -150,10 +158,10 @@ export function applyFileDelta(db, delta) {
     if (delta.journalSeq && hasTable(db, "event_journal")) {
       db.prepare("UPDATE event_journal SET applied = 1, applied_clock = ? WHERE seq = ?").run(appliedClock, delta.journalSeq);
     }
-    db.exec("COMMIT");
+    if (ownsTransaction) db.exec("COMMIT");
     return { applied: true, path, appliedClock, rootDigest: db.prepare("SELECT digest FROM generation_leaf WHERE path = '' AND kind = 'dir'").get()?.digest ?? null };
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (ownsTransaction) db.exec("ROLLBACK");
     throw error;
   }
 }

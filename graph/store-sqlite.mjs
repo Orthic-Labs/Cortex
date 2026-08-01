@@ -538,6 +538,39 @@ export function loadFileState(db, path) {
   return db.prepare("SELECT * FROM file_state WHERE path = ?").get(String(path)) ?? null;
 }
 
+export function collectDependents(db, path, options = {}) {
+  const maxHops = Math.max(0, Number(options.maxHops ?? 2));
+  const maxFiles = Math.max(0, Number(options.maxFiles ?? 500));
+  const root = String(path);
+  const visited = new Set([root]);
+  const paths = [];
+  const remaining = [];
+  let frontier = [root];
+  for (let hop = 0; hop < maxHops && frontier.length > 0; hop += 1) {
+    const next = [];
+    for (const current of frontier) {
+      const rows = db.prepare("SELECT dependent_path FROM dependency_index WHERE source_path = ? ORDER BY dependent_path").all(current);
+      for (const row of rows) {
+        const dependent = String(row.dependent_path);
+        if (visited.has(dependent)) continue;
+        visited.add(dependent);
+        next.push(dependent);
+      }
+    }
+    next.sort();
+    for (const dependent of next) {
+      if (paths.length < maxFiles) paths.push(dependent);
+      else remaining.push(dependent);
+    }
+    frontier = next;
+  }
+  return { paths, remaining, truncated: remaining.length > 0 };
+}
+
+export function dependentsOf(db, path, maxHops = 2, maxFiles = 500) {
+  return collectDependents(db, path, { maxHops, maxFiles }).paths;
+}
+
 /**
  * Reconstruct the generation object that saveGeneration persisted.
  *
