@@ -1621,7 +1621,7 @@ function normalizePath(value) {
 
 // XXH3-128 (via hash-wasm) — content hashing for change detection and
 // dedup only (file bytes, source-tree fingerprint, generation id). No trust
-// boundary depends on collision resistance here: the blueprint→MemRight
+// boundary depends on collision resistance here: the blueprint→Crypt
 // federation provider reads only the generation identity, never validates it
 // cryptographically (membrane/engine/federation/providers/blueprint.py).
 // The hasher's construction is async (WASM init); init()/update()/digest()

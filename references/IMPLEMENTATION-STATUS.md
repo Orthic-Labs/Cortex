@@ -13,11 +13,11 @@ engine, change this file in the same commit.
 
 Cortex is installed once by the workspace setup, then run **separately from the root of each
 repository**. Its `.agent/` artifacts and any derived index/cache belong to that repository, are
-regenerable, and are not MemRight storage. The only allowed integration is a bounded, source-backed
-`ContextCandidateSet v1` submitted to MemRight's global admission planner, which combines it with
+regenerable, and are not Crypt storage. The only allowed integration is a bounded, source-backed
+`ContextCandidateSet v1` submitted to Crypt's global admission planner, which combines it with
 durable recall/other layers and emits the final `ContextPacket v1`; verified `KnowledgeEmission v1`
 may enter the durable output path. Raw graph nodes, embeddings, edges, and visual layouts never
-enter MemRight. Cortex never owns the final cross-layer token budget.
+enter Crypt. Cortex never owns the final cross-layer token budget.
 
 ## What Phase 1 writes (verified 2026-07-26)
 
@@ -38,10 +38,10 @@ Cortex-owned code graph:
 - it also generates the two human docs `docs/product.md` and `docs/architecture.md`;
 - live graph commands include `build`, `status`, `schema`, `search`, `neighbors`, `path`,
   `impact`, `resolve`, `architecture`, `flows`, and `candidates`;
-- `graph candidates` emits a schema-validated `ContextCandidateSet v1` for MemRight's admission
+- `graph candidates` emits a schema-validated `ContextCandidateSet v1` for Crypt's admission
   planner boundary;
-- `graph planner-status` proves the current MemRight join state: `ready` when `memright plan-context`
-  exists, `missing_command` when Cortex can emit candidates but MemRight has not shipped the
+- `graph planner-status` proves the current Crypt join state: `ready` when `crypt plan-context`
+  exists, `missing_command` when Cortex can emit candidates but Crypt has not shipped the
   admission command, and `unavailable` when the local binary cannot be inspected;
 - `graph mermaid` emits a bounded deterministic Mermaid view for static visual inspection;
 - `graph flows --complete` asks for complete flow enumeration up to the explicit safety cap instead
@@ -78,7 +78,7 @@ The implementation is still **PARTIAL** for final whole-repository understanding
 coverage varies by language, dynamic relationships can require compiler/runtime evidence, optional
 semantic retrieval is not active, and an interactive visual explorer is not shipped. Do not
 advertise complete compiler precision, active vector search, an interactive explorer or raw graph
-ingestion into MemRight as live.
+ingestion into Crypt as live.
 
 **Confirmed 2026-07-26:** Cortex uses `node:sqlite` as its sole graph store at
 `.agent/graph/graph.db`. The schema persists files, symbols, edges, generation metadata and an
@@ -98,9 +98,9 @@ output) and also publishes once. Lexical test helpers pass `persist: true` on
 
 **Orientation admission library (P1, 2026-08-01):** Decision-only API in `lib/admission.mjs`
 (`orient` / `expand` / `status` / `revoke`) returns a neutral contract (`allow|continue|block|noop`)
-usable by MemRight hosts. Host-owned receipts live in `lib/receipt-store.mjs` (default
+usable by Crypt hosts. Host-owned receipts live in `lib/receipt-store.mjs` (default
 `~/.blueprint/receipts` or `BLUEPRINT_RECEIPT_STORE`) keyed by session/task/repo/generation — data,
-not enforcement. `lib/orientation-evidence.mjs` emits Beacon-consumable `blueprint_orientation`
+not enforcement. `lib/orientation-evidence.mjs` emits Sentinel-consumable `blueprint_orientation`
 evidence (+ optional JSON file). No fail-closed hooks, shell classifier, MCP server, or CodeRight
 broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with `bin`, `files`,
 `engines`, and `exports`; `npm test` runs `tests/*.test.mjs` only; monorepo contract tests live under

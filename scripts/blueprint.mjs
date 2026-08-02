@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createXXHash128 } from "hash-wasm";
 
 // XXH3-128 everywhere in blueprint: these are content/identity digests for
-// regenerable artifacts, never tamper-evidence. (adapt's payload_sha256 is the
+// regenerable artifacts, never tamper-evidence. (Morph's payload_sha256 is the
 // opposite case and deliberately stays cryptographic.)
 const xxhasher = await createXXHash128();
 
@@ -1113,8 +1113,8 @@ function plannedContextBudget(task, root) {
       "--query", task,
       "--record", CONTEXT_BUDGET_LOG,
     );
-    if (process.env.MEMRIGHT_TRANSCRIPT_PATH) {
-      args.push("--transcript", process.env.MEMRIGHT_TRANSCRIPT_PATH);
+    if (process.env.CRYPT_TRANSCRIPT_PATH) {
+      args.push("--transcript", process.env.CRYPT_TRANSCRIPT_PATH);
     }
     return JSON.parse(execFileSync(command, args, { encoding: "utf8", windowsHide: true }));
   } catch {
@@ -2080,7 +2080,7 @@ async function runGraphCommand(root, outDir, subcommand, args) {
       return {
         schemaVersion: 1,
         provider: meta.provider.id ?? meta.provider,
-        planner: memrightPlannerStatus(),
+        planner: cryptPlannerStatus(),
         candidateSet: createContextCandidateSet(generation, {
           task: String(args.task ?? query),
           query,
@@ -2454,17 +2454,17 @@ function orientPayload(root, outDir, args = {}) {
   };
 }
 
-// Candidate memright executables, in order. execFileSync does not resolve a
+// Candidate Crypt executables, in order. execFileSync does not resolve a
 // PATH shim on Windows (extensionless), so we also try the canonical binary and
-// the ~/bin shim location. MEMRIGHT_BIN overrides everything.
-function memrightBinCandidates() {
+// the ~/bin shim location. CRYPT_BIN overrides everything.
+function cryptBinCandidates() {
   return [
-    process.env.MEMRIGHT_BIN,
-    join(homedir(), "bin", "memright.exe"),
-    join(homedir(), "bin", "memright"),
-    "D:/Claude/tools/bin/memright.exe",
-    join(homedir(), "claude", "tools", "bin", "memright"),
-    "memright",
+    process.env.CRYPT_BIN,
+    join(homedir(), "bin", "crypt.exe"),
+    join(homedir(), "bin", "crypt"),
+    "D:/Claude/tools/bin/crypt.exe",
+    join(homedir(), "claude", "tools", "bin", "crypt"),
+    "crypt",
   ].filter(Boolean);
 }
 
@@ -2501,20 +2501,20 @@ function plannerProbeCandidateSet() {
   };
 }
 
-// Prove the Blueprint -> MemRight join is actually LIVE by round-tripping a real
-// candidate set through `memright plan-context` and validating the returned
-// ContextPacket. The old probe only grepped `memright help` for the string
+// Prove the Cortex -> Crypt join is actually LIVE by round-tripping a real
+// candidate set through `crypt plan-context` and validating the returned
+// ContextPacket. The old probe only grepped `crypt help` for the string
 // "plan-context" — a check that could not fail while the join was, in fact, never
 // wired. It reported "ready" for a hand-off nothing exercised. This one runs it.
-function memrightPlannerStatus() {
-  const result = { service: "memright", command: "memright plan-context" };
+function cryptPlannerStatus() {
+  const result = { service: "crypt", command: "crypt plan-context" };
   let tmp;
   try {
     tmp = mkdtempSync(join(tmpdir(), "bp-planner-"));
     const csPath = join(tmp, "candidate-set.json");
     writeFileSync(csPath, JSON.stringify(plannerProbeCandidateSet()));
-    let lastError = "no memright executable found on any known path";
-    for (const bin of memrightBinCandidates()) {
+    let lastError = "no crypt executable found on any known path";
+    for (const bin of cryptBinCandidates()) {
       try {
         const out = execFileSync(bin, ["plan-context", "--candidate-set", csPath, "--max-tokens", "2000"], {
           encoding: "utf8",

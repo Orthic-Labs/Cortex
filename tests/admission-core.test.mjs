@@ -93,7 +93,7 @@ test("orient blocks when graph is missing — decision only, no hooks", async ()
   }
 });
 
-test("orient issues a host receipt and Beacon evidence file", async () => {
+test("orient issues a host receipt and Sentinel evidence file", async () => {
   const { api, storeDir, evidenceDir } = makeIsolatedAdmission();
   try {
     const result = await api.orient({
@@ -226,7 +226,7 @@ test("generation mismatch blocks orient", async () => {
   }
 });
 
-test("createAdmission store is injectable for MemRight-style hosts", () => {
+test("createAdmission store is injectable for Crypt-style hosts", () => {
   const storeDir = mkdtempSync(join(tmpdir(), "bp-host-store-"));
   try {
     const store = createReceiptStore({ storeDir });

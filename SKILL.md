@@ -208,17 +208,17 @@ an embedded graph, SQLite-backed provider, or external local adapter is valid wh
 capability cannot be deferred and still called whole-repo understanding.
 
 For this workspace's context engine, preserve the canonical product boundary while mapping it:
-MemRight means the three-family/eight-layer context economy (Compaction/PUSH layers 1–6,
+Crypt means the three-family/eight-layer context economy (Compaction/PUSH layers 1–6,
 Retrieval/PULL layer 7, Curation/PERSIST layer 8), not merely the durable recall store.
 
 ### Runtime ownership and current implementation truth
 
 Cortex is installed once by the workspace setup, then run **separately from the root of each
 repository**. Its `.agent/` artifacts and any derived index/cache belong to that repository, are
-regenerable, and are not MemRight storage. The only allowed integration is a bounded, source-backed
-`ContextCandidateSet v1` submitted to MemRight's global admission planner, which combines it with
+regenerable, and are not Crypt storage. The only allowed integration is a bounded, source-backed
+`ContextCandidateSet v1` submitted to Crypt's global admission planner, which combines it with
 durable recall/other layers and emits the final `ContextPacket v1`; verified `KnowledgeEmission v1`
-may enter the durable output path. **MemRight never stores** raw graph nodes, embeddings, edges, or
+may enter the durable output path. **Crypt never stores** raw graph nodes, embeddings, edges, or
 visual layouts — those stay repo-local and regenerable. Cortex never owns the final cross-layer
 token budget.
 
@@ -268,7 +268,7 @@ retired.** Per-command semantics and the full parsed-language list: `references/
 
 Cortex is **PARTIAL** for whole-repository understanding: lexical rather than AST coverage,
 doc-code contradiction joins incomplete, no visual explorer. The interactive visual explorer and raw
-graph ingestion into MemRight are **not live** — never advertise either as shipped, and never invoke
+graph ingestion into Crypt are **not live** — never advertise either as shipped, and never invoke
 `blueprint serve` before the implementation and acceptance gates pass. Plan of record:
 `docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md`. Qualification evidence:
 `docs/baselines/2026-07-10-blueprint-graph/qualification.json`.
@@ -378,7 +378,7 @@ preserved by discarding an opinion.
 **2b. Synthesis (judgment-tier, affected items in one fan-out).** Use native judgment-capable
 workers, never an external API. Run one item per dimension listed in
 `phase2-plan.json.dimensions.synthesize[]`; preserve the sections named in `dimensions.reuse[]`. Each
-new or affected section is grounded in `anchors` + `map.json` + the merged `verdicts.json`. **Feed each worker `prep-context`'d anchors — `memright prep <tmp> <anchors...>` (same flags `--rate`/`--min-bytes`; binary `tools/bin/memright.exe`, `memright` shim on PATH) routes code→`skel` (~78% fewer tokens) and prose→`compress` (structure-safe) and returns a manifest; hand workers the prepared copies, not raw files. Synthesis needs structure, not every body; workers pull the full body only for a specific span they must read closely. SURVEY/SYNTHESIS reads only — verification (2a) reads FULL. Stack map: `tools/lib/CONTEXT-ENGINEERING.md`.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. If a dimension returns no schema-valid JSON, launch one fresh replacement from scratch. If that replacement fails or workers are unavailable, the main agent synthesizes that dimension inline under the same evidence and schema rules. The delegation preference never overrides the completion goal: do not leave `pending:true`, emit a stub, or stop while an inline fallback is possible. Merge all 6 dimensions into `understanding.json`. For each synthesized dimension, record its exact source paths and verdict dependencies under
+new or affected section is grounded in `anchors` + `map.json` + the merged `verdicts.json`. **Feed each worker `prep-context`'d anchors — `crypt prep <tmp> <anchors...>` (same flags `--rate`/`--min-bytes`; binary `tools/bin/crypt.exe`, `crypt` shim on PATH) routes code→`skel` (~78% fewer tokens) and prose→`compress` (structure-safe) and returns a manifest; hand workers the prepared copies, not raw files. Synthesis needs structure, not every body; workers pull the full body only for a specific span they must read closely. SURVEY/SYNTHESIS reads only — verification (2a) reads FULL. Stack map: `tools/lib/CONTEXT-ENGINEERING.md`.** Output structured JSON sections, every item `file:line`-referenced, `"Undetermined — <why>"` when unconfirmable. If a dimension returns no schema-valid JSON, launch one fresh replacement from scratch. If that replacement fails or workers are unavailable, the main agent synthesizes that dimension inline under the same evidence and schema rules. The delegation preference never overrides the completion goal: do not leave `pending:true`, emit a stub, or stop while an inline fallback is possible. Merge all 6 dimensions into `understanding.json`. For each synthesized dimension, record its exact source paths and verdict dependencies under
 `incremental.dimensions.<name>.inputFiles[]` and `inputVerdictIds[]`; keep reused metadata unchanged.
 Then run `blueprint phase2 seal --out .agent --json`. Seal recomputes fingerprints, binds both
 artifacts to the current graph generation, regenerates the human docs, and fails closed on missing
@@ -524,7 +524,7 @@ Per-repo `.agent/config.json` (written on first run) controls `budgets` (e.g. ra
   is the best shape or complete, Cortex's deliverable is the evidenced coverage-gap inventory;
   hand every material gap to `architect` for the mandatory external prior-art decision matrix before
   anyone makes an optimality claim.
-- Never reduce a multi-family product to the subsystem currently under inspection. For MemRight,
+- Never reduce a multi-family product to the subsystem currently under inspection. For Crypt,
   explicitly verify all three families and eight layers before describing its purpose or coverage.
 - A user-requested Cortex run never pauses for phase permission. Phase 1 is an internal checkpoint;
   continue through Phase 2–4 and the full doctor gate automatically unless the user explicitly scoped
