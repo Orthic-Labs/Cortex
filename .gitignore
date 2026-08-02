@@ -7,3 +7,5 @@ node_modules/
 .agent/graph/grant.key
 .agent/graph/grants/
 .agent/cache/
+.agent/
+.blueprint/

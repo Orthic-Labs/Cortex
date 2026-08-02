@@ -8,6 +8,7 @@ import {
   getGenerationEnvelope,
   loadFileState,
   recordArtifactState,
+  replaceSymbolSearchEntry,
 } from "./store-sqlite.mjs";
 import { incrementTelemetry } from "../lib/telemetry.mjs";
 import { STATIC_PROVIDER } from "./provider-identity.mjs";
@@ -218,6 +219,7 @@ function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fil
       if (!exists) {
         const extra = Object.fromEntries(Object.entries(node).filter(([key]) => !["id", "kind", "labels", "name", "qualifiedName", "path", "confidence", "evidence"].includes(key)));
         insertSymbol.run(node.id, node.kind, JSON.stringify(node.labels ?? []), node.name ?? "", node.qualifiedName ?? node.name ?? "", node.path, node.confidence ?? 1, JSON.stringify(node.evidence ?? []), generationId, Object.keys(extra).length ? JSON.stringify(extra) : null);
+        replaceSymbolSearchEntry(db, { id: node.id, generationId, name: node.name, qualifiedName: node.qualifiedName, path: node.path });
       } else ownsFact = false;
     }
     if (ownsFact) insertOwner.run(node.id, "node", node.path, sourceDigest, provider.id, provider.version, node.kind);

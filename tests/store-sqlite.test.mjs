@@ -18,6 +18,7 @@ import {
   blastRadius,
   upsertVectors,
   searchSimilar,
+  searchGenerationSymbols,
   countVectors,
 } from "../graph/store-sqlite.mjs";
 
@@ -64,6 +65,10 @@ test("openStore creates schema and migrate() is idempotent", () => {
     // Re-running migrate must not throw and must not change the version.
     const version = migrate(db);
     assert.equal(version, SCHEMA_VERSION);
+    const search = db.prepare("SELECT sql FROM sqlite_master WHERE name='symbol_search'").get();
+    assert.match(search.sql, /VIRTUAL TABLE symbol_search USING fts5\(id UNINDEXED, generation_id UNINDEXED, name, qualified_name, path\)/);
+    const terms = db.prepare("SELECT sql FROM sqlite_master WHERE name='symbol_terms'").get();
+    assert.match(terms.sql, /CREATE TABLE symbol_terms/);
   } finally {
     closeStore(db);
   }
@@ -96,6 +101,15 @@ test("bulk insert in a transaction round-trips files/symbols/edges exactly", () 
 
     const bySymbolPath = listSymbolsByPath(db, "a.ts");
     assert.equal(bySymbolPath.length, 2);
+
+    const matched = searchGenerationSymbols(db, "gen-1", ["widget"], 4);
+    assert.equal(matched.length, 1);
+    assert.equal(matched[0].qualifiedName, "Widget.render");
+    assert.equal(matched[0].generationId, "gen-1");
+    assert.match(matched[0].evidence, /a\.ts/);
+    const fallback = searchGenerationSymbols(db, "gen-1", ["no_such_symbol"], 4);
+    assert.equal(fallback.length, 2, "valid generation gets deterministic indexed fallback");
+    assert.ok(db.prepare("SELECT 1 FROM symbol_terms WHERE generation_id='gen-1' AND token='*' LIMIT 1").get());
 
     const importEdges = listEdges(db, { kind: "IMPORTS" });
     assert.equal(importEdges.length, 3);

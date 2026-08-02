@@ -44,6 +44,7 @@ import {
 import { finalizeGenerationIdentity, computeGenerationId, computeManifestDigest } from "./generation-identity.mjs";
 import { diffLedgerAgainstTree } from "./merkle-ledger.mjs";
 import { probeScip } from "./scip-provider.mjs";
+import { normalizeIgnoredPrefixes, pathMatchesIgnoredPrefix } from "./ignored-prefixes.mjs";
 
 export { EDGE_CONFIDENCE_TIERS, EDGE_CONFIDENCE_TIER_ORDER, EDGE_CONFIDENCE_TIER_DESCRIPTIONS, tierConfidence };
 export { PRECISION_TIERS, PRECISION_TIER_ORDER };
@@ -133,7 +134,7 @@ export function scanSourcesPublic(root, fileLimit = 0, walkOptions = {}) {
 
 export function scanSourceMetadataPublic(root, walkOptions = {}) {
   const canonical = canonicalRoot(root);
-  const traversal = walk(canonical, walkOptions);
+  const traversal = walk(canonical, { ...walkOptions, ignoredPrefixes: configuredIgnoredPrefixes(canonical, walkOptions) });
   const files = [];
   for (const absolutePath of traversal.paths) {
     try {
@@ -168,11 +169,34 @@ export function buildGraphGeneration(repoRoot, options = {}) {
   if (outDir) {
     writeParseCache(outDir, nextParseCache);
     if (options.persist) {
+      inheritSourceObservation(outDir, generation);
       finalizeGenerationIdentity(generation);
       writeGeneration(outDir, generation);
     }
   }
   return generation;
+}
+
+// A low-level persisted rebuild is sometimes the final pass after the CLI has
+// already attested the same source tree. Keep that commit epoch only when the
+// exact source hash agrees; never copy an observation across source drift.
+function inheritSourceObservation(outDir, generation) {
+  if (generation.sourceObservation !== undefined) return;
+  const dbPath = join(outDir, "graph", "graph.db");
+  if (!existsSync(dbPath)) return;
+  let db;
+  try {
+    db = openStoreReadOnly(dbPath);
+    const envelope = getGenerationEnvelope(db);
+    if (envelope?.sourceObservation?.head
+      && envelope.manifest?.repo?.sourceHash === generation.manifest?.repo?.sourceHash) {
+      generation.sourceObservation = envelope.sourceObservation;
+    }
+  } catch {
+    // No prior sealed envelope is equivalent to a first low-level build.
+  } finally {
+    if (db) closeStore(db);
+  }
 }
 
 /**
@@ -1216,7 +1240,7 @@ export function parseFileFacts(root, file, options = {}) {
 
 function scanSources(root, fileLimit = 0, walkOptions = {}) {
   const files = [];
-  const traversal = walk(root, walkOptions);
+  const traversal = walk(root, { ...walkOptions, ignoredPrefixes: configuredIgnoredPrefixes(root, walkOptions) });
   let fileLimitReached = false;
   for (const absolutePath of traversal.paths) {
     let path;
@@ -1289,6 +1313,16 @@ function scanSources(root, fileLimit = 0, walkOptions = {}) {
   };
 }
 
+function configuredIgnoredPrefixes(root, options = {}) {
+  if (Array.isArray(options.ignoredPrefixes)) return normalizeIgnoredPrefixes(options.ignoredPrefixes);
+  try {
+    const config = JSON.parse(readFileSync(join(root, ".agent", "config.json"), "utf8"));
+    return normalizeIgnoredPrefixes(config?.ignoredPrefixes);
+  } catch {
+    return [];
+  }
+}
+
 // Iterative directory walker. D:/Claude contains over a million directories,
 // which overflows the JS call stack when walked recursively. An explicit stack
 // keeps memory bounded and avoids the limit. Memory safety guarantees:
@@ -1336,6 +1370,7 @@ function walk(root, options = {}) {
   const maxDirs = Number(options.maxDirs ?? 50000);
   const maxEntriesPerDir = Number(options.maxEntriesPerDir ?? MAX_ENTRIES_PER_DIR);
   const gitEligible = gitEligiblePaths(root, options);
+  const ignoredPrefixes = normalizeIgnoredPrefixes(options.ignoredPrefixes);
   const reasons = new Set();
   const state = { truncated: false };
 
@@ -1392,10 +1427,12 @@ function walk(root, options = {}) {
         const repoPath = normalizePath(relative(root, absolutePath));
         if (entry.isDirectory()) {
           if (IGNORED.has(entry.name)) continue;
+          if (pathMatchesIgnoredPrefix(repoPath.endsWith("/") ? repoPath : `${repoPath}/`, ignoredPrefixes)) continue;
           if (gitEligible && !gitEligible.directories.has(repoPath)) continue;
           childDirectories.push(absolutePath);
         } else if (entry.isFile()) {
           if (IGNORED_FILE_NAMES.has(entry.name)) continue;
+          if (pathMatchesIgnoredPrefix(repoPath, ignoredPrefixes)) continue;
           if (gitEligible && !gitEligible.files.has(repoPath)) continue;
           if ((entry.name === "product.md" || entry.name === "architecture.md") && parentName === "docs") continue;
           try {

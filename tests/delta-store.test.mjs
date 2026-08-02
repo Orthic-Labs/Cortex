@@ -6,7 +6,7 @@ import test from "node:test";
 import { applyFileDelta } from "../graph/delta-store.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
 import { buildGraphGeneration, parseFileFacts, scanSourcesPublic } from "../graph/static-provider.mjs";
-import { closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { closeStore, getGenerationEnvelope, openStore, searchGenerationSymbols } from "../graph/store-sqlite.mjs";
 
 const FIXTURE = join(import.meta.dirname, "..", "evals/fixture-repos/typescript-commerce");
 
@@ -65,6 +65,20 @@ test("file edit replaces only owned facts and leaves unrelated rows unchanged", 
   } finally { closeStore(db); rmSync(repo, { recursive: true, force: true }); }
 });
 
+test("structural delta reindexes symbols under its resealed generation", () => {
+  const repo = makeRepo();
+  const db = openDb(repo);
+  try {
+    writeFileSync(join(repo, "src/service.ts"), `${readFileSync(join(repo, "src/service.ts"), "utf8")}\nexport const deltaSearchNeedle = true;\n`);
+    applyFileDelta(db, readDelta(repo, "src/service.ts"));
+    const generationId = getGenerationEnvelope(db)?.manifest?.generationId;
+    const rows = searchGenerationSymbols(db, generationId, ["needle"], 4);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].name, "deltaSearchNeedle");
+    assert.equal(rows[0].generationId, generationId);
+  } finally { closeStore(db); rmSync(repo, { recursive: true, force: true }); }
+});
+
 test("semantic-domain ownership survives structural refresh", () => {
   const repo = makeRepo();
   const db = openDb(repo);
@@ -82,10 +96,12 @@ test("delete removes owned facts and marks inbound Synapses unresolved", () => {
   const db = openDb(repo);
   try {
     const inbound = db.prepare("SELECT id FROM edges WHERE source='file:src/routes.ts' AND target='file:src/service.ts'").get();
+    const symbolIds = db.prepare("SELECT id FROM symbols WHERE path='src/service.ts'").all().map((row) => row.id);
     assert.ok(inbound);
     applyFileDelta(db, readDelta(repo, "src/service.ts", "delete"));
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM files WHERE path='src/service.ts'").get().n, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fact_owner WHERE source_path='src/service.ts'").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM symbol_terms WHERE symbol_id IN (SELECT value FROM json_each(?))").get(JSON.stringify(symbolIds)).n, 0);
     assert.equal(db.prepare("SELECT resolved FROM edges WHERE id=?").get(inbound.id).resolved, 0);
   } finally { closeStore(db); rmSync(repo, { recursive: true, force: true }); }
 });

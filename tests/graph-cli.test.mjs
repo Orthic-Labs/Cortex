@@ -28,6 +28,7 @@ function run(args, cwd) {
 test("blueprint graph build/status/search works from a repo root", () => {
   const repo = copyFixture();
   try {
+    fs.writeFileSync(path.join(repo, "opaque.png"), Buffer.from([0, 1, 2, 3, 255]));
     const build = run(["graph", "build", "--out", ".agent"], repo);
     assert.equal(build.status, 0, build.stderr);
     assert.match(build.stdout, /graph built .agent\/graph\/graph\.db/);
@@ -50,6 +51,7 @@ test("blueprint graph build/status/search works from a repo root", () => {
     assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
     const doctorPayload = JSON.parse(doctor.stdout);
     assert.equal(doctorPayload.state, "ready");
+    assert.ok(!doctorPayload.reasons.some((reason) => reason.code === "ledger_root_mismatch"));
     assert.deepEqual(doctorPayload.capabilities.languageCoverage.parsedExtensions, [
       "astro", "bat", "c", "cc", "cjs", "cpp", "cts", "cxx", "gql", "graphql", "h", "hpp", "js", "jsx", "m", "mjs", "mm", "mts", "nsh", "nsi", "ps1", "py", "rs", "sh", "sql", "swift", "ts", "tsx", "vbs", "vue",
     ]);

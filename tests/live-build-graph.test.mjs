@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { closeStore, openStore, readManifestEnvelope } from "../graph/store-sqlite.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -38,6 +39,17 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     // lexical layer stays as the fallback for the extensions it cannot parse.
     assert.equal(manifest.generation.provider ?? manifest.generation.toolVersions?.blueprint ?? null, "blueprint-treesitter");
     assert.equal(manifest.generation.baseCommit, baseCommit);
+    const graph = openStore(path.join(repo, ".agent/graph/graph.db"));
+    try {
+      const envelope = readManifestEnvelope(graph);
+      assert.deepEqual(envelope.sourceObservation, {
+        head: baseCommit,
+        dirty: false,
+        statusDigest: envelope.sourceObservation?.statusDigest,
+      });
+    } finally {
+      closeStore(graph);
+    }
     const map = JSON.parse(fs.readFileSync(path.join(repo, ".agent/map.json"), "utf8"));
     assert.equal(map.entrypoint, ".blueprint/manifest.json");
 

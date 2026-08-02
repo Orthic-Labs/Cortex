@@ -14,9 +14,12 @@ import {
   graphStatus,
   queryGraph,
   scanSourcesPublic,
+  finalizeGenerationIdentity,
 } from "../graph/static-provider.mjs";
+import { normalizeIgnoredPrefixes } from "../graph/ignored-prefixes.mjs";
 import { EDGE_CONFIDENCE_TIER_ORDER } from "../graph/confidence-tiers.mjs";
 import { mutateManifest } from "./_store-helpers.mjs";
+import { closeStore, openStore, saveGeneration, searchGenerationSymbols, readManifestEnvelope } from "../graph/store-sqlite.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BLUEPRINT = path.resolve(HERE, "..");
@@ -79,12 +82,39 @@ test("graph status distinguishes missing, fresh, and stale generations", () => {
   assert.equal(graphStatus(REPO, outDir).state, "missing");
   const generation = buildGraphGeneration(REPO, { outDir, persist: true });
   assert.equal(graphStatus(REPO, outDir).state, "fresh");
+  const db = openStore(path.join(outDir, "graph", "graph.db"));
+  try {
+    assert.ok(searchGenerationSymbols(db, generation.manifest.generationId, ["order"], 3).length > 0);
+  } finally {
+    closeStore(db);
+  }
 
   mutateManifest(REPO, (manifest) => { manifest.repo.sourceHash = "xxh128:stale"; }, outDir);
   assert.equal(graphStatus(REPO, outDir).state, "stale");
 
   fs.rmSync(outDir, { recursive: true, force: true });
   assert.equal(generation.manifest.complete, true);
+});
+
+test("persisted second pass preserves same-source commit observation", () => {
+  const outDir = path.join(os.tmpdir(), `blueprint-observation-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  try {
+    const seeded = buildGraphGeneration(REPO);
+    seeded.sourceObservation = { head: "a".repeat(40), dirty: false, statusDigest: "xxh128:seed" };
+    finalizeGenerationIdentity(seeded);
+    const dbPath = path.join(outDir, "graph", "graph.db");
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const db = openStore(dbPath);
+    try { saveGeneration(db, seeded, { populateState: true }); } finally { closeStore(db); }
+
+    buildGraphGeneration(REPO, { outDir, persist: true });
+    const rebuilt = openStore(dbPath);
+    try {
+      assert.deepEqual(readManifestEnvelope(rebuilt).sourceObservation, seeded.sourceObservation);
+    } finally { closeStore(rebuilt); }
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
 });
 
 test("source scan reports directory-budget truncation", () => {
@@ -154,6 +184,47 @@ test("source scan excludes Git-ignored paths while preserving tracked files", ()
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("configured ignored prefixes exclude tracked volatile files from build and freshness rescans", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-configured-ignore-"));
+  const outDir = ".agent";
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
+    fs.mkdirSync(path.join(repo, ".agent"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".agent/config.json"), JSON.stringify({
+      ignoredPrefixes: ["volatile/", "/hostile/", "../escape/", "nested/../escape/", "C:\\hostile\\"],
+    }));
+    fs.mkdirSync(path.join(repo, "volatile"), { recursive: true });
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "volatile/receipt.json"), '{"revision":1}\n');
+    fs.writeFileSync(path.join(repo, "src/live.ts"), "export const live = 1;\n");
+    fs.writeFileSync(path.join(repo, "src/volatile-adjacent.ts"), "export const adjacent = 1;\n");
+    assert.equal(spawnSync("git", ["add", ".agent/config.json", "volatile/receipt.json", "src/live.ts", "src/volatile-adjacent.ts"], { cwd: repo }).status, 0);
+
+    const paths = scanSourcesPublic(repo).files.map((file) => file.path);
+    assert.ok(!paths.includes("volatile/receipt.json"), "tracked volatile receipt must be excluded");
+    assert.ok(paths.includes("src/live.ts"));
+    assert.ok(paths.includes("src/volatile-adjacent.ts"));
+
+    const generation = buildGraphGeneration(repo, { outDir, persist: true });
+    assert.ok(!generation.nodes.some((node) => node.path === "volatile/receipt.json"));
+    assert.equal(graphStatus(repo, outDir).state, "fresh");
+
+    fs.writeFileSync(path.join(repo, "volatile/receipt.json"), '{"revision":2}\n');
+    assert.equal(graphStatus(repo, outDir).state, "fresh", "volatile receipt mutation must not stale ledger");
+    fs.writeFileSync(path.join(repo, "src/live.ts"), "export const live = 2;\n");
+    assert.equal(graphStatus(repo, outDir).state, "stale", "adjacent source mutation must stale graph");
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("ignored-prefix normalization rejects absolute and traversal input", () => {
+  assert.deepEqual(
+    normalizeIgnoredPrefixes(["safe/", "/hostile/", "../escape/", "nested/../escape/", "C:\\hostile\\", "safe/", "also\\safe/"]),
+    ["also/safe/", "safe/"],
+  );
 });
 
 test("graph status is indeterminate when freshness traversal hits a directory cap", () => {

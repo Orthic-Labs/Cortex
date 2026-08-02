@@ -317,6 +317,57 @@ const MIGRATIONS = [
       update.run(path === "" ? null : split >= 0 ? path.slice(0, split) : "", path === "" ? "" : split >= 0 ? path.slice(split + 1) : path, row.path);
     }
   },
+  // Migration 9 — generation-pinned FTS symbol index.
+  //
+  // FTS5 is present in supported Node/Python SQLite builds. The core-table
+  // fallback keeps old/minimal SQLite builds readable; callers can detect it
+  // and use their existing bounded lexical fallback instead of crashing.
+  (db) => {
+    try {
+      db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS symbol_search USING fts5(id UNINDEXED, generation_id UNINDEXED, name, qualified_name, path)");
+    } catch {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS symbol_search (
+          id TEXT NOT NULL,
+          generation_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          qualified_name TEXT NOT NULL,
+          path TEXT NOT NULL,
+          PRIMARY KEY (id, generation_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_symbol_search_generation ON symbol_search(generation_id, id);
+      `);
+    }
+  },
+  // Migration 10 — portable cold-path symbol term index.
+  //
+  // FTS can fault many external-volume pages on its first query. This compact
+  // primary-key B-tree serves Membrane's one longest-token lookup without FTS
+  // ranking work; `*` provides a deterministic valid-generation fallback.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS symbol_terms (
+        generation_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        symbol_id TEXT NOT NULL,
+        PRIMARY KEY (generation_id, token, symbol_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_symbol_terms_symbol ON symbol_terms(symbol_id);
+    `);
+  },
+  // Migration 11 — repair stores stamped by the brief-lived pre-FTS ordering.
+  // Kept idempotent so a store that already received migration 10 is unchanged.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS symbol_terms (
+        generation_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        symbol_id TEXT NOT NULL,
+        PRIMARY KEY (generation_id, token, symbol_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_symbol_terms_symbol ON symbol_terms(symbol_id);
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -341,6 +392,7 @@ export function listArtifactState(db) {
 export function migrate(db) {
   db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
   let version = getSchemaVersion(db);
+  const initialVersion = version;
   while (version < MIGRATIONS.length) {
     db.exec("BEGIN;");
     try {
@@ -353,6 +405,7 @@ export function migrate(db) {
       throw error;
     }
   }
+  if (initialVersion < 11 && version >= 11) rebuildSymbolTerms(db);
   return version;
 }
 
@@ -422,7 +475,7 @@ function insertGenerationRows(db, generation, options = {}) {
   };
 
   if (mode === "replace") {
-    db.exec("DELETE FROM files; DELETE FROM symbols; DELETE FROM edges; DELETE FROM vectors;");
+    db.exec("DELETE FROM files; DELETE FROM symbols; DELETE FROM edges; DELETE FROM vectors; DELETE FROM symbol_search; DELETE FROM symbol_terms;");
   }
   for (const node of nodes) {
     if (node.kind === "file") {
@@ -456,6 +509,13 @@ function insertGenerationRows(db, generation, options = {}) {
         generationId,
         extraOf(node, NODE_COLUMN_KEYS),
       );
+      replaceSymbolSearchEntry(db, {
+        id: node.id,
+        generationId,
+        name: node.name,
+        qualifiedName: node.qualifiedName,
+        path: node.path,
+      });
     }
   }
   for (const edge of edges) {
@@ -474,6 +534,88 @@ function insertGenerationRows(db, generation, options = {}) {
     );
   }
   return { generationId, fileCount: nodes.filter((n) => n.kind === "file").length, symbolCount: nodes.filter((n) => n.kind !== "file").length, edgeCount: edges.length };
+}
+
+/** Replace one symbol's generation-bound search terms atomically with its row. */
+export function replaceSymbolSearchEntry(db, row) {
+  const symbolId = String(row?.id ?? "");
+  const generationId = String(row?.generationId ?? "");
+  if (!symbolId || !generationId) return;
+  db.prepare("DELETE FROM symbol_search WHERE id = ?").run(symbolId);
+  db.prepare("INSERT INTO symbol_search(id, generation_id, name, qualified_name, path) VALUES (?, ?, ?, ?, ?)")
+    .run(symbolId, generationId, searchableSymbolText(row.name), searchableSymbolText(row.qualifiedName), searchableSymbolText(row.path));
+  replaceSymbolTermsEntry(db, row);
+}
+
+function replaceSymbolTermsEntry(db, row) {
+  const symbolId = String(row?.id ?? "");
+  const generationId = String(row?.generationId ?? "");
+  if (!symbolId || !generationId) return;
+  db.prepare("DELETE FROM symbol_terms WHERE symbol_id = ?").run(symbolId);
+  const insertTerm = db.prepare("INSERT OR IGNORE INTO symbol_terms(generation_id, token, symbol_id) VALUES (?, ?, ?)");
+  for (const token of symbolTermTokens([row.name, row.qualifiedName, row.path])) {
+    insertTerm.run(generationId, token, symbolId);
+  }
+}
+
+function rebuildSymbolTerms(db) {
+  db.exec("DELETE FROM symbol_terms;");
+  for (const row of db.prepare("SELECT id, generation_id AS generationId, name, qualified_name AS qualifiedName, path FROM symbols").all()) {
+    replaceSymbolTermsEntry(db, row);
+  }
+}
+
+function searchableSymbolText(value) {
+  return String(value ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replaceAll("_", " ")
+    .replaceAll("-", " ");
+}
+
+export function deleteSymbolSearchEntry(db, symbolId) {
+  db.prepare("DELETE FROM symbol_search WHERE id = ?").run(String(symbolId));
+  db.prepare("DELETE FROM symbol_terms WHERE symbol_id = ?").run(String(symbolId));
+}
+
+function symbolSearchIsFts(db) {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='symbol_search'").get();
+  return /VIRTUAL TABLE[\s\S]*fts5/i.test(String(row?.sql ?? ""));
+}
+
+export function symbolTermTokens(values) {
+  const terms = new Set(["*"]);
+  for (const value of values ?? []) {
+    for (const term of String(value ?? "")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .toLowerCase()
+      .replaceAll("-", "_")
+      .split(/[^a-z0-9_]+/)) {
+      if (!term || term.length > 64) continue;
+      terms.add(term);
+      for (const part of term.split("_")) if (part) terms.add(part);
+    }
+  }
+  return [...terms].sort();
+}
+
+/**
+ * Generation-pinned B-tree symbol lookup. The longest exact token wins; `*`
+ * remains a deterministic fallback whenever that generation has symbols.
+ */
+export function searchGenerationSymbols(db, generationId, tokens, limit = 20) {
+  const generation = String(generationId ?? "");
+  if (!generation) return [];
+  const normalized = symbolTermTokens(tokens).filter((token) => token !== "*");
+  const cap = Math.max(1, Math.min(256, Number(limit) || 20));
+  const columns = "s.id, s.name, s.qualified_name AS qualifiedName, s.path, s.confidence, s.evidence, s.generation_id AS generationId";
+  const join = "FROM symbol_terms st JOIN symbols s ON s.id=st.symbol_id AND s.generation_id=st.generation_id";
+  const select = (token) => db.prepare(`SELECT ${columns} ${join} WHERE st.generation_id=? AND st.token=?
+    ORDER BY s.confidence DESC, s.path, s.id LIMIT ?`).all(generation, token, cap);
+  for (const token of normalized.sort((left, right) => right.length - left.length || left.localeCompare(right))) {
+    const matched = select(token);
+    if (matched.length) return matched;
+  }
+  return select("*");
 }
 
 export function bulkInsertGeneration(db, generation, options = {}) {
@@ -617,7 +759,10 @@ export function deleteFactsByOwner(db, path, providerId = null) {
     const retained = db.prepare("SELECT 1 FROM fact_owner WHERE fact_id=? AND fact_kind=? LIMIT 1").get(owner.fact_id, owner.fact_kind);
     if (retained) continue;
     if (owner.fact_kind === "edge") db.prepare("DELETE FROM edges WHERE id = ?").run(owner.fact_id);
-    else if (owner.fact_kind === "node") db.prepare("DELETE FROM symbols WHERE id = ?").run(owner.fact_id);
+    else if (owner.fact_kind === "node") {
+      db.prepare("DELETE FROM symbols WHERE id = ?").run(owner.fact_id);
+      deleteSymbolSearchEntry(db, owner.fact_id);
+    }
   }
   return owners;
 }

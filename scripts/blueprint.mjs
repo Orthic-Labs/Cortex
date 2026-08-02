@@ -49,6 +49,8 @@ import {
   queryGraph,
   resolveGraphNode,
 } from "../graph/static-provider.mjs";
+import { normalizeIgnoredPrefixes, pathMatchesIgnoredPrefix } from "../graph/ignored-prefixes.mjs";
+import { leafDigestForFile } from "../graph/merkle-ledger.mjs";
 import { buildNeighborhood } from "../graph/neighborhood.mjs";
 import { generateDocs } from "../lib/generated-docs.mjs";
 import {
@@ -472,10 +474,10 @@ function repoFiles(root, config, limit = 0) {
   } catch {
     files = walk(root).map((path) => relative(root, path));
   }
-  const ignored = config.ignoredPrefixes ?? [];
+  const ignored = normalizeIgnoredPrefixes(config.ignoredPrefixes);
   const filtered = files
     .map(normalizePath)
-    .filter((path) => !ignored.some((prefix) => path.startsWith(prefix)))
+    .filter((path) => !pathMatchesIgnoredPrefix(path, ignored))
     .filter((path) => existsSync(join(root, path)))
     .sort();
   return limit > 0 ? filtered.slice(0, limit) : filtered;
@@ -578,7 +580,7 @@ function extractDoc(root, path, allFiles, config) {
   const headings = [];
   const claims = [];
   const codeRefs = new Set();
-  const ignored = config?.ignoredPrefixes ?? [];
+  const ignored = normalizeIgnoredPrefixes(config?.ignoredPrefixes);
   let currentHeading = "";
   let inFence = false;
   for (let i = 0; i < lines.length; i += 1) {
@@ -597,7 +599,7 @@ function extractDoc(root, path, allFiles, config) {
     if (!inFence) {
       for (const match of line.matchAll(PATH_RE)) {
         const normalized = normalizePath(match[1]);
-        if (ignored.some((prefix) => normalized.startsWith(prefix))) continue;
+        if (pathMatchesIgnoredPrefix(normalized, ignored)) continue;
         codeRefs.add(normalized);
       }
     }
@@ -1723,14 +1725,16 @@ function sampleLedger(root, outDir, sampleSize = 100) {
   if (!existsSync(dbPath)) return { available: false, checked: 0, mismatches: [] };
   const db = openStoreReadOnly(dbPath);
   try {
-    const rows = db.prepare("SELECT path, digest FROM generation_leaf WHERE kind='file'").all();
-    const selected = rows.length <= sampleSize ? rows : rows.sort(() => Math.random() - 0.5).slice(0, sampleSize);
+    const rows = db.prepare("SELECT path, digest FROM generation_leaf WHERE kind='file' ORDER BY path").all();
+    const envelope = readManifestEnvelope(db);
+    const files = scanSourcesPublic(root, Number(envelope?.manifest?.fileLimit ?? 0)).files;
+    const currentDigests = new Map(files.map((file) => [file.path, leafDigestForFile(file.contentHash)]));
+    const selected = rows.length <= sampleSize
+      ? rows
+      : Array.from({ length: sampleSize }, (_, index) => rows[Math.floor(index * rows.length / sampleSize)]);
     const mismatches = [];
     for (const row of selected) {
-      try {
-        const current = stableRead(join(root, row.path));
-        if (current.contentDigest !== row.digest) mismatches.push(row.path);
-      } catch { mismatches.push(row.path); }
+      if (currentDigests.get(row.path) !== row.digest) mismatches.push(row.path);
     }
     return { available: true, checked: selected.length, mismatches };
   } finally { closeStore(db); }
