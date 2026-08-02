@@ -196,6 +196,7 @@ export class RepositoryActor extends EventEmitter {
       await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles });
       if (!existsSync(this.snapshotPath)) await this.adapter.writeSnapshot(this.root, this.snapshotPath);
       setState(db, "event_gap", 0);
+      db.prepare("DELETE FROM watch_state WHERE key='last_error'").run();
     } finally { closeStore(db); }
   }
 
@@ -215,7 +216,10 @@ export class RepositoryActor extends EventEmitter {
 
   markGap(error) {
     const db = openStore(this.dbPath);
-    try { setState(db, "event_gap", 1); } finally { closeStore(db); }
+    try {
+      setState(db, "event_gap", 1);
+      if (error) setState(db, "last_error", String(error?.message ?? error).slice(0, 500));
+    } finally { closeStore(db); }
     if (error) this.log(error);
     this.emit("gap", error);
     if (!this.autoReconcileOnGap) return;

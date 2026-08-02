@@ -19,16 +19,51 @@ export function writeWatchConfig(config, configPath = defaultConfigPath()) {
   writeFileSync(configPath, `${JSON.stringify({ version: 1, repos: config.repos ?? [] }, null, 2)}\n`);
 }
 
+// Honest freshness states. A repository is "current" only when a live watcher
+// owns it, no event gap is outstanding, and nothing is waiting to be applied.
+// Every other case names itself explicitly — the failure mode this replaces
+// is a repo silently reporting "current" because nothing had ever observed
+// it (no watcher ever started, or the watcher process has since died).
+export const FRESHNESS = Object.freeze({
+  UNWATCHED: "unwatched",
+  DEGRADED: "degraded",
+  STALE: "stale",
+  CURRENT: "current",
+});
+
 function repoStatus(root, outDir = ".agent") {
   const dbPath = resolve(root, outDir, "graph", "graph.db");
-  if (!existsSync(dbPath)) return { root, pid: null, alive: false, sourceClock: 0, appliedClock: 0, eventGap: 1, pendingEvents: 0 };
+  if (!existsSync(dbPath)) {
+    return {
+      root, pid: null, alive: false, sourceClock: 0, appliedClock: 0, eventGap: 1, pendingEvents: 0,
+      freshness: FRESHNESS.UNWATCHED, reason: "no_graph_built",
+    };
+  }
   const db = openStore(dbPath);
   try {
     const state = Object.fromEntries(db.prepare("SELECT key,value FROM watch_state").all().map((row) => [row.key, row.value]));
     const pid = Number(state.watcher_pid ?? 0) || null;
     let alive = false;
     if (pid) { try { process.kill(pid, 0); alive = true; } catch {} }
-    return { root, pid, alive, sourceClock: Number(state.source_clock ?? 0), appliedClock: Number(state.applied_clock ?? 0), eventGap: Number(state.event_gap ?? 0), pendingEvents: db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n };
+    const eventGap = Number(state.event_gap ?? 0);
+    const pendingEvents = db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n;
+    const lastError = state.last_error ?? null;
+    let freshness = FRESHNESS.CURRENT;
+    let reason = null;
+    if (!pid || !alive) {
+      freshness = FRESHNESS.UNWATCHED;
+      reason = pid ? "watcher_process_dead" : "watcher_never_started";
+    } else if (eventGap) {
+      freshness = FRESHNESS.DEGRADED;
+      reason = lastError ? `event_gap: ${lastError}` : "event_gap_unreconciled";
+    } else if (pendingEvents > 0) {
+      freshness = FRESHNESS.STALE;
+      reason = "events_pending_apply";
+    }
+    return {
+      root, pid, alive, sourceClock: Number(state.source_clock ?? 0), appliedClock: Number(state.applied_clock ?? 0),
+      eventGap, pendingEvents, freshness, reason,
+    };
   } finally { closeStore(db); }
 }
 

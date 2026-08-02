@@ -185,7 +185,7 @@ function fileNode(node, generationId, digest, provider, fileReport = null) {
   };
 }
 
-function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fileReport = null) {
+function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fileReport = null, repoRoot = null) {
   const insertFile = db.prepare(`INSERT INTO files(path, content_hash, language, provider, parse_status, error_node_count, generation_id, node_id, labels, name, qualified_name, confidence, evidence, extra)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, language=excluded.language, provider=excluded.provider,
@@ -201,7 +201,7 @@ function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fil
     ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, source=excluded.source, target=excluded.target, confidence=excluded.confidence,
       resolved=excluded.resolved, specifier=excluded.specifier, evidence=excluded.evidence, generation_id=excluded.generation_id,
       confidence_tier=excluded.confidence_tier, extra=excluded.extra`);
-  const insertOwner = db.prepare("INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail) VALUES (?, ?, ?, ?, ?, ?, 'structural', ?)");
+  const insertOwner = db.prepare("INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail, generation_id, repo_root) VALUES (?, ?, ?, ?, ?, ?, 'structural', ?, ?, ?)");
   const updateFileReport = db.prepare(`UPDATE files SET content_hash=?, language=?, provider=?, parse_status=?, error_node_count=?, generation_id=? WHERE path=?`);
   const nodes = parsed?.nodes ?? [];
   for (const node of nodes) {
@@ -222,7 +222,7 @@ function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fil
         replaceSymbolSearchEntry(db, { id: node.id, generationId, name: node.name, qualifiedName: node.qualifiedName, path: node.path });
       } else ownsFact = false;
     }
-    if (ownsFact) insertOwner.run(node.id, "node", node.path, sourceDigest, provider.id, provider.version, node.kind);
+    if (ownsFact) insertOwner.run(node.id, "node", node.path, sourceDigest, provider.id, provider.version, node.kind, generationId, repoRoot);
   }
   for (const edge of parsed?.edges ?? []) {
     const indexed = new Set(["id", "kind", "source", "target", "confidence", "confidenceTier", "evidence"]);
@@ -230,7 +230,7 @@ function insertParsedFacts(db, parsed, generationId, sourceDigest, provider, fil
     const exists = provider.id !== "lexical" && db.prepare("SELECT 1 FROM edges WHERE id=?").get(edge.id);
     if (!exists) insertEdge.run(edge.id, edge.kind, edge.source, edge.target ?? null, edge.confidence ?? 1, edge.resolved === false ? 0 : 1, edge.specifier ?? null, JSON.stringify(edge.evidence ?? []), generationId, edge.confidenceTier ?? null, Object.keys(extra).length ? JSON.stringify(extra) : null);
     const sourceNode = nodes.find((node) => node.id === edge.source);
-    if (sourceNode && !exists) insertOwner.run(edge.id, "edge", sourceNode.path, sourceDigest, provider.id, provider.version, edge.kind);
+    if (sourceNode && !exists) insertOwner.run(edge.id, "edge", sourceNode.path, sourceDigest, provider.id, provider.version, edge.kind, generationId, repoRoot);
   }
 }
 
@@ -303,15 +303,17 @@ export function applyFileDelta(db, delta, options = {}) {
       updateLeafChain(db, path, null);
     }
     if (isDocumentDelta && eventKind !== "delete") {
-      const generationId = getGenerationEnvelope(db)?.manifest?.generationId;
+      const docEnvelope = getGenerationEnvelope(db);
+      const generationId = docEnvelope?.manifest?.generationId;
+      const repoRoot = options.repoRoot ?? docEnvelope?.repoRoot ?? null;
       for (const batch of factBatches) {
-        insertParsedFacts(db, batch.parsed, generationId, contentDigestValue, batch.provider, batch.fileReport ?? { provider: null });
+        insertParsedFacts(db, batch.parsed, generationId, contentDigestValue, batch.provider, batch.fileReport ?? { provider: null }, repoRoot);
       }
       db.prepare("DELETE FROM fact_owner WHERE source_path = ? AND provider_id = ?").run(newPath, provider.id);
       for (const claim of delta.document?.claims ?? []) {
-        db.prepare(`INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail)
-          VALUES (?, 'node', ?, ?, ?, ?, 'doc', 'claim')`)
-          .run(claim.id, newPath, contentDigestValue, provider.id, provider.version);
+        db.prepare(`INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail, generation_id, repo_root)
+          VALUES (?, 'node', ?, ?, ?, ?, 'doc', 'claim', ?, ?)`)
+          .run(claim.id, newPath, contentDigestValue, provider.id, provider.version, generationId ?? null, repoRoot);
       }
       updateLeafChain(db, newPath, contentDigestValue);
       updateFileState(db, newPath, contentDigestValue, appliedClock, delta.fileIdentity ?? null, delta.size ?? 0, delta.mtimeMs ?? null, delta.journalSeq ?? null);
@@ -323,9 +325,10 @@ export function applyFileDelta(db, delta, options = {}) {
       const rootBefore = getGenerationEnvelope(db);
       const rootDigest = updateLeafChain(db, newPath, contentDigestValue);
       const envelope = resealGenerationIdentityDelta(rootBefore, rootDigest, appliedClock);
+      const repoRoot = options.repoRoot ?? envelope.repoRoot ?? null;
       const dependencies = [];
       for (const batch of factBatches) {
-        insertParsedFacts(db, batch.parsed, envelope.manifest.generationId, contentDigestValue, batch.provider, batch.fileReport ?? null);
+        insertParsedFacts(db, batch.parsed, envelope.manifest.generationId, contentDigestValue, batch.provider, batch.fileReport ?? null, repoRoot);
         dependencies.push(...(batch.parsed?.dependencies ?? []));
       }
       const uniqueDependencies = [...new Map(dependencies.map((item) => [`${item.sourcePath}:${item.dependentPath}:${item.reason}`, item])).values()];

@@ -368,6 +368,22 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_symbol_terms_symbol ON symbol_terms(symbol_id);
     `);
   },
+  // Migration 12 — derived_fact_owner lineage: which generation and which
+  // repository produced each fact. `fact_owner` already tracks per-fact
+  // provider ownership (Migration 4); this adds the two columns the
+  // multi-repo resident Watchman needs so a fact can be attributed without
+  // re-deriving it from files/symbols or assuming "this DB == one repo"
+  // holds for every consumer. repo_root is the canonical (realpath'd) root
+  // the owning generation was built from; generation_id is the manifest
+  // generationId active when the row was last written (full build or delta).
+  (db) => {
+    db.exec(`
+      ALTER TABLE fact_owner ADD COLUMN generation_id TEXT;
+      ALTER TABLE fact_owner ADD COLUMN repo_root TEXT;
+      CREATE INDEX IF NOT EXISTS idx_fact_owner_generation ON fact_owner(generation_id);
+      CREATE INDEX IF NOT EXISTS idx_fact_owner_repo_root ON fact_owner(repo_root);
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -719,6 +735,8 @@ function fileStateForNode(generation, node) {
 
 function populateGenerationState(db, generation) {
   const provider = providerIdentity(generation);
+  const generationId = generation.manifest?.generationId ?? null;
+  const repoRoot = generation.repoRoot ?? null;
   const files = (generation.nodes ?? []).filter((node) => node.kind === "file");
   const fileById = new Map(files.map((node) => [node.id, node.path]));
   db.exec("DELETE FROM file_state; DELETE FROM fact_owner; DELETE FROM dependency_index; DELETE FROM generation_leaf;");
@@ -727,20 +745,20 @@ function populateGenerationState(db, generation) {
     const state = fileStateForNode(generation, file);
     insertFileState.run(file.path, state.digest, state.size, state.mtimeMs, state.identity);
   }
-  const insertOwner = db.prepare("INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail) VALUES (?, ?, ?, ?, ?, ?, 'structural', ?)");
+  const insertOwner = db.prepare("INSERT OR REPLACE INTO fact_owner(fact_id, fact_kind, source_path, source_digest, provider_id, provider_version, freshness_domain, fact_kind_detail, generation_id, repo_root) VALUES (?, ?, ?, ?, ?, ?, 'structural', ?, ?, ?)");
   for (const node of generation.nodes ?? []) {
     const path = node.path;
     if (!path) continue;
     const digest = normalizeContentDigest(files.find((file) => file.path === path)?.evidence?.[0]?.contentHash ?? "unknown");
     const owner = providerForFact(node, provider);
-    insertOwner.run(node.id, "node", path, digest, owner.id, owner.version, node.kind);
+    insertOwner.run(node.id, "node", path, digest, owner.id, owner.version, node.kind, generationId, repoRoot);
   }
   for (const edge of generation.edges ?? []) {
     const sourcePath = fileById.get(edge.source) ?? (generation.nodes ?? []).find((node) => node.id === edge.source)?.path;
     if (!sourcePath) continue;
     const digest = normalizeContentDigest(files.find((file) => file.path === sourcePath)?.evidence?.[0]?.contentHash ?? "unknown");
     const owner = providerForFact(edge, provider);
-    insertOwner.run(edge.id, "edge", sourcePath, digest, owner.id, owner.version, edge.kind);
+    insertOwner.run(edge.id, "edge", sourcePath, digest, owner.id, owner.version, edge.kind, generationId, repoRoot);
     if (edge.kind === "IMPORTS" && edge.target) {
       const targetPath = fileById.get(edge.target);
       if (targetPath) db.prepare("INSERT OR IGNORE INTO dependency_index(source_path, dependent_path, reason) VALUES (?, ?, 'import')").run(targetPath, sourcePath);
@@ -765,6 +783,29 @@ export function deleteFactsByOwner(db, path, providerId = null) {
     }
   }
   return owners;
+}
+
+/**
+ * The derived_fact_owner ledger view: for a given path (or the whole store),
+ * which generation and which repository last produced each fact this store
+ * holds. Backed by `fact_owner`'s generation_id/repo_root columns (Migration
+ * 12) — this is a read helper, not a second table, so lineage can never drift
+ * from the ownership rows themselves.
+ */
+export function listDerivedFactOwners(db, { path = null } = {}) {
+  const rows = path
+    ? db.prepare("SELECT fact_id, fact_kind, source_path, provider_id, provider_version, freshness_domain, generation_id, repo_root FROM fact_owner WHERE source_path = ? ORDER BY fact_kind, fact_id").all(String(path))
+    : db.prepare("SELECT fact_id, fact_kind, source_path, provider_id, provider_version, freshness_domain, generation_id, repo_root FROM fact_owner ORDER BY source_path, fact_kind, fact_id").all();
+  return rows.map((row) => ({
+    factId: row.fact_id,
+    factKind: row.fact_kind,
+    sourcePath: row.source_path,
+    providerId: row.provider_id,
+    providerVersion: row.provider_version,
+    freshnessDomain: row.freshness_domain,
+    generationId: row.generation_id,
+    repoRoot: row.repo_root,
+  }));
 }
 
 export function loadFileState(db, path) {
