@@ -280,6 +280,132 @@ test("an overflow marks the actor stale(event_overflow), runs exactly one reconc
   }
 });
 
+// G6 fix: all repo actors run in ONE process (no per-actor OS process — see
+// repo-actor.mjs), so a repo's watch_state pid is really "whichever actor
+// last held this repo," not "this repo's own worker." That pid persists
+// across supervisor restarts. status() used to trust it blindly: an actor
+// the live supervisor is actively running in-process, but whose persisted
+// pid still names a dead prior supervisor incarnation, read as
+// watcher_process_dead — a real repo the daemon IS watching, mislabeled
+// dead. This must fail before the fix (repoStatus had no way to see the
+// live in-process actor at all) and pass after.
+test("a stale dead pid in state does not shadow the live supervisor's own running actor (G6: false-dead fix)", async () => {
+  const repo = makeRepo("cortex-fleet-falsedead-");
+  const configPath = tempConfigPath();
+  const supervisor = new WatchSupervisor({ configPath });
+  try {
+    writeWatchConfig({ repos: [{ root: repo, enabled: true }] }, configPath);
+    await supervisor.start();
+    assert.equal(supervisor.status().repos[0].freshness, FRESHNESS.CURRENT, "sanity: current before corrupting state");
+
+    // Simulate the production condition directly: watch_state still carries
+    // a long-dead prior supervisor's pid, even though THIS supervisor's own
+    // in-process actor is the one actually watching the repo right now.
+    const db = openStore(join(repo, ".agent/graph/graph.db"));
+    try { db.prepare("INSERT INTO watch_state(key,value) VALUES ('watcher_pid','999999999') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(); }
+    finally { closeStore(db); }
+
+    const status = supervisor.status().repos[0];
+    assert.notEqual(status.reason, "watcher_process_dead", "must not shadow the live in-process actor with a stale persisted pid");
+    assert.equal(status.alive, true);
+    assert.equal(status.freshness, FRESHNESS.CURRENT, "the live actor's own real freshness must be reported");
+  } finally {
+    await supervisor.stop();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// G6 fix, other direction: the fix above must not turn into "always alive."
+// A repo the live supervisor has genuinely never started (not enrolled when
+// it started, so no in-process actor exists for it at all) must still
+// report an honest not-watched state even if some stale, dead owner stamp
+// happens to sit in its watch_state.
+test("a repo the live supervisor has never started stays honestly unwatched (G6: true signal preserved)", async () => {
+  const watched = makeRepo("cortex-fleet-g6owned-");
+  const neverStarted = makeRepo("cortex-fleet-g6neverowned-");
+  const configPath = tempConfigPath();
+  const supervisor = new WatchSupervisor({ configPath });
+  try {
+    writeWatchConfig({ repos: [{ root: watched, enabled: true }] }, configPath);
+    await supervisor.start();
+    assert.equal(supervisor.status().repos[0].freshness, FRESHNESS.CURRENT);
+
+    const db = openStore(join(neverStarted, ".agent/graph/graph.db"));
+    try {
+      db.prepare("INSERT INTO watch_state(key,value) VALUES ('watcher_pid','999999999') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+      db.prepare("INSERT INTO watch_state(key,value) VALUES ('watcher_owner','some-other-dead-supervisor-instance') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+    } finally { closeStore(db); }
+
+    // Same live (already-started) supervisor, now asked about a repo it was
+    // never enrolled to watch — status() reads config fresh every call, so
+    // this exercises "never in this.actors" without needing a second
+    // supervisor object.
+    writeWatchConfig({ repos: [{ root: watched, enabled: true }, { root: neverStarted, enabled: true }] }, configPath);
+    const status = supervisor.status();
+    const watchedRow = status.repos.find((repo) => repo.root === watched);
+    const neverRow = status.repos.find((repo) => repo.root === neverStarted);
+    assert.equal(watchedRow.freshness, FRESHNESS.CURRENT, "the repo this supervisor actually owns stays current");
+    assert.notEqual(neverRow.freshness, FRESHNESS.CURRENT, "a repo this supervisor never started must never read as current");
+    assert.equal(neverRow.freshness, FRESHNESS.UNWATCHED);
+  } finally {
+    await supervisor.stop();
+    rmSync(watched, { recursive: true, force: true });
+    rmSync(neverStarted, { recursive: true, force: true });
+  }
+});
+
+// G6 fix, restart semantics: simulates an actual supervisor restart. The old
+// instance's owner stamp is left behind in watch_state (as a crash would
+// leave it — a clean stop() erases it, so this writes it back after
+// stopping to model the unclean case) alongside a pid that is, in this test
+// process, genuinely alive — proving the fix keys liveness off supervisor
+// IDENTITY, not merely off whether some recorded pid happens to be alive.
+// The new instance re-owns one repo (its actor completes start()) and fails
+// to re-own the other (its actor does not) — actors re-owned by the new
+// instance must read alive; the un-re-owned one must not inherit the old
+// instance's claim even though its pid check alone would say "alive".
+test("repos re-owned by a new supervisor instance read alive; un-re-owned ones do not inherit the old instance's claim (G6: restart semantics)", async () => {
+  const repoA = makeRepo("cortex-fleet-restart-a-");
+  const repoB = makeRepo("cortex-fleet-restart-b-");
+  const configPath = tempConfigPath();
+  const oldSupervisor = new WatchSupervisor({ configPath });
+  const newSupervisor = new WatchSupervisor({
+    configPath,
+    actorFactory: (options) => options.root === repoB
+      ? { running: false, start: async () => { throw new Error("simulated: repoB actor still recovering from the old instance's crash"); }, stop: async () => {}, log: () => {} }
+      : new RepositoryActor(options),
+  });
+  try {
+    writeWatchConfig({ repos: [{ root: repoA, enabled: true }, { root: repoB, enabled: true }] }, configPath);
+    await oldSupervisor.start();
+    assert.ok(oldSupervisor.status().repos.every((repo) => repo.freshness === FRESHNESS.CURRENT), "sanity: both current under the old instance");
+    await oldSupervisor.stop();
+
+    // A clean stop() erases watcher_pid/watcher_owner; write them back to
+    // model an unclean restart where the prior instance's stamp survives.
+    for (const root of [repoA, repoB]) {
+      const db = openStore(join(root, ".agent/graph/graph.db"));
+      try {
+        db.prepare("INSERT INTO watch_state(key,value) VALUES ('watcher_pid',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(process.pid));
+        db.prepare("INSERT INTO watch_state(key,value) VALUES ('watcher_owner','old-dead-instance') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+      } finally { closeStore(db); }
+    }
+
+    await newSupervisor.start();
+    const status = newSupervisor.status();
+    const aRow = status.repos.find((repo) => repo.root === repoA);
+    const bRow = status.repos.find((repo) => repo.root === repoB);
+    assert.equal(aRow.freshness, FRESHNESS.CURRENT, "repoA, re-owned by the new instance, must read current");
+    assert.notEqual(bRow.freshness, FRESHNESS.CURRENT, "repoB, un-re-owned, must not read current off a foreign owner's stamp despite an alive pid");
+    assert.equal(bRow.freshness, FRESHNESS.UNWATCHED);
+    assert.equal(bRow.reason, "watcher_owner_stale");
+  } finally {
+    await newSupervisor.stop();
+    rmSync(repoA, { recursive: true, force: true });
+    rmSync(repoB, { recursive: true, force: true });
+  }
+});
+
 // D2 soak fix: one repo's malformed graph.db must degrade only that repo's
 // row, never blank status for the other enrolled repos.
 test("one repo's corrupted graph.db reports degraded/store_unreadable without blanking the fleet (status isolation)", () => {

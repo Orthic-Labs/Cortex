@@ -174,10 +174,19 @@ function isOverflowError(error) {
 }
 
 export class RepositoryActor extends EventEmitter {
-  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead, ignore = [] }) {
+  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead, ignore = [], ownerId = null }) {
     super();
     this.root = canonicalRoot(root);
     this.outDir = outDir;
+    // The owning supervisor's instance token (G6): stamped into watch_state
+    // alongside watcher_pid so a later status read can tell "this actor was
+    // (re)started by the CURRENTLY live supervisor" apart from "this actor's
+    // pid record was last written by some prior, possibly-dead incarnation"
+    // — see repoStatus() in watchman/supervisor.mjs. null when constructed
+    // outside a WatchSupervisor (e.g. directly in tests); no owner stamp is
+    // written in that case, which leaves status()'s legacy pid-alive check
+    // as the sole liveness signal, unchanged from before this fix.
+    this.ownerId = ownerId;
     this.dbPath = dbPath(this.root, outDir);
     this.snapshotPath = snapshotPath ? resolve(snapshotPath) : join(this.root, outDir, "graph", "watch.snapshot");
     this.reconcile = reconcile ?? (async () => ({ ok: true }));
@@ -231,6 +240,7 @@ export class RepositoryActor extends EventEmitter {
     }
     const db = this.openDbOnce();
     setState(db, "watcher_pid", process.pid);
+    if (this.ownerId) setState(db, "watcher_owner", this.ownerId);
     await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles, ignore: this.ignore });
     if (!existsSync(this.snapshotPath)) await this.adapter.writeSnapshot(this.root, this.snapshotPath, this.ignore);
     setState(db, "event_gap", 0);
@@ -330,7 +340,10 @@ export class RepositoryActor extends EventEmitter {
     if (this.subscription) await this.subscription.unsubscribe();
     this.subscription = null;
     if (this.db) {
-      try { this.db.prepare("DELETE FROM watch_state WHERE key='watcher_pid'").run(); } catch { /* best-effort on a store that may already be gone */ }
+      try {
+        this.db.prepare("DELETE FROM watch_state WHERE key='watcher_pid'").run();
+        this.db.prepare("DELETE FROM watch_state WHERE key='watcher_owner'").run();
+      } catch { /* best-effort on a store that may already be gone */ }
       closeStore(this.db);
       this.db = null;
     } else if (existsSync(this.dbPath)) {
@@ -338,7 +351,10 @@ export class RepositoryActor extends EventEmitter {
       // one-off writable open is unavoidable here, matched by an immediate
       // close; there is no long-lived handle to reuse.
       const db = openStore(this.dbPath);
-      try { db.prepare("DELETE FROM watch_state WHERE key='watcher_pid'").run(); } finally { closeStore(db); }
+      try {
+        db.prepare("DELETE FROM watch_state WHERE key='watcher_pid'").run();
+        db.prepare("DELETE FROM watch_state WHERE key='watcher_owner'").run();
+      } finally { closeStore(db); }
     }
   }
 }
