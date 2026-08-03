@@ -430,3 +430,45 @@ test("one repo's corrupted graph.db reports degraded/store_unreadable without bl
     rmSync(bad, { recursive: true, force: true });
   }
 });
+
+// A slow cold start must not starve the rest of the fleet. The startup loop
+// used to `await actor.start()` serially, and a cold start runs a full Merkle
+// reconcile — minutes on a large repo. With 19 enrolled repos the tail was
+// never even constructed, and because every service restart re-ran the queue
+// from the top, repeated restarts could never converge. Modelled here with one
+// actor that never finishes starting: the others must still start.
+test("one slow actor start does not starve the rest of the fleet (G6b: serial startup)", async () => {
+  const slowRepo = makeRepo("cortex-fleet-slow-");
+  const others = [makeRepo("cortex-fleet-fast-a-"), makeRepo("cortex-fleet-fast-b-"), makeRepo("cortex-fleet-fast-c-")];
+  const configPath = tempConfigPath();
+  const started = [];
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  const supervisor = new WatchSupervisor({
+    configPath,
+    actorFactory: (options) => ({
+      running: false,
+      start: async () => {
+        if (options.root === slowRepo) await slowGate;   // never resolves during the assert
+        started.push(options.root);
+      },
+      stop: async () => {},
+      log: () => {},
+    }),
+  });
+  try {
+    writeWatchConfig({ repos: [{ root: slowRepo, enabled: true }, ...others.map((root) => ({ root, enabled: true }))] }, configPath);
+    const reload = supervisor.reload();
+    // Give the pool a chance to run every non-blocked start.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    for (const root of others) {
+      assert.ok(started.includes(root), `fleet starved: ${root} never started behind the slow cold start`);
+    }
+    releaseSlow();
+    await reload;
+    assert.ok(started.includes(slowRepo), "the slow actor still starts once it completes");
+  } finally {
+    releaseSlow?.();
+    await supervisor.stop().catch(() => {});
+  }
+});

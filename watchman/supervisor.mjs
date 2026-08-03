@@ -6,6 +6,10 @@ import { closeStore, openStoreReadOnly } from "../graph/store-sqlite.mjs";
 import { RepositoryActor } from "./repo-actor.mjs";
 import { reconcile as defaultReconcile } from "./reconcile.mjs";
 
+// How many cold actor starts may run at once. Serial startup starved the tail
+// of a 19-repo fleet; unbounded startup would run 19 full reconciles at once.
+export const CONCURRENT_ACTOR_STARTS = 4;
+
 export function defaultConfigPath() { return resolve(homedir(), ".cortex", "watch.json"); }
 
 export function readWatchConfig(configPath = defaultConfigPath()) {
@@ -170,12 +174,30 @@ export class WatchSupervisor {
     for (const [root, actor] of this.actors) {
       if (!wanted.has(root)) { await actor.stop(); this.actors.delete(root); }
     }
+    // Construct every wanted actor FIRST, then start them in a bounded pool.
+    // This loop used to `await actor.start()` serially, and a cold actor's
+    // start() runs a full Merkle reconcile — minutes on a large repo. With 19
+    // enrolled repos the tail never got constructed at all (owner unset, no
+    // watchman.log, reported watcher_process_dead off a stale pid), and every
+    // service restart began the queue again from the top, so repeated restarts
+    // could never converge. Bounded rather than unbounded: a cold start on a
+    // big repo peaks a few hundred MB, and 19 at once is what melts the host.
+    const pendingStarts = [];
     for (const repo of config.repos) {
       if (this.actors.has(repo.root)) continue;
       const actor = this.actorFactory({ root: repo.root, reconcile: this.reconcile, ignore: siblingIgnoreList(repo.root, config.repos), ownerId: this.instanceId });
       this.actors.set(repo.root, actor);
-      try { await actor.start(); } catch (error) { actor.log(error); }
+      pendingStarts.push(actor);
     }
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENT_ACTOR_STARTS, pendingStarts.length) }, async () => {
+        while (next < pendingStarts.length) {
+          const actor = pendingStarts[next++];
+          try { await actor.start(); } catch (error) { actor.log(error); }
+        }
+      }),
+    );
     this.configMtime = existsSync(this.configPath) ? statSync(this.configPath).mtimeMs : 0;
     return this.status();
   }
