@@ -32,8 +32,11 @@ export function openStore(dbPath = ":memory:") {
     // immediate SQLITE_BUSY instead of queueing. That is exactly how the fleet watcher died
     // in production: an actor's initialize raced a concurrent `cortex build` (or the context
     // hook) on the same repo's graph.db and threw "database is locked" — serial tests never
-    // exercise the race. Five seconds comfortably covers the longest write transaction.
-    db.exec("PRAGMA busy_timeout = 5000;");
+    // exercise the race. Five seconds did NOT cover it: on 2026-08-03 a repo under a
+    // concurrent release build still threw "database is locked" out of markGap() with the
+    // 5s timeout in place. A background watcher has no deadline worth failing for, so it
+    // waits far longer rather than surfacing a spurious lock error.
+    db.exec("PRAGMA busy_timeout = 30000;");
   }
   migrate(db);
   return db;

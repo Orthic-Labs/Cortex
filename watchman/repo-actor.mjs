@@ -264,10 +264,18 @@ export class RepositoryActor extends EventEmitter {
     this.running = true;
     try {
       await this.initialize();
+      // Both callbacks are invoked by the watcher outside any promise chain, so
+      // anything they throw is an unhandled exception that takes down the whole
+      // supervisor — every repo, not just this one. That is exactly what
+      // happened in production: one repo's `database is locked` inside
+      // markGap()'s setState killed the process, launchd restarted it, the
+      // 19-repo cold sweep began again from the top and died around repo 10, so
+      // the fleet sat permanently short of converging. A single repo failing to
+      // record its own gap must degrade that repo, never the fleet.
       this.subscription = await this.adapter.startWatch(
         this.root,
-        (events) => this.ingest(events),
-        (error) => this.markGap(error, isOverflowError(error) ? "event_overflow" : "watch_subscription_error"),
+        (events) => this.guardCallback(() => this.ingest(events)),
+        (error) => this.guardCallback(() => this.markGap(error, isOverflowError(error) ? "event_overflow" : "watch_subscription_error")),
         this.ignore,
       );
       this.failures = 0;
@@ -275,6 +283,16 @@ export class RepositoryActor extends EventEmitter {
       this.running = false;
       this.handleFailure(error);
       throw error;
+    }
+  }
+
+  // Runs a watcher callback so that no failure inside it can escape into the
+  // process's unhandled-exception path. The failure is still recorded against
+  // this actor (log + failure count), so it stays visible rather than silent.
+  guardCallback(work) {
+    try { return work(); } catch (error) {
+      try { this.handleFailure(error); } catch { this.log(error); }
+      return undefined;
     }
   }
 

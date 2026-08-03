@@ -145,6 +145,33 @@ test("a directory in the journal is skipped, never read, and leaves the store us
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
+// Regression: the watcher invokes its callbacks outside any promise chain, so a
+// throw inside one is an unhandled exception that kills the SUPERVISOR — all 19
+// repos, not the one that failed. Live on 2026-08-03: one repo's "database is
+// locked" inside markGap()'s setState killed the process, launchd restarted it,
+// the cold sweep began again from the top and died around repo 10 — so the fleet
+// sat permanently at 13 noncurrent, never converging, with no crash visible in
+// `status` output at all.
+test("a throw inside a watcher callback degrades that repo, never the process", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-guard-"));
+  cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
+    let onEvents = null, onError = null;
+    const adapter = {
+      startWatch: async (_root, events, error) => { onEvents = events; onError = error; return { unsubscribe() {} }; },
+      writeSnapshot: async () => {},
+      eventsSince: async () => [],
+    };
+    const actor = new RepositoryActor({ root: repo, adapter });
+    await actor.start();
+    actor.markGap = () => { throw new Error("database is locked"); };
+    actor.ingest = () => { throw new Error("database is locked"); };
+    assert.doesNotThrow(() => onError(new Error("watch subscription failed")));
+    assert.doesNotThrow(() => onEvents([{ eventKind: "modify", path: "src/service.ts", observedMs: Date.now() }]));
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
 test("failed batch remains pending and resumes on next drain", async () => {
   const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-retry-"));
   cpSync(FIXTURE, repo, { recursive: true });
