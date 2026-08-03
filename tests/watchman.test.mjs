@@ -240,6 +240,39 @@ try {
   assert.match(result.stdout, /live-ok/);
 });
 
+// The half of that same defect that shipped: a bare excluded NAME only filters
+// where it sits directly under the watched root, but real repos nest their
+// build output. coderight's Rust output lives at `engine/target`, so `target`
+// in the exclusion set excluded nothing at all — 395 of its last 400 unapplied
+// events on 2026-08-03 were build churn under `engine/`, and that load starved
+// the rest of the fleet's actors. The scanner prunes by name at any depth; the
+// watcher must be given the resolved paths to match it.
+test("real Parcel watcher never surfaces writes inside a NESTED excluded directory", async () => {
+  const script = `import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startWatch } from "./watchman/adapter.mjs";
+const root = mkdtempSync(join(tmpdir(), "cortex-adapter-nested-"));
+mkdirSync(join(root, "engine", "target", "release"), { recursive: true });
+mkdirSync(join(root, "engine", "src"), { recursive: true });
+try {
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const events = [];
+  const sub = await startWatch(root, (evs) => events.push(...evs), () => {});
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  writeFileSync(join(root, "engine", "target", "release", "noise.rlib"), "noise");
+  writeFileSync(join(root, "engine", "src", "keep.rs"), "keep");
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  await sub.unsubscribe();
+  if (events.some((event) => event.path.includes("target"))) throw new Error("nested target leaked: " + JSON.stringify(events));
+  if (!events.some((event) => event.path.endsWith("keep.rs"))) throw new Error("keep.rs was never observed: " + JSON.stringify(events));
+  console.log("nested-ok");
+} finally { rmSync(root, { recursive: true, force: true }); }`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: ROOT, encoding: "utf8", timeout: 8000 });
+  assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
+  assert.match(result.stdout, /nested-ok/);
+});
+
 // D1 regression guard: @parcel/watcher's `ignore` option only excludes a
 // directory reliably when passed as a literal relative path (its base name
 // here — "node_modules" is already in the built-in high-churn ignore set).

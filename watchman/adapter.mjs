@@ -1,6 +1,6 @@
 import ParcelWatcher from "@parcel/watcher";
-import { realpathSync, statSync } from "node:fs";
-import { basename, dirname, relative, resolve } from "node:path";
+import { readdirSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { SCAN_EXCLUSIONS } from "../graph/static-provider.mjs";
 
 const EVENT_TYPES = new Set(["create", "update", "delete"]);
@@ -34,8 +34,39 @@ function normalizePath(root, value) {
 // a glob; do not reintroduce `**` or trailing `/**` here, it silently no-ops.
 // `extra` therefore carries exact relative paths — the caller (repo-actor via
 // the supervisor) resolves them from its own root before passing them in.
-function ignorePatterns(extra = []) {
-  return [...new Set([".git", "node_modules", ".agent", ".blueprint", ...SCAN_EXCLUSIONS, ...extra])];
+const EXCLUDED_NAMES = Object.freeze([".git", "node_modules", ".agent", ".blueprint", ...SCAN_EXCLUSIONS]);
+
+// The scanner prunes any directory whose NAME is excluded, at any depth. The
+// watcher cannot: per the note above, a bare name only excludes that name
+// directly under the watched root. So `target` excluded `<root>/target` and
+// silently watched `engine/target` — coderight's entire Rust build output.
+// Measured 2026-08-03: 395 of coderight's last 400 unapplied events were build
+// churn under `engine/`, and the resulting load starved the other actors.
+//
+// Bridge the two by resolving names into the exact relative paths the watcher
+// does honour, walking once at subscribe time and never descending into a
+// directory already excluded — so the walk costs about what one scan of the
+// tracked tree costs, and shrinks as more is excluded.
+function resolveExclusions(root, extra = []) {
+  const names = new Set(EXCLUDED_NAMES);
+  const literal = new Set(extra.map((value) => String(value).replaceAll("\\", "/")));
+  const found = new Set(literal);
+  const walk = (absolute, rel) => {
+    let entries;
+    try { entries = readdirSync(absolute, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      // Never follow symlinked directories: they can leave the tree entirely
+      // and can form cycles, and the scanner does not follow them either.
+      if (!entry.isDirectory()) continue;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (names.has(entry.name) || literal.has(childRel)) { found.add(childRel); continue; }
+      walk(join(absolute, entry.name), childRel);
+    }
+  };
+  walk(canonicalRoot(root), "");
+  // Bare names stay in the list: they are what excludes a root-level match, and
+  // they cost nothing extra.
+  return [...new Set([...names, ...found])];
 }
 
 function normalizeEvents(root, events, observedMs = Date.now()) {
@@ -72,8 +103,8 @@ function normalizeEvents(root, events, observedMs = Date.now()) {
   return candidates.filter((event) => !pairedCreates.has(event));
 }
 
-function options(ignore) {
-  return { ignore: ignorePatterns(ignore) };
+function options(root, ignore) {
+  return { ignore: resolveExclusions(root, ignore) };
 }
 
 export async function startWatch(root, onEvents, onGap = () => {}, ignore = []) {
@@ -87,7 +118,7 @@ export async function startWatch(root, onEvents, onGap = () => {}, ignore = []) 
     catch (callbackError) { onGap(callbackError); }
   };
   try {
-    return await ParcelWatcher.subscribe(absoluteRoot, callback, options(ignore));
+    return await ParcelWatcher.subscribe(absoluteRoot, callback, options(absoluteRoot, ignore));
   } catch (error) {
     onGap(error);
     throw error;
@@ -95,12 +126,12 @@ export async function startWatch(root, onEvents, onGap = () => {}, ignore = []) 
 }
 
 export async function writeSnapshot(root, snapshotPath, ignore = []) {
-  return ParcelWatcher.writeSnapshot(canonicalRoot(root), resolve(snapshotPath), options(ignore));
+  return ParcelWatcher.writeSnapshot(canonicalRoot(root), resolve(snapshotPath), options(root, ignore));
 }
 
 export async function eventsSince(root, snapshotPath, ignore = []) {
   const normalizedRoot = canonicalRoot(root);
-  const events = await ParcelWatcher.getEventsSince(normalizedRoot, resolve(snapshotPath), options(ignore));
+  const events = await ParcelWatcher.getEventsSince(normalizedRoot, resolve(snapshotPath), options(normalizedRoot, ignore));
   return normalizeEvents(normalizedRoot, events);
 }
 
