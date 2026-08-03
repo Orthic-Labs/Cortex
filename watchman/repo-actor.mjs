@@ -1,11 +1,11 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, appendFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS, STRUCTURAL_PROVIDER } from "../graph/delta-store.mjs";
 import { parseFileFacts } from "../graph/static-provider.mjs";
 import { buildIncrementalTreeSitterFacts, SUPPORTED_EXTENSIONS } from "../graph/treesitter-provider.mjs";
 import { extractDoc, isDoc, loadConfig } from "../scripts/blueprint.mjs";
-import { stableRead } from "../graph/stable-read.mjs";
+import { MAX_SOURCE_FILE_BYTES, stableRead } from "../graph/stable-read.mjs";
 import { collectDependents, closeStore, listFileMetadata, listSymbolMetadata, openStore, openStoreReadOnly } from "../graph/store-sqlite.mjs";
 import { eventsSince, startWatch, writeSnapshot } from "./adapter.mjs";
 
@@ -48,6 +48,11 @@ function descriptorFor(root, sourceFiles, path, renameTo = null, readStable = st
   const target = normalizePath(renameTo ?? normalized);
   const absolute = resolve(root, target);
   if (!existsSync(absolute)) return null;
+  // Oversized files are not source. Returning null here routes them through the
+  // same path as a file that does not exist, so an object that grew past the
+  // bound is dropped from the graph rather than read — deliberately identical
+  // to what the full build already does with it.
+  try { if (statSync(absolute).size > MAX_SOURCE_FILE_BYTES) return null; } catch { return null; }
   const read = readStable(absolute);
   const text = read.bytes.toString("utf8");
   const descriptor = {

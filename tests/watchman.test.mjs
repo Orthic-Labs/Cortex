@@ -7,6 +7,7 @@ import test from "node:test";
 import { buildGraphGeneration } from "../graph/static-provider.mjs";
 import { CortexRepositoryWorker, RepositoryActor } from "../graph/watchman.mjs";
 import { closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { MAX_SOURCE_FILE_BYTES } from "../graph/stable-read.mjs";
 import { normalizeEvents } from "../watchman/adapter.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -88,6 +89,35 @@ test("two files arriving during one drain are both applied", async () => {
     const db = openStore(join(repo, ".agent/graph/graph.db"));
     try { assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=1").get().n, 2); }
     finally { closeStore(db); }
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+// Regression: heardright's graph was corrupted twice in one day by a file too
+// large to become a JS string. descriptorFor() unconditionally did
+// `read.bytes.toString("utf8")`, which throws past ~512 MB — and the throw
+// landed inside applyJournalEvent's write transaction, so the store came back
+// "malformed database schema" rather than merely skipping the file. The full
+// build never hit this because its readers have always capped source at 2 MiB;
+// the incremental watcher path was the one reader missing the bound. Asserted
+// by refusing to read at all: a reader that throws if invoked proves the
+// oversized file is skipped before any read, which is what keeps the write
+// transaction intact.
+test("a file past the source-size bound is skipped, never read, and leaves the store usable", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-oversized-"));
+  cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
+    writeFileSync(join(repo, "src/huge.ts"), `export const pad = "${"x".repeat(MAX_SOURCE_FILE_BYTES + 1)}";\n`);
+    const readStable = () => { throw new Error("Cannot create a string longer than 0x1fffffe8 characters"); };
+    const actor = new RepositoryActor({ root: repo, readStable });
+    actor.ingest([{ eventKind: "create", path: "src/huge.ts", observedMs: Date.now() }]);
+    assert.equal(await actor.flush(true), 1);
+    const db = openStore(join(repo, ".agent/graph/graph.db"));
+    try {
+      assert.equal(Object.values(db.prepare("PRAGMA integrity_check").get())[0], "ok");
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM files WHERE path=?").get("src/huge.ts").n, 0);
+    } finally { closeStore(db); }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
