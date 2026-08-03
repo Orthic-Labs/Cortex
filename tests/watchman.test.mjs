@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -117,6 +117,30 @@ test("a file past the source-size bound is skipped, never read, and leaves the s
       assert.equal(Object.values(db.prepare("PRAGMA integrity_check").get())[0], "ok");
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM files WHERE path=?").get("src/huge.ts").n, 0);
+    } finally { closeStore(db); }
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+// Same corruption path, different trigger: watchers report `create` for a new
+// directory, so the journal genuinely carries directory paths. existsSync() is
+// true for those, and reading one throws EISDIR inside the write transaction.
+// Seen live in coderight and heardright once the oversized-file fix let the
+// journal drain far enough to reach them.
+test("a directory in the journal is skipped, never read, and leaves the store usable", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-eisdir-"));
+  cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
+    mkdirSync(join(repo, "src/newdir"), { recursive: true });
+    const readStable = () => { throw new Error("EISDIR: illegal operation on a directory, read"); };
+    const actor = new RepositoryActor({ root: repo, readStable });
+    actor.ingest([{ eventKind: "create", path: "src/newdir", observedMs: Date.now() }]);
+    assert.equal(await actor.flush(true), 1);
+    const db = openStore(join(repo, ".agent/graph/graph.db"));
+    try {
+      assert.equal(Object.values(db.prepare("PRAGMA integrity_check").get())[0], "ok");
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM files WHERE path=?").get("src/newdir").n, 0);
     } finally { closeStore(db); }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });

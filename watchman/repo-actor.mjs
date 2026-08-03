@@ -48,11 +48,17 @@ function descriptorFor(root, sourceFiles, path, renameTo = null, readStable = st
   const target = normalizePath(renameTo ?? normalized);
   const absolute = resolve(root, target);
   if (!existsSync(absolute)) return null;
-  // Oversized files are not source. Returning null here routes them through the
-  // same path as a file that does not exist, so an object that grew past the
-  // bound is dropped from the graph rather than read — deliberately identical
-  // to what the full build already does with it.
-  try { if (statSync(absolute).size > MAX_SOURCE_FILE_BYTES) return null; } catch { return null; }
+  // Only a regular file within the source bound is readable. existsSync() is
+  // true for directories too, and the journal genuinely carries directory
+  // paths (watchers report `create` for a new directory), so reading without
+  // this check throws EISDIR — inside the journal-apply write transaction,
+  // which is the same corruption path an oversized file took. Anything else,
+  // oversized or not-a-file, routes through the same branch as a path that
+  // does not exist and is simply dropped from the graph.
+  try {
+    const stat = statSync(absolute);
+    if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES) return null;
+  } catch { return null; }
   const read = readStable(absolute);
   const text = read.bytes.toString("utf8");
   const descriptor = {
