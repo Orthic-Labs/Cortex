@@ -26,7 +26,15 @@ import { computeFullLedger } from "./merkle-ledger.mjs";
 export function openStore(dbPath = ":memory:") {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA foreign_keys = ON;");
-  if (dbPath !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
+  if (dbPath !== ":memory:") {
+    db.exec("PRAGMA journal_mode = WAL;");
+    // WAL permits one writer at a time; without a busy_timeout a second writer gets an
+    // immediate SQLITE_BUSY instead of queueing. That is exactly how the fleet watcher died
+    // in production: an actor's initialize raced a concurrent `cortex build` (or the context
+    // hook) on the same repo's graph.db and threw "database is locked" — serial tests never
+    // exercise the race. Five seconds comfortably covers the longest write transaction.
+    db.exec("PRAGMA busy_timeout = 5000;");
+  }
   migrate(db);
   return db;
 }
@@ -45,7 +53,11 @@ export function openStore(dbPath = ":memory:") {
  * envelope — saveGeneration writes rows and envelope inside transactions.
  */
 export function openStoreReadOnly(dbPath) {
-  return new DatabaseSync(dbPath, { readOnly: true });
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  // Readers rarely block under WAL, but they CAN hit SQLITE_BUSY during a checkpoint;
+  // waiting briefly is always better than a spurious failure on a latency-budget path.
+  db.exec("PRAGMA busy_timeout = 5000;");
+  return db;
 }
 
 export function closeStore(db) {
