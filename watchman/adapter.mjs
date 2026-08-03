@@ -23,9 +23,19 @@ function normalizePath(root, value) {
   return relative(root, canonicalAbsolute(resolve(root, String(value)))).replaceAll("\\", "/");
 }
 
+// @parcel/watcher's `ignore` option (typed GlobPattern in its own .d.ts) does NOT
+// glob-match in the installed native build (2.6.0, fs-events backend) — confirmed
+// empirically 2026-08-03: `node_modules/**` and `**/node_modules/**` pass every
+// event through unfiltered. What actually excludes a subtree is an EXACT literal
+// path relative to the watched root: a bare single-segment name (e.g.
+// "node_modules") excludes that name only where it sits directly under the
+// watched root, and a multi-segment relative path (e.g. "child-repo" or
+// "nested/child-repo") excludes that exact target at any depth. Neither form is
+// a glob; do not reintroduce `**` or trailing `/**` here, it silently no-ops.
+// `extra` therefore carries exact relative paths — the caller (repo-actor via
+// the supervisor) resolves them from its own root before passing them in.
 function ignorePatterns(extra = []) {
-  const names = new Set([".git", "node_modules", ".agent", ".blueprint", ...SCAN_EXCLUSIONS, ...extra]);
-  return [...names].sort().flatMap((name) => [`**/${name}/**`, `${name}/**`]);
+  return [...new Set([".git", "node_modules", ".agent", ".blueprint", ...SCAN_EXCLUSIONS, ...extra])];
 }
 
 function normalizeEvents(root, events, observedMs = Date.now()) {

@@ -6,7 +6,7 @@ import { parseFileFacts } from "../graph/static-provider.mjs";
 import { buildIncrementalTreeSitterFacts, SUPPORTED_EXTENSIONS } from "../graph/treesitter-provider.mjs";
 import { extractDoc, isDoc, loadConfig } from "../scripts/blueprint.mjs";
 import { stableRead } from "../graph/stable-read.mjs";
-import { collectDependents, closeStore, listFileMetadata, listSymbolMetadata, openStore } from "../graph/store-sqlite.mjs";
+import { collectDependents, closeStore, listFileMetadata, listSymbolMetadata, openStore, openStoreReadOnly } from "../graph/store-sqlite.mjs";
 import { eventsSince, startWatch, writeSnapshot } from "./adapter.mjs";
 
 const REPAIR_BATCH = 50;
@@ -159,8 +159,22 @@ export async function drainJournal(db, root, { force = true, maxDependentFiles =
   return applied;
 }
 
+// @parcel/watcher surfaces a dropped-events condition ("Events were dropped by
+// the FSEvents client. File system must be re-scanned." on macOS; inotify's
+// queue overflow reads similarly) as an ERROR delivered to the subscribe
+// callback, not as a normal create/update/delete event — normalizeEvents()
+// already filters non-EVENT_TYPES entries, so the synthetic `eventKind:
+// "overflow"` path in ingest() below is reachable only via direct/manual
+// injection (CortexRepositoryWorker's own "overflow" kind, and tests). Both
+// paths converge on the same typed reason so `cortex-watch status` reports
+// the real condition instead of an opaque wrapped error string.
+const OVERFLOW_ERROR_PATTERN = /dropped by the .*client|must be re-scanned|queue overflow/i;
+function isOverflowError(error) {
+  return OVERFLOW_ERROR_PATTERN.test(String(error?.message ?? error ?? ""));
+}
+
 export class RepositoryActor extends EventEmitter {
-  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead }) {
+  constructor({ root, outDir = ".agent", snapshotPath = null, reconcile = null, adapter = { startWatch, writeSnapshot, eventsSince }, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead, ignore = [] }) {
     super();
     this.root = canonicalRoot(root);
     this.outDir = outDir;
@@ -171,11 +185,31 @@ export class RepositoryActor extends EventEmitter {
     this.adapter = adapter;
     this.maxDependentFiles = maxDependentFiles;
     this.readStable = readStable;
+    // Exact relative paths (never globs — see adapter.mjs) to exclude from this
+    // actor's own subscription: today, an enrolled sibling repo nested under
+    // this actor's root. Own `.agent` output is already excluded by the base
+    // ignore set in adapter.mjs, at every actor, not just this one.
+    this.ignore = ignore;
     this.subscription = null;
     this.timer = null;
     this.running = false;
     this.failures = 0;
     this.retryTimer = null;
+    // The store handle is opened once and held for the actor's lifetime
+    // (D3): every prior revision reopened a fresh DatabaseSync — which also
+    // re-runs migrate()'s schema-version check — on every single ingest,
+    // flush, and gap, multiplying open/close churn against the same file
+    // that `cortex build` and the status poller also touch concurrently.
+    this.db = null;
+    // Coalesces gap-repair reconciles: a real overflow burst can re-fire the
+    // gap callback repeatedly (that IS the overflow reported in production).
+    // Without this guard, each firing would open its own concurrent reconcile
+    // against the same handle. At most one reconcile runs at a time; a gap
+    // signal that arrives mid-reconcile is remembered and re-run exactly once
+    // after the in-flight one finishes, never spawned as a second concurrent
+    // pass.
+    this.reconcileInFlight = false;
+    this.reconcilePending = false;
   }
 
   log(error) {
@@ -184,20 +218,24 @@ export class RepositoryActor extends EventEmitter {
     appendFileSync(logPath, `${new Date().toISOString()} ${error?.stack ?? error}\n`);
   }
 
+  openDbOnce() {
+    if (!this.db) this.db = openStore(this.dbPath);
+    return this.db;
+  }
+
   async initialize() {
     const hadSnapshot = existsSync(this.snapshotPath);
     if (hadSnapshot && !this.autoReconcileOnGap) {
-      const events = await this.adapter.eventsSince(this.root, this.snapshotPath);
+      const events = await this.adapter.eventsSince(this.root, this.snapshotPath, this.ignore);
       if (events.length) { this.ingest(events); await this.flush(true); }
     }
-    const db = openStore(this.dbPath);
-    try {
-      setState(db, "watcher_pid", process.pid);
-      await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles });
-      if (!existsSync(this.snapshotPath)) await this.adapter.writeSnapshot(this.root, this.snapshotPath);
-      setState(db, "event_gap", 0);
-      db.prepare("DELETE FROM watch_state WHERE key='last_error'").run();
-    } finally { closeStore(db); }
+    const db = this.openDbOnce();
+    setState(db, "watcher_pid", process.pid);
+    await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles, ignore: this.ignore });
+    if (!existsSync(this.snapshotPath)) await this.adapter.writeSnapshot(this.root, this.snapshotPath, this.ignore);
+    setState(db, "event_gap", 0);
+    db.prepare("DELETE FROM watch_state WHERE key='last_error'").run();
+    db.prepare("DELETE FROM watch_state WHERE key='event_gap_reason'").run();
   }
 
   async start() {
@@ -205,7 +243,12 @@ export class RepositoryActor extends EventEmitter {
     this.running = true;
     try {
       await this.initialize();
-      this.subscription = await this.adapter.startWatch(this.root, (events) => this.ingest(events), (error) => this.markGap(error));
+      this.subscription = await this.adapter.startWatch(
+        this.root,
+        (events) => this.ingest(events),
+        (error) => this.markGap(error, isOverflowError(error) ? "event_overflow" : "watch_subscription_error"),
+        this.ignore,
+      );
       this.failures = 0;
     } catch (error) {
       this.running = false;
@@ -214,42 +257,52 @@ export class RepositoryActor extends EventEmitter {
     }
   }
 
-  markGap(error) {
-    const db = openStore(this.dbPath);
-    try {
-      setState(db, "event_gap", 1);
-      if (error) setState(db, "last_error", String(error?.message ?? error).slice(0, 500));
-    } finally { closeStore(db); }
+  // Marks the store honestly stale and schedules exactly one repair reconcile
+  // (coalesced — see the constructor comment). `reason` names the condition
+  // (`event_overflow`, `watch_subscription_error`, or a caller-supplied value)
+  // so status reads the typed condition instead of reason-sniffing free text.
+  markGap(error, reason = "watch_error") {
+    const db = this.openDbOnce();
+    setState(db, "event_gap", 1);
+    setState(db, "event_gap_reason", reason);
+    if (error) setState(db, "last_error", String(error?.message ?? error).slice(0, 500));
     if (error) this.log(error);
     this.emit("gap", error);
     if (!this.autoReconcileOnGap) return;
+    this.reconcilePending = true;
+    this.runPendingReconcile();
+  }
+
+  runPendingReconcile() {
+    if (this.reconcileInFlight) return;
+    this.reconcileInFlight = true;
     Promise.resolve().then(async () => {
-      const repairDb = openStore(this.dbPath);
-      try { await this.reconcile(repairDb, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles }); }
-      catch (reconcileError) { this.log(reconcileError); }
-      finally { closeStore(repairDb); }
+      try {
+        while (this.reconcilePending) {
+          this.reconcilePending = false;
+          const db = this.openDbOnce();
+          try { await this.reconcile(db, this.root, { outDir: this.outDir, snapshotPath: this.snapshotPath, maxDependentFiles: this.maxDependentFiles, ignore: this.ignore }); }
+          catch (reconcileError) { this.log(reconcileError); }
+        }
+      } finally { this.reconcileInFlight = false; }
     });
   }
 
   ingest(events) {
     if (!events?.length) return [];
     if (events.some((event) => event.eventKind === "overflow")) {
-      this.markGap(new Error("watcher overflow"));
+      this.markGap(new Error("watcher overflow"), "event_overflow");
       return [];
     }
-    const db = openStore(this.dbPath);
-    try {
-      const appended = appendWatchEvents(db, events);
-      this.scheduleFlush();
-      return appended;
-    } finally { closeStore(db); }
+    const db = this.openDbOnce();
+    const appended = appendWatchEvents(db, events);
+    this.scheduleFlush();
+    return appended;
   }
 
   async flush(force = false) {
-    const db = openStore(this.dbPath);
-    try {
-      return await drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles, readStable: this.readStable });
-    } finally { closeStore(db); }
+    const db = this.openDbOnce();
+    return await drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles, readStable: this.readStable });
   }
 
   scheduleFlush() {
@@ -263,7 +316,7 @@ export class RepositoryActor extends EventEmitter {
   handleFailure(error) {
     this.failures += 1;
     this.log(error);
-    if (this.failures >= 5) this.markGap(error);
+    if (this.failures >= 5) this.markGap(error, isOverflowError(error) ? "event_overflow" : "watch_subscription_error");
     const delay = this.failures >= 5 ? 60000 : Math.min(30000, 1000 * 2 ** (this.failures - 1));
     clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => this.start().catch(() => {}), delay);
@@ -276,7 +329,14 @@ export class RepositoryActor extends EventEmitter {
     clearTimeout(this.retryTimer);
     if (this.subscription) await this.subscription.unsubscribe();
     this.subscription = null;
-    if (existsSync(this.dbPath)) {
+    if (this.db) {
+      try { this.db.prepare("DELETE FROM watch_state WHERE key='watcher_pid'").run(); } catch { /* best-effort on a store that may already be gone */ }
+      closeStore(this.db);
+      this.db = null;
+    } else if (existsSync(this.dbPath)) {
+      // Never started (no held handle) but the store already exists — a
+      // one-off writable open is unavoidable here, matched by an immediate
+      // close; there is no long-lived handle to reuse.
       const db = openStore(this.dbPath);
       try { db.prepare("DELETE FROM watch_state WHERE key='watcher_pid'").run(); } finally { closeStore(db); }
     }
@@ -288,12 +348,14 @@ export class CortexRepositoryWorker {
   async ingest(path, eventKind = "modify", renameTo = null) {
     const event = { path, eventKind, renameTo, observedMs: Date.now() };
     if (eventKind === "overflow") {
-      this.actor.markGap(new Error("watcher overflow"));
+      this.actor.markGap(new Error("watcher overflow"), "event_overflow");
       return { eventGap: true, reconciled: false };
     }
     const appended = this.actor.ingest([event]);
     const appliedCount = await this.actor.flush(true);
-    const db = openStore(this.actor.dbPath);
+    // Read-only lookback at a row this call itself just wrote — no mutation,
+    // so this must never be the writable opener (D3).
+    const db = openStoreReadOnly(this.actor.dbPath);
     try {
       const row = db.prepare("SELECT * FROM event_journal WHERE seq=?").get(appended[0].seq);
       return { ...appended[0], applied: appliedCount > 0, journalSeq: appended[0].seq, appliedClock: row.applied_clock, eventGap: false };

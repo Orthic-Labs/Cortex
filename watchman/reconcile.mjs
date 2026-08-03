@@ -9,9 +9,9 @@ import { appendWatchEvents, drainJournal } from "./repo-actor.mjs";
 function snapshotPath(root, outDir) { return join(resolve(root), outDir, "graph", "watch.snapshot"); }
 function canonicalRoot(value) { const root = resolve(value); try { return realpathSync(root); } catch { return root; } }
 
-function metadataEvents(db, root, scanMetadata = scanSourceMetadataPublic) {
+function metadataEvents(db, root, scanMetadata = scanSourceMetadataPublic, walkOptions = {}) {
   const recorded = new Map(db.prepare("SELECT path,size,mtime_ms,file_identity FROM file_state").all().map((row) => [row.path, row]));
-  const current = new Map(scanMetadata(root).files.map((file) => [file.path, file]));
+  const current = new Map(scanMetadata(root, walkOptions).files.map((file) => [file.path, file]));
   const events = [];
   const observedMs = Date.now();
   for (const [path, file] of current) {
@@ -40,16 +40,24 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
   const close = typeof dbOrRoot === "string";
   try {
     const adapter = options.adapter ?? { eventsSince, writeSnapshot };
+    const ignore = options.ignore ?? [];
+    // Reuses the existing repo-relative prefix-exclusion mechanism that
+    // build-time scanning already honors (graph/ignored-prefixes.mjs), so an
+    // enrolled sibling repo is invisible to the JS-level scan/ledger-diff
+    // fallback the same way it is to the native watch subscription — without
+    // it, a full no-snapshot reconcile of a parent repo would re-walk and
+    // re-adopt every file under a nested enrolled child as its own.
+    const ignoredPrefixes = ignore.map((rel) => `${rel}/`);
     const snapshot = options.snapshotPath ?? snapshotPath(root, outDir);
     const hadSnapshot = existsSync(snapshot);
     const repairingGap = db.prepare("SELECT value FROM watch_state WHERE key='event_gap'").get()?.value === "1";
     const pending = [];
     let diff = { changed: [], added: [], removed: [] };
     if (hadSnapshot) {
-      const fastEvents = await adapter.eventsSince(root, snapshot);
+      const fastEvents = await adapter.eventsSince(root, snapshot, ignore);
       pending.push(...coalesceRenameEvents([
         ...fastEvents,
-        ...metadataEvents(db, root, options.scanSourceMetadata ?? scanSourceMetadataPublic),
+        ...metadataEvents(db, root, options.scanSourceMetadata ?? scanSourceMetadataPublic, { ignoredPrefixes }),
       ]));
       diff = {
         changed: [...new Set(pending.filter((event) => event.eventKind === "modify").map((event) => event.path))].sort(),
@@ -57,7 +65,7 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
         removed: [...new Set(pending.filter((event) => ["delete", "rename"].includes(event.eventKind)).map((event) => event.path))].sort(),
       };
     } else {
-      const source = scanSourcesPublic(root, 0, {});
+      const source = scanSourcesPublic(root, 0, { ignoredPrefixes });
       const ledgerRows = db.prepare("SELECT COUNT(*) AS n FROM generation_leaf WHERE kind='file'").get().n;
       diff = ledgerRows > 0
         ? diffLedgerAgainstTree(db, null, source.files ?? [])
@@ -72,10 +80,23 @@ export async function reconcile(dbOrRoot, rootOrOptions = null, options = {}) {
     for (const event of pending) unique.set(`${event.path}:${event.renameTo ?? ""}`, event);
     if (unique.size) appendWatchEvents(db, [...unique.values()]);
     const applied = await drainJournal(db, root, { force: true, maxDependentFiles: options.maxDependentFiles });
-    if ((hadSnapshot && unique.size > 0) || (!hadSnapshot && repairingGap)) await adapter.writeSnapshot(root, snapshot);
+    if ((hadSnapshot && unique.size > 0) || (!hadSnapshot && repairingGap)) {
+      // A real (non-glob) ignore list makes @parcel/watcher's writeSnapshot
+      // walk skip every ignored directory instead of the whole tree, so it
+      // now returns fast enough to expose a real race: a file applied only
+      // moments ago (same tick, via drainJournal just above) can still be
+      // snapshotted with its PRE-edit state, and the next reconcile then
+      // re-reports it as changed even though nothing touched it since.
+      // Empirically confirmed 2026-08-03 — this settle is the fix, not a
+      // cosmetic wait; removing it reintroduces a genuinely flaky (not just
+      // occasional) false "changed" report on the very next reconcile.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await adapter.writeSnapshot(root, snapshot, ignore);
+    }
     db.exec("BEGIN;");
     try {
       db.prepare("INSERT INTO watch_state(key,value) VALUES ('event_gap','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
+      db.prepare("DELETE FROM watch_state WHERE key='event_gap_reason'").run();
       db.prepare("INSERT INTO watch_state(key,value) VALUES ('last_reconcile_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Date.now()));
       db.exec("COMMIT;");
     } catch (error) {

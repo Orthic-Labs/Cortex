@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { closeStore, openStore } from "../graph/store-sqlite.mjs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { closeStore, openStoreReadOnly } from "../graph/store-sqlite.mjs";
 import { RepositoryActor } from "./repo-actor.mjs";
 import { reconcile as defaultReconcile } from "./reconcile.mjs";
 
@@ -31,6 +31,12 @@ export const FRESHNESS = Object.freeze({
   CURRENT: "current",
 });
 
+// Reads a repo's state without ever mutating it: a read-only handle skips
+// migrate() (never upgrades another process's schema mid-flight) and never
+// takes a write lock, so a status poll can never contend with an actor's own
+// writes or a concurrent `cortex build` on the same 19 databases (D3). Errors
+// from a corrupt store (e.g. "database disk image is malformed") are caught
+// per repo — one bad store must never blank the other 18 repos' status (D2).
 function repoStatus(root, outDir = ".agent") {
   const dbPath = resolve(root, outDir, "graph", "graph.db");
   if (!existsSync(dbPath)) {
@@ -39,8 +45,9 @@ function repoStatus(root, outDir = ".agent") {
       freshness: FRESHNESS.UNWATCHED, reason: "no_graph_built",
     };
   }
-  const db = openStore(dbPath);
+  let db;
   try {
+    db = openStoreReadOnly(dbPath);
     const state = Object.fromEntries(db.prepare("SELECT key,value FROM watch_state").all().map((row) => [row.key, row.value]));
     const pid = Number(state.watcher_pid ?? 0) || null;
     let alive = false;
@@ -48,6 +55,7 @@ function repoStatus(root, outDir = ".agent") {
     const eventGap = Number(state.event_gap ?? 0);
     const pendingEvents = db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n;
     const lastError = state.last_error ?? null;
+    const gapReason = state.event_gap_reason ?? null;
     let freshness = FRESHNESS.CURRENT;
     let reason = null;
     if (!pid || !alive) {
@@ -55,7 +63,7 @@ function repoStatus(root, outDir = ".agent") {
       reason = pid ? "watcher_process_dead" : "watcher_never_started";
     } else if (eventGap) {
       freshness = FRESHNESS.DEGRADED;
-      reason = lastError ? `event_gap: ${lastError}` : "event_gap_unreconciled";
+      reason = gapReason ?? (lastError ? `event_gap: ${lastError}` : "event_gap_unreconciled");
     } else if (pendingEvents > 0) {
       freshness = FRESHNESS.STALE;
       reason = "events_pending_apply";
@@ -64,7 +72,29 @@ function repoStatus(root, outDir = ".agent") {
       root, pid, alive, sourceClock: Number(state.source_clock ?? 0), appliedClock: Number(state.applied_clock ?? 0),
       eventGap, pendingEvents, freshness, reason,
     };
-  } finally { closeStore(db); }
+  } catch (error) {
+    return {
+      root, pid: null, alive: false, sourceClock: 0, appliedClock: 0, eventGap: 1, pendingEvents: 0,
+      freshness: FRESHNESS.DEGRADED, reason: "store_unreadable", error: String(error?.message ?? error),
+    };
+  } finally {
+    if (db) { try { closeStore(db); } catch { /* already unusable; nothing left to release cleanly */ } }
+  }
+}
+
+// Exact relative paths (never globs — see watchman/adapter.mjs) from `root` to
+// every OTHER enrolled repo nested under it. Used so a parent actor (today,
+// principally the workspace-root enrollment) excludes sibling repos' subtrees
+// from its own FSEvents subscription instead of double-watching them — every
+// child edit was hitting both its own actor and the root actor, and the
+// resulting volume (plus each child's own `.agent` WAL churn) is what
+// overflowed the root subscription in production.
+function siblingIgnoreList(root, repos) {
+  return repos
+    .map((repo) => repo.root)
+    .filter((other) => other !== root)
+    .map((other) => relative(root, other))
+    .filter((rel) => rel && rel !== ".." && !rel.startsWith(`..${"/"}`) && !isAbsolute(rel));
 }
 
 export class WatchSupervisor {
@@ -87,7 +117,7 @@ export class WatchSupervisor {
     }
     for (const repo of config.repos) {
       if (this.actors.has(repo.root)) continue;
-      const actor = this.actorFactory({ root: repo.root, reconcile: this.reconcile });
+      const actor = this.actorFactory({ root: repo.root, reconcile: this.reconcile, ignore: siblingIgnoreList(repo.root, config.repos) });
       this.actors.set(repo.root, actor);
       try { await actor.start(); } catch (error) { actor.log(error); }
     }

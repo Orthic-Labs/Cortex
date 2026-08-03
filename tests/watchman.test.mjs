@@ -158,3 +158,36 @@ try {
   assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
   assert.match(result.stdout, /live-ok/);
 });
+
+// D1 regression guard: @parcel/watcher's `ignore` option only excludes a
+// directory reliably when passed as a literal relative path (its base name
+// here — "node_modules" is already in the built-in high-churn ignore set).
+// Empirically confirmed 2026-08-03: the glob forms `node_modules/**` and
+// `**/node_modules/**` do NOT filter at all in the installed 2.6.0 native
+// build — writes inside an "ignored" directory still surface as live events.
+// If adapter.mjs's ignorePatterns() is ever "cleaned up" back into globs,
+// this must fail.
+test("real Parcel watcher never surfaces writes inside a base-ignored directory", async () => {
+  const script = `import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startWatch } from "./watchman/adapter.mjs";
+const root = mkdtempSync(join(tmpdir(), "cortex-adapter-ignore-"));
+mkdirSync(join(root, "node_modules"), { recursive: true });
+try {
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const events = [];
+  const sub = await startWatch(root, (evs) => events.push(...evs), () => {});
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  writeFileSync(join(root, "node_modules", "noise.js"), "noise");
+  writeFileSync(join(root, "keep.js"), "keep");
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  await sub.unsubscribe();
+  if (events.some((event) => event.path.includes("node_modules"))) throw new Error("node_modules leaked: " + JSON.stringify(events));
+  if (!events.some((event) => event.path.endsWith("keep.js"))) throw new Error("keep.js was never observed: " + JSON.stringify(events));
+  console.log("ignore-ok");
+} finally { rmSync(root, { recursive: true, force: true }); }`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: ROOT, encoding: "utf8", timeout: 8000 });
+  assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
+  assert.match(result.stdout, /ignore-ok/);
+});
