@@ -23,7 +23,6 @@ function indexedMeta(db) {
     schemaVersion: envelope.schemaVersion ?? 1,
     provider: envelope.provider,
     manifest: envelope.manifest,
-    docTruth: envelope.docTruth,
     repoRoot: envelope.repoRoot,
     counts,
     edgeKinds: Object.fromEntries(edgeKinds.map((row) => [row.kind, row.n])),

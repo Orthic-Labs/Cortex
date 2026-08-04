@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "repo": "typescript-commerce",
+  "generatedAt": "gen:1ddac88e4fad1458",
+  "entrypoint": ".blueprint/manifest.json",
+  "precedence": [
+    "code",
+    "adr",
+    "current-audit",
+    "architecture",
+    "plan",
+    "archive"
+  ],
+  "stats": {
+    "files": 20,
+    "docs": 1,
+    "claims": 0,
+    "codeRefs": 1
+  },
+  "nodes": [
+    {
+      "id": "repo.root",
+      "kind": "repo",
+      "path": "."
+    },
+    {
+      "id": "doc.docs-architecture-md.3bc9c856",
+      "kind": "doc",
+      "path": "docs/ARCHITECTURE.md",
+      "title": "Architecture",
+      "contentHash": "d7d18706e8387d6fb4bf2562aba78ef1",
+      "searchText": "# Architecture `POST /orders` enters at `src/routes.ts`, then calls `OrderService.placeOrder`. The order store persists every order in Redis. ",
+      "lifecycle": {
+        "status": "current"
+      },
+      "headings": [
+        {
+          "line": 1,
+          "level": 1,
+          "text": "Architecture"
+        }
+      ]
+    },
+    {
+      "id": "code.src-routes-ts.c7a3e2e5",
+      "kind": "code_ref",
+      "path": "src/routes.ts",
+      "exists": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "doc.docs-architecture-md.3bc9c856",
+      "to": "code.src-routes-ts.c7a3e2e5",
+      "type": "mentions-code"
+    }
+  ]
+}

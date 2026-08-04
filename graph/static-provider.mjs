@@ -42,6 +42,7 @@ import {
   loadFileContentHashes,
 } from "./store-sqlite.mjs";
 import { finalizeGenerationIdentity, computeGenerationId, computeManifestDigest } from "./generation-identity.mjs";
+import { sliceTokens } from "../lib/token-budget.mjs";
 import { diffLedgerAgainstTree } from "./merkle-ledger.mjs";
 import { probeScip } from "./scip-provider.mjs";
 import { normalizeIgnoredPrefixes, pathMatchesIgnoredPrefix } from "./ignored-prefixes.mjs";
@@ -556,7 +557,12 @@ export function createContextCandidateSet(generation, options = {}) {
   let tokenBudget = maxEstimatedTokens;
   for (const item of classified) {
     const ev = item.result.evidence[0];
-    const estimatedTokens = estimateTokens(ev);
+    // Phase 7.4 — slice-time estimate derived from the shared helper (a pure
+    // metadata computation, no file read). It is paired with `actualTokens`
+    // = null here: the set is produced without reading source, so the
+    // resolution-time budget is intentionally unset until a resolver
+    // consumes this candidate and reads its bytes.
+    const estimatedTokens = sliceTokens(ev);
     // Hard ceilings apply uniformly — including to anchors, so the set can never
     // exceed the canonical provider ceiling. Anchors win their slots by sorting
     // first, not by bypassing the cap; an anchor dropped past the cap is receipted.
@@ -580,7 +586,15 @@ export function createContextCandidateSet(generation, options = {}) {
       instructionPolicy: "data_only",
       providerScore,
       scoreComponents: item.isExact ? { exact: 1 } : { lexical: providerScore },
+      // Phase 7.4 — two-budget tokens. `estimatedTokens` is the slice-time
+      // metadata estimate (cheap, no file read); `actualTokens` is filled in
+      // by a resolver that reads the source, paired with a `truncation`
+      // receipt when bytes are dropped. Both null at slice time is a
+      // contract — not a bug — and lets downstream consumers distinguish
+      // "admitted but never resolved" from "resolved and trimmed".
       estimatedTokens,
+      actualTokens: null,
+      truncation: null,
       protected: item.isAnchor,
       exact: item.isExact,
       recoverable: true,
@@ -858,7 +872,7 @@ function escapeMermaidLabel(value) {
 export function buildDocCodeJoins(generation, options = {}) {
   const repoRoot = generation?.repoRoot ? resolve(generation.repoRoot) : null;
   const map = readDocMap(repoRoot, options);
-  if (!map) return { schemaVersion: 1, provider: generation.provider.id, joins: [], supersedes: [], truncated: false, sourceDocMap: null };
+  if (!map) return { schemaVersion: 1, provider: generation.provider.id, joins: [], supersedes: [], truncated: false, sourceDocMap: { docs: 0, claims: 0, generatedAt: null, docPaths: [], claimPaths: [] } };
   const nodesById = new Map(generation.nodes.map((node) => [node.id, node]));
   const docById = new Map(map.nodes.filter((node) => node.kind === "doc").map((doc) => [doc.id, doc]));
   const claimById = new Map(map.nodes.filter((node) => node.kind === "claim").map((claim) => [claim.id, claim]));
@@ -900,7 +914,17 @@ export function buildDocCodeJoins(generation, options = {}) {
     joins,
     supersedes,
     truncated: false,
-    sourceDocMap: { docs: docById.size, claims: claimById.size, generatedAt: map.generatedAt },
+    sourceDocMap: {
+      docs: docById.size,
+      claims: claimById.size,
+      generatedAt: map.generatedAt,
+      // Phase 7.3 — the relational store needs every doc path (not just the
+      // ones connected to joins) so `listDocuments` matches the original
+      // `sourceDocMap.docs` count. Joining-onlies would undercount supersedable
+      // docs with no claims, breaking `graph-query.test.mjs`'s assertion.
+      docPaths: [...docById.values()].map((doc) => doc.path),
+      claimPaths: [...claimById.values()].map((claim) => ({ path: claim.source, line: claim.line })),
+    },
   };
 }
 
@@ -1219,7 +1243,7 @@ function buildGenerationFromSources(root, source, options = {}) {
   const docMap = readDocMap(root, null);
   const docTruth = docMap
     ? buildDocCodeJoins(candidateGeneration, { docMap })
-    : { schemaVersion: 1, provider: PROVIDER.id, joins: [], supersedes: [], truncated: false, sourceDocMap: null };
+    : { schemaVersion: 1, provider: PROVIDER.id, joins: [], supersedes: [], truncated: false, sourceDocMap: { docs: 0, claims: 0, generatedAt: null, docPaths: [], claimPaths: [] } };
   const cleanEdges = dedupeBy(rawEdges, (item) => `${item.kind}:${item.source}:${item.target ?? item.specifier ?? ""}:${item.evidence?.[0]?.path ?? ""}`);
   const manifest = {
     schemaVersion: 1,

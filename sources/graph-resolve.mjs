@@ -31,6 +31,141 @@ import {
   safeResolve,
   xxh3Hex,
 } from "./_shared.mjs";
+import {
+  sliceTokens,
+  resolveTokens,
+  trimToSymbol,
+  applyTrimToSymbol,
+  truncationReceipt,
+} from "../lib/token-budget.mjs";
+
+// Phase 7.4 — wraps `_shared.makeCandidate` so every emitted candidate
+// carries both budgets and a truncation receipt (when actual bytes were
+// trimmed). Falls through unchanged when bytes are not supplied, so
+// adapters that still prefer the line-count proxy lose nothing.
+//
+// Inputs:
+//   actualText: bytes the resolver actually retained (post-trim).
+//   originalText: bytes the resolver would have emitted if no trim fired.
+//                  Used to drive the receipt's `originalBytes` so the
+//                  planner can see the full byte delta, not just the
+//                  kept count.
+function makeResolvedCandidate({
+  id,
+  layer,
+  sourceKind,
+  sourcePath,
+  trustClass,
+  providerScore,
+  scoreComponents,
+  text,
+  startLine,
+  endLine,
+  bodyHash,
+  estimatedTokens,
+  resolver,
+  actualText = null,
+  originalText = null,
+  actualStartLine = null,
+  actualEndLine = null,
+  truncationReason = null,
+  symbolBoundary = false,
+}) {
+  const baseEstimate = typeof estimatedTokens === "number" && estimatedTokens > 0
+    ? estimatedTokens
+    : sliceTokens({ startLine, endLine });
+  const result = makeCandidate({
+    id,
+    layer,
+    sourceKind,
+    sourcePath,
+    trustClass,
+    providerScore,
+    scoreComponents,
+    text,
+    startLine,
+    endLine,
+    bodyHash,
+    estimatedTokens: baseEstimate,
+    resolver,
+  });
+  if (actualText == null) {
+    result.actualTokens = null;
+    result.truncation = null;
+    return result;
+  }
+  const resolved = resolveTokens(actualText, {
+    startLine: actualStartLine ?? startLine,
+    endLine: actualEndLine ?? endLine,
+  });
+  // Two distinct budgets, both surfaced. The resolved estimate is the
+  // byte-based one; the slice estimate is the metadata one. They can
+  // disagree when trim-to-symbol rescales the span or a byte cap dropped
+  // bytes — that disagreement IS the receipt the planner audits against.
+  result.actualTokens = resolved.tokens;
+  if (truncationReason && originalText != null) {
+    const original = resolveTokens(originalText, {
+      startLine: actualStartLine ?? startLine,
+      endLine: actualEndLine ?? endLine,
+    });
+    try {
+      result.truncation = truncationReceipt(resolved, original, {
+        reason: truncationReason,
+        symbolBoundary,
+      });
+    } catch {
+      // Caller did not actually drop bytes (e.g. snap-to-symbol without
+      // byte cap). Surface null instead of fabricating a misleading
+      // receipt.
+      result.truncation = null;
+    }
+  } else {
+    result.truncation = null;
+  }
+  return result;
+}
+
+// Phase 7.4 — apply trim-to-symbol when a path is supplied. Reads the file,
+// snaps the requested span to the enclosing brace boundaries, and reports
+// the kept span as the resolution-time span. `maxBytes = null` disables the
+// byte-cap (use only when you intend to send the whole symbol body).
+function resolveContentByPath(repoRoot, sourcePath, requestedStart, requestedEnd, options = {}) {
+  const maxBytes = options.maxBytes ?? null;
+  const absolute = join(repoRoot, sourcePath);
+  let bytes;
+  try {
+    bytes = readFileSync(absolute, "utf8");
+  } catch {
+    return null;
+  }
+  const lines = bytes.split(/\r?\n/);
+  if (maxBytes == null) {
+    const snapped = trimToSymbol(lines, requestedStart, requestedEnd);
+    const text = lines.slice(snapped.startLine - 1, snapped.endLine).join("\n");
+    return {
+      text,
+      originalText: text,
+      startLine: snapped.startLine,
+      endLine: snapped.endLine,
+      truncated: snapped.trimmed,
+      receipt: null,
+      reason: snapped.reason,
+    };
+  }
+  // applyTrimToSymbol returns a pre-built receipt only when byte cap
+  // dropped content. When the symbol already fits, `out.receipt` is null
+  // but `out.text` and `out.resolve` reflect the snap-to-symbol result.
+  const out = applyTrimToSymbol(lines, requestedStart, requestedEnd, { maxBytes });
+  return {
+    text: out.text,
+    originalText: out.receipt ? out.originalText : out.text,
+    startLine: out.startLine,
+    endLine: out.endLine,
+    truncated: Boolean(out.receipt),
+    receipt: out.receipt,
+    reason: out.receipt ? "byte_cap" : "no_trim_needed",
+  };
+}
 
 const ADAPTER_ID = "rightcontext-sources/graph-resolve";
 const ADAPTER_LAYER = 3; // Layer 3 — graph-backed file/symbol evidence
@@ -163,8 +298,21 @@ export function produce(task, scope) {
       const node = findSymbolNode(generation, safe, item.symbol);
       if (node) {
         const ev = node.evidence?.[0] ?? {};
+        const startLine = ev.startLine ?? 1;
+        const endLine = ev.endLine ?? 1;
+        // Phase 7.4 — resolve the actual source bytes for this candidate.
+        // Trim-to-symbol snaps the requested span to brace boundaries, and
+        // any byte-cap trim carries a `truncation` receipt. When the file
+        // is not readable (typical for graph-only fixtures), we fall back
+        // to the slice-time-only candidate, never fabricating a receipt.
+        // `scope.maxBytes` lets tests / callers force a byte cap to prove
+        // the truncation receipt fires — but defaults to none so the
+        // adapter never silently truncates real traffic.
+        const resolution = resolveContentByPath(repoRoot, safe, startLine, endLine, {
+          maxBytes: scope?.maxBytes ?? null,
+        });
         candidates.push(
-          makeCandidate({
+          makeResolvedCandidate({
             id: `${ADAPTER_ID}:${node.id}`,
             layer: ADAPTER_LAYER,
             sourceKind: "graph_resolve_symbol",
@@ -173,11 +321,17 @@ export function produce(task, scope) {
             providerScore: 0.97,
             scoreComponents: { graph: 1.0, exact: 1.0 },
             text: node.qualifiedName ?? node.name ?? item.symbol,
-            startLine: ev.startLine ?? 1,
-            endLine: ev.endLine ?? 1,
+            startLine,
+            endLine,
             bodyHash: ev.contentHash ?? xxh3Hex(node.qualifiedName ?? item.symbol),
-            estimatedTokens: Math.max(1, (ev.endLine ?? 1) - (ev.startLine ?? 1) + 1),
+            estimatedTokens: Math.max(1, endLine - startLine + 1),
             resolver: `blueprint graph resolve --node ${node.id}`,
+            actualText: resolution?.text ?? null,
+            originalText: resolution?.originalText ?? null,
+            actualStartLine: resolution?.startLine ?? null,
+            actualEndLine: resolution?.endLine ?? null,
+            truncationReason: resolution?.receipt ? resolution.reason : null,
+            symbolBoundary: resolution?.truncated ?? false,
           }),
         );
         used.add(node.id);
@@ -192,8 +346,10 @@ export function produce(task, scope) {
     const fileNode = findFileNode(generation, safe);
     if (fileNode) {
       const ev = fileNode.evidence?.[0] ?? {};
+      const startLine = ev.startLine ?? 1;
+      const endLine = ev.endLine ?? 1;
       candidates.push(
-        makeCandidate({
+        makeResolvedCandidate({
           id: `${ADAPTER_ID}:${fileNode.id}`,
           layer: ADAPTER_LAYER,
           sourceKind: "graph_resolve_file",
@@ -202,10 +358,10 @@ export function produce(task, scope) {
           providerScore: 0.9,
           scoreComponents: { graph: 1.0, exact: 1.0 },
           text: fileNode.qualifiedName ?? safe,
-          startLine: ev.startLine ?? 1,
-          endLine: ev.endLine ?? 1,
+          startLine,
+          endLine,
           bodyHash: ev.contentHash ?? xxh3Hex(safe),
-          estimatedTokens: Math.max(1, (ev.endLine ?? 1) - (ev.startLine ?? 1) + 1),
+          estimatedTokens: Math.max(1, endLine - startLine + 1),
           resolver: `blueprint graph resolve --node ${fileNode.id}`,
         }),
       );
@@ -236,8 +392,10 @@ export function produce(task, scope) {
         omissions.push({ id: `${ADAPTER_ID}:${node.id}`, layer: ADAPTER_LAYER, reason: "graph_resolve_outside_scope" });
         continue;
       }
+      const startLine = ev.startLine ?? 1;
+      const endLine = ev.endLine ?? 1;
       candidates.push(
-        makeCandidate({
+        makeResolvedCandidate({
           id: `${ADAPTER_ID}:${node.id}`,
           layer: ADAPTER_LAYER,
           sourceKind: "graph_resolve_symbol",
@@ -246,10 +404,10 @@ export function produce(task, scope) {
           providerScore: 0.85,
           scoreComponents: { graph: 0.9, lexical: 0.8 },
           text: node.qualifiedName ?? node.name ?? token,
-          startLine: ev.startLine ?? 1,
-          endLine: ev.endLine ?? 1,
+          startLine,
+          endLine,
           bodyHash: ev.contentHash ?? xxh3Hex(node.qualifiedName ?? token),
-          estimatedTokens: Math.max(1, (ev.endLine ?? 1) - (ev.startLine ?? 1) + 1),
+          estimatedTokens: Math.max(1, endLine - startLine + 1),
           resolver: `blueprint graph resolve --node ${node.id}`,
         }),
       );
@@ -266,4 +424,4 @@ export const adapterInfo = {
   description: "Exact path and symbol resolution through Blueprint's static provider.",
 };
 
-export const _internals = { findFileNode, findSymbolNode, lexTokens, pathAndSymbol, loadGeneration };
+export const _internals = { findFileNode, findSymbolNode, lexTokens, pathAndSymbol, loadGeneration, resolveContentByPath };

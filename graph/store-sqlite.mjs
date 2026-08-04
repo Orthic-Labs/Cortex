@@ -415,6 +415,86 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_edges_gen_target_kind ON edges(generation_id, target, kind);
     `);
   },
+  // Migration 14 — relational docTruth (Phase 7.3).
+  //
+  // Replaces the single ~8.5 MB envelope blob with four generation-pinned tables:
+  // documents, claims, claim_code_edges, document_supersession. Every row carries
+  // its own generation_id so multi-generation stores stay queryable per-generation.
+  // Body prose stays in the source files; these tables hold structure and spans
+  // only. A downstream consumer can now ask for `claims` / `claim_code_edges`
+  // for one generation in a SQL seek instead of paying the full envelope parse.
+  //
+  // Idempotent on an older store that already holds a `docTruth` envelope key
+  // (no column-add, so a re-run is a no-op); the next saveGeneration writes
+  // rows AND stops persisting the blob, so a clean rebuild leaves only rows.
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        path TEXT NOT NULL,
+        content_hash TEXT,
+        lifecycle_status TEXT,
+        lifecycle_superseded_by TEXT,
+        lifecycle_superseded_on TEXT,
+        generated_at TEXT,
+        generation_id TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_documents_generation ON documents(generation_id);
+      CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
+
+      CREATE TABLE IF NOT EXISTS claims (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL,
+        source TEXT,
+        line INTEGER,
+        text TEXT NOT NULL,
+        status TEXT,
+        sha1 TEXT,
+        generation_id TEXT NOT NULL,
+        FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_claims_generation ON claims(generation_id);
+      CREATE INDEX IF NOT EXISTS idx_claims_document ON claims(document_id);
+
+      CREATE TABLE IF NOT EXISTS claim_code_edges (
+        id TEXT PRIMARY KEY,
+        claim_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        source TEXT NOT NULL,
+        target TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        confidence_class TEXT,
+        reason TEXT,
+        evidence_doc_path TEXT,
+        evidence_doc_line INTEGER,
+        evidence_doc_sha1 TEXT,
+        evidence_code_path TEXT,
+        evidence_code_exists INTEGER,
+        evidence_code_node_id TEXT,
+        evidence_code_content_hash TEXT,
+        generation_id TEXT NOT NULL,
+        FOREIGN KEY (claim_id) REFERENCES claims(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_claim_code_edges_generation ON claim_code_edges(generation_id);
+      CREATE INDEX IF NOT EXISTS idx_claim_code_edges_claim ON claim_code_edges(claim_id);
+      CREATE INDEX IF NOT EXISTS idx_claim_code_edges_kind ON claim_code_edges(kind);
+
+      CREATE TABLE IF NOT EXISTS document_supersession (
+        id TEXT PRIMARY KEY,
+        source_kind TEXT NOT NULL,
+        source_doc TEXT,
+        source_line INTEGER,
+        source_text TEXT,
+        source_external INTEGER NOT NULL DEFAULT 0,
+        target_doc TEXT,
+        target_external INTEGER NOT NULL DEFAULT 0,
+        target_match TEXT,
+        superseded_on TEXT,
+        generation_id TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_document_supersession_generation ON document_supersession(generation_id);
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -522,7 +602,7 @@ function insertGenerationRows(db, generation, options = {}) {
   };
 
   if (mode === "replace") {
-    db.exec("DELETE FROM files; DELETE FROM symbols; DELETE FROM edges; DELETE FROM vectors; DELETE FROM symbol_search; DELETE FROM symbol_terms;");
+    db.exec("DELETE FROM files; DELETE FROM symbols; DELETE FROM edges; DELETE FROM vectors; DELETE FROM symbol_search; DELETE FROM symbol_terms; DELETE FROM claim_code_edges; DELETE FROM claims; DELETE FROM documents; DELETE FROM document_supersession;");
   }
   for (const node of nodes) {
     if (node.kind === "file") {
@@ -580,7 +660,226 @@ function insertGenerationRows(db, generation, options = {}) {
       extraOf(edge, EDGE_COLUMN_KEYS),
     );
   }
-  return { generationId, fileCount: nodes.filter((n) => n.kind === "file").length, symbolCount: nodes.filter((n) => n.kind !== "file").length, edgeCount: edges.length };
+  // Phase 7.3 — relational docTruth. Decompose the docTruth envelope into four
+  // generation-pinned tables. Each row carries its own generation_id and ID;
+  // prose stays in the source files (this store holds structure + spans only).
+  // The instructionPolicy:data_only invariant is upheld here: rows describe
+  // WHAT documents/claims exist and WHERE they point, never the prose, so
+  // graph connectivity cannot promote repo prose to agent instructions.
+  const docTruth = generation.docTruth;
+  if (docTruth) {
+    insertDocTruthRows(db, docTruth, generationId);
+  }
+  return {
+    generationId,
+    fileCount: nodes.filter((n) => n.kind === "file").length,
+    symbolCount: nodes.filter((n) => n.kind !== "file").length,
+    edgeCount: edges.length,
+    claimCount: docTruth ? countDocTruthRows(docTruth) : { documents: 0, claims: 0, edges: 0, supersedes: 0 },
+  };
+}
+
+// Decompose the in-memory `docTruth` envelope into relational rows. The shape
+// is the one `static-provider.mjs:buildDocCodeJoins` produces — a flat array of
+// `joins` (typed edges joining a claim to a code node), a flat array of
+// `supersedes` (typed edges joining docs across lifecycle states), and a
+// `sourceDocMap` describing the source `map.json` (which contains docs and
+// claims we re-derive from the join evidence so the tables stay queryable per-
+// generation without depending on the `map.json` still being on disk).
+function insertDocTruthRows(db, docTruth, generationId) {
+  const docIdByPath = new Map();
+  const docById = new Map();
+  const claimIdByKey = new Map();
+  const insertDoc = db.prepare(`
+    INSERT INTO documents (id, path, content_hash, lifecycle_status, lifecycle_superseded_by, lifecycle_superseded_on, generated_at, generation_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      path = excluded.path, content_hash = excluded.content_hash,
+      lifecycle_status = excluded.lifecycle_status,
+      lifecycle_superseded_by = excluded.lifecycle_superseded_by,
+      lifecycle_superseded_on = excluded.lifecycle_superseded_on,
+      generated_at = excluded.generated_at,
+      generation_id = excluded.generation_id
+  `);
+  const insertClaim = db.prepare(`
+    INSERT INTO claims (id, document_id, source, line, text, status, sha1, generation_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      document_id = excluded.document_id, source = excluded.source, line = excluded.line,
+      text = excluded.text, status = excluded.status, sha1 = excluded.sha1,
+      generation_id = excluded.generation_id
+  `);
+  const insertJoin = db.prepare(`
+    INSERT INTO claim_code_edges (id, claim_id, kind, source, target, confidence, confidence_class, reason,
+                                  evidence_doc_path, evidence_doc_line, evidence_doc_sha1,
+                                  evidence_code_path, evidence_code_exists,
+                                  evidence_code_node_id, evidence_code_content_hash, generation_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      claim_id = excluded.claim_id, kind = excluded.kind, source = excluded.source, target = excluded.target,
+      confidence = excluded.confidence, confidence_class = excluded.confidence_class, reason = excluded.reason,
+      evidence_doc_path = excluded.evidence_doc_path, evidence_doc_line = excluded.evidence_doc_line,
+      evidence_doc_sha1 = excluded.evidence_doc_sha1, evidence_code_path = excluded.evidence_code_path,
+      evidence_code_exists = excluded.evidence_code_exists, evidence_code_node_id = excluded.evidence_code_node_id,
+      evidence_code_content_hash = excluded.evidence_code_content_hash,
+      generation_id = excluded.generation_id
+  `);
+  const insertSuper = db.prepare(`
+    INSERT INTO document_supersession (id, source_kind, source_doc, source_line, source_text, source_external,
+                                       target_doc, target_external, target_match, superseded_on, generation_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      source_kind = excluded.source_kind, source_doc = excluded.source_doc,
+      source_line = excluded.source_line, source_text = excluded.source_text, source_external = excluded.source_external,
+      target_doc = excluded.target_doc, target_external = excluded.target_external,
+      target_match = excluded.target_match, superseded_on = excluded.superseded_on,
+      generation_id = excluded.generation_id
+  `);
+
+  // Iterate joins to discover every (claim, doc, code) tuple that needs a row.
+  for (const join of docTruth.joins ?? []) {
+    const docRef = join?.evidence?.docRef ?? null;
+    const codeRef = join?.evidence?.codeRef ?? null;
+    const codeNode = join?.evidence?.codeNode ?? null;
+    const docPath = docRef?.path ? String(docRef.path) : null;
+    if (!docPath) continue;
+    const docId = docIdByPath.get(docPath) ?? `doc:${docPath}`;
+    if (!docIdByPath.has(docPath)) {
+      docIdByPath.set(docPath, docId);
+      // We carry the document row's content hash when it is available on the
+      // join; absent content hashes are NULL rather than synthesised, so a
+      // missing hash is observable, not hidden.
+      insertDoc.run(
+        docId,
+        docPath,
+        docRef?.sha1 ?? null,
+        null,
+        null,
+        null,
+        docTruth.sourceDocMap?.generatedAt ?? null,
+        generationId,
+      );
+      docById.set(docId, { id: docId, path: docPath, contentHash: docRef?.sha1 ?? null });
+    }
+    // The claim id is `claim:<docPath>:<line>:<text-prefix>` when no explicit
+    // id is on the join; `static-provider`'s join shape does not carry one, so
+    // we derive a deterministic one keyed on the evidence — two joins that
+    // describe the same (doc, line) collapse onto the same claim row, which is
+    // the right behaviour for the per-code-ref expansion in classifyJoin.
+    const docLine = docRef?.line ?? null;
+    const claimKey = `${docId}:${docLine ?? ""}:${String(codeRef?.path ?? "")}:${join.kind ?? ""}`;
+    const claimId = claimIdByKey.get(claimKey) ?? `claim:${docId}:${docLine ?? "n"}:${(codeRef?.path ?? "n").replaceAll("/", "_")}:${join.kind ?? "n"}`;
+    if (!claimIdByKey.has(claimKey)) {
+      claimIdByKey.set(claimKey, claimId);
+      insertClaim.run(
+        claimId,
+        docId,
+        docPath,
+        docLine,
+        join.reason ?? "",
+        null,
+        docRef?.sha1 ?? null,
+        generationId,
+      );
+    }
+    insertJoin.run(
+      join.id ?? `claimEdge:${claimId}:${join.kind ?? "n"}:${codeNode?.id ?? codeRef?.path ?? "n"}`,
+      claimId,
+      join.kind ?? "supports",
+      join.source ?? "",
+      join.target ?? "",
+      join.confidence ?? 1,
+      join.confidenceClass ?? null,
+      join.reason ?? null,
+      docPath,
+      docLine,
+      docRef?.sha1 ?? null,
+      codeRef?.path ?? null,
+      codeRef?.exists === false ? 0 : 1,
+      codeNode?.id ?? null,
+      codeNode?.contentHash ?? null,
+      generationId,
+    );
+  }
+  // Phase 7.3 — persist every doc in `sourceDocMap.docPaths`, not just the
+  // ones connected to a join. The original `sourceDocMap.docs` count covered
+  // every doc node from `map.json`; undercounting would silently break the
+  // Phase 3.1 slice `claims` field and the `graph-query.test.mjs` assertion.
+  for (const docPath of docTruth.sourceDocMap?.docPaths ?? []) {
+    if (!docPath) continue;
+    ensureDocumentRow(insertDoc, docIdByPath, docById, String(docPath), docTruth.sourceDocMap?.generatedAt ?? null, generationId);
+  }
+  for (const claimLocator of docTruth.sourceDocMap?.claimPaths ?? []) {
+    const docPath = claimLocator?.path ? String(claimLocator.path) : null;
+    if (!docPath) continue;
+    ensureDocumentRow(insertDoc, docIdByPath, docById, docPath, docTruth.sourceDocMap?.generatedAt ?? null, generationId);
+  }
+  for (const superRow of docTruth.supersedes ?? []) {
+    const sourceKind = superRow?.kind ?? "supersedes";
+    const sourceDoc = superRow?.source?.doc ?? null;
+    const sourceLine = superRow?.source?.line ?? null;
+    const sourceText = superRow?.source?.text ?? null;
+    const sourceExternal = superRow?.source?.external === true ? 1 : 0;
+    const targetDoc = superRow?.target?.doc ?? null;
+    const targetExternal = superRow?.target?.external === true ? 1 : 0;
+    const targetMatch = superRow?.target ? String(JSON.stringify(superRow.target)) : null;
+    const supersededOn = superRow?.target?.supersededOn ?? superRow?.evidence?.supersededOn ?? null;
+    // A superseded document may have no joins (it is a doc-side fact only), so
+    // ensure it has a row to keep `listDocuments` aligned with the original
+    // `map.json` doc count — supersedes-only generations must still surface
+    // their docs in the slice `claims` field and the relational readers.
+    if (!sourceExternal && sourceDoc) ensureDocumentRow(insertDoc, docIdByPath, docById, String(sourceDoc), docTruth.sourceDocMap?.generatedAt ?? null, generationId);
+    if (!targetExternal && targetDoc) ensureDocumentRow(insertDoc, docIdByPath, docById, String(targetDoc), docTruth.sourceDocMap?.generatedAt ?? null, generationId);
+    const id = `supersede:${generationId}:${sourceDoc ?? "ext"}->${targetDoc ?? "ext"}:${sourceLine ?? 0}`;
+    insertSuper.run(
+      id,
+      sourceKind,
+      sourceDoc,
+      sourceLine,
+      sourceText,
+      sourceExternal,
+      targetDoc,
+      targetExternal,
+      targetMatch,
+      supersededOn,
+      generationId,
+    );
+  }
+}
+
+function ensureDocumentRow(insertDoc, docIdByPath, docById, docPath, generatedAt, generationId) {
+  if (docIdByPath.has(docPath)) return;
+  const docId = `doc:${docPath}`;
+  docIdByPath.set(docPath, docId);
+  insertDoc.run(
+    docId,
+    docPath,
+    null,
+    null,
+    null,
+    null,
+    generatedAt,
+    generationId,
+  );
+  docById.set(docId, { id: docId, path: docPath, contentHash: null });
+}
+
+function countDocTruthRows(docTruth) {
+  const docPaths = new Set();
+  for (const join of docTruth.joins ?? []) {
+    const path = join?.evidence?.docRef?.path;
+    if (path) docPaths.add(String(path));
+  }
+  for (const superRow of docTruth.supersedes ?? []) {
+    if (superRow?.source?.doc) docPaths.add(String(superRow.source.doc));
+    if (superRow?.target?.doc) docPaths.add(String(superRow.target.doc));
+  }
+  return {
+    documents: docPaths.size,
+    claims: (docTruth.joins ?? []).length,
+    edges: (docTruth.joins ?? []).length,
+    supersedes: (docTruth.supersedes ?? []).length,
+  };
 }
 
 /** Replace one symbol's generation-bound search terms atomically with its row. */
@@ -688,7 +987,7 @@ export function bulkInsertGeneration(db, generation, options = {}) {
 // `sourceObservation` records the commit the graph was built at and whether the
 // tree was clean — a downstream consumer must be able to tell a committed
 // snapshot from a dirty-overlay build without opening git.
-const ENVELOPE_KEYS = ["schemaVersion", "provider", "manifest", "docTruth", "repoRoot", "augmentation", "sourceObservation"];
+const ENVELOPE_KEYS = ["schemaVersion", "provider", "manifest", "repoRoot", "augmentation", "sourceObservation"];
 
 /**
  * Persist a complete generation: nodes, edges, and envelope in ONE transaction.
@@ -860,6 +1159,108 @@ export function listSymbolMetadata(db, providerId = null) {
     .map((row) => ({ ...row, labels: JSON.parse(row.labels || "[]") }));
 }
 
+// Phase 7.3 — relational docTruth readers.
+//
+// Slim, ordered reads that return only structure + spans. None of these
+// materialise document or claim prose — that stays in the source files. They
+// exist so the slice `claims` field (Phase 3.1) can be filled by SQL without
+// loading the full generation envelope.
+//
+// `generationId` is REQUIRED: every row carries it, and an unfiltered scan
+// would mix rows across generations. `null` is the safe empty answer.
+
+function claimTextFor(row) {
+  // The text column carries `join.reason` (a short classifier string, not full
+  // prose) because the build-time classifier does not preserve the full claim
+  // text. That is intentional — full prose stays in the source file and the
+  // slice consumer reads it through the `source` pointer. Returning it here
+  // would be the only way for graph connectivity to surface prose, which the
+  // instructionPolicy:data_only invariant forbids.
+  return row.text;
+}
+
+export function listDocuments(db, generationId, options = {}) {
+  if (!generationId) return [];
+  const limit = Math.max(1, Math.min(10000, Number(options.limit ?? 10000) || 10000));
+  const rows = db.prepare(`SELECT id, path, content_hash AS contentHash, lifecycle_status AS lifecycleStatus,
+    lifecycle_superseded_by AS lifecycleSupersededBy, lifecycle_superseded_on AS lifecycleSupersededOn,
+    generated_at AS generatedAt
+    FROM documents WHERE generation_id = ? ORDER BY rowid LIMIT ?`).all(String(generationId), limit);
+  return rows;
+}
+
+export function listClaims(db, generationId, options = {}) {
+  if (!generationId) return [];
+  const limit = Math.max(1, Math.min(10000, Number(options.limit ?? 10000) || 10000));
+  const rows = db.prepare(`SELECT id, document_id AS documentId, source, line, text, status, sha1
+    FROM claims WHERE generation_id = ? ORDER BY rowid LIMIT ?`).all(String(generationId), limit);
+  return rows.map((row) => ({ ...row, text: claimTextFor(row) }));
+}
+
+export function listClaimCodeEdges(db, generationId, options = {}) {
+  if (!generationId) return [];
+  const limit = Math.max(1, Math.min(10000, Number(options.limit ?? 10000) || 10000));
+  const kind = options.kind ? String(options.kind) : null;
+  const claimId = options.claimId ? String(options.claimId) : null;
+  const clauses = ["generation_id = ?"];
+  const params = [String(generationId)];
+  if (kind) { clauses.push("kind = ?"); params.push(kind); }
+  if (claimId) { clauses.push("claim_id = ?"); params.push(claimId); }
+  const where = clauses.join(" AND ");
+  const rows = db.prepare(`SELECT id, claim_id AS claimId, kind, source, target, confidence,
+    confidence_class AS confidenceClass, reason,
+    evidence_doc_path AS evidenceDocPath, evidence_doc_line AS evidenceDocLine, evidence_doc_sha1 AS evidenceDocSha1,
+    evidence_code_path AS evidenceCodePath, evidence_code_exists AS evidenceCodeExists,
+    evidence_code_node_id AS evidenceCodeNodeId, evidence_code_content_hash AS evidenceCodeContentHash
+    FROM claim_code_edges WHERE ${where} ORDER BY rowid LIMIT ?`).all(...params, limit);
+  return rows;
+}
+
+export function listDocumentSupersession(db, generationId, options = {}) {
+  if (!generationId) return [];
+  const limit = Math.max(1, Math.min(10000, Number(options.limit ?? 10000) || 10000));
+  const rows = db.prepare(`SELECT id, source_kind AS sourceKind, source_doc AS sourceDoc, source_line AS sourceLine,
+    source_text AS sourceText, source_external AS sourceExternal,
+    target_doc AS targetDoc, target_external AS targetExternal,
+    target_match AS targetMatch, superseded_on AS supersededOn
+    FROM document_supersession WHERE generation_id = ? ORDER BY rowid LIMIT ?`).all(String(generationId), limit);
+  return rows.map((row) => ({
+    ...row,
+    sourceExternal: row.sourceExternal === 1,
+    targetExternal: row.targetExternal === 1,
+  }));
+}
+
+/**
+ * Slim, ordered, per-generation docTruth slice used by the Phase 3.1
+ * RepositorySubgraphSliceV1 `claims` field. Each entry combines a claim and
+ * its typed join rows (supports / contradicts / supersedes) so a downstream
+ * consumer does not need to join three tables itself. Empty arrays on every
+ * field when the generation has no doc coverage — never null — so callers
+ * can iterate without a presence check.
+ */
+export function listClaimSlice(db, generationId, options = {}) {
+  if (!generationId) return [];
+  const claims = listClaims(db, generationId, options);
+  if (claims.length === 0) return [];
+  const edges = listClaimCodeEdges(db, generationId, options);
+  const byClaim = new Map();
+  for (const edge of edges) {
+    if (!byClaim.has(edge.claimId)) byClaim.set(edge.claimId, []);
+    byClaim.get(edge.claimId).push(edge);
+  }
+  return claims.map((claim) => ({
+    id: claim.id,
+    documentId: claim.documentId,
+    source: claim.source,
+    line: claim.line,
+    status: claim.status,
+    text: claim.text,
+    sha1: claim.sha1,
+    edges: byClaim.get(claim.id) ?? [],
+  }));
+}
+
 export function collectDependents(db, path, options = {}) {
   const maxHops = Math.max(0, Number(options.maxHops ?? 2));
   const maxFiles = Math.max(0, Number(options.maxFiles ?? 500));
@@ -982,7 +1383,88 @@ export function loadGeneration(db) {
   // keeps it. That distinction is why they are not nullable columns.
   generation.edges = edgeRows.map(deserializeEdgeNodeRow);
 
+  // Phase 7.3 — rehydrate `docTruth` from the relational tables. Cheap reads
+  // (readManifestEnvelope, indexedMeta) deliberately skip this and so stay
+  // sub-millisecond; only callers that asked for the full generation pay it.
+  // Empty when the tables hold no rows for the current generation — that is
+  // the correct shape for stores with no doc coverage.
+  generation.docTruth = loadDocTruth(db, generation.manifest?.generationId ?? null, providerId(generation.provider));
+
   return generation;
+}
+
+function providerId(provider) {
+  if (provider == null) return null;
+  return typeof provider === "string" ? provider : provider.id ?? null;
+}
+
+// Reassemble the docTruth envelope from the four relational tables for one
+// generation. Round-trip identity (joins/supersedes byte-equal to what was
+// persisted) is best-effort: a join's `id` is the row primary key, and any
+// optional fields the producer emitted that we did not promote to columns
+// stay absent — see the contract note on `loadGeneration` for the same
+// semantic-equality vs byte-equality caveat.
+function loadDocTruth(db, generationId, provider = null) {
+  if (!generationId) return emptyDocTruth(provider);
+  const docRows = db.prepare(`SELECT id, path, content_hash, lifecycle_status, lifecycle_superseded_by, lifecycle_superseded_on, generated_at
+    FROM documents WHERE generation_id = ? ORDER BY rowid`).all(generationId);
+  const claimRows = db.prepare(`SELECT id, document_id, source, line, text, status, sha1
+    FROM claims WHERE generation_id = ? ORDER BY rowid`).all(generationId);
+  const edgeRows = db.prepare(`SELECT id, claim_id, kind, source, target, confidence, confidence_class, reason,
+    evidence_doc_path, evidence_doc_line, evidence_doc_sha1, evidence_code_path, evidence_code_exists,
+    evidence_code_node_id, evidence_code_content_hash
+    FROM claim_code_edges WHERE generation_id = ? ORDER BY rowid`).all(generationId);
+  const superRows = db.prepare(`SELECT id, source_kind, source_doc, source_line, source_text, source_external,
+    target_doc, target_external, target_match, superseded_on
+    FROM document_supersession WHERE generation_id = ? ORDER BY rowid`).all(generationId);
+
+  if (docRows.length === 0 && claimRows.length === 0 && edgeRows.length === 0 && superRows.length === 0) {
+    return emptyDocTruth(provider);
+  }
+
+  const joins = edgeRows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    source: row.source,
+    target: row.target,
+    confidence: row.confidence ?? 1,
+    confidenceClass: row.confidence_class ?? undefined,
+    reason: row.reason ?? undefined,
+    evidence: {
+      docRef: row.evidence_doc_path ? { path: row.evidence_doc_path, line: row.evidence_doc_line ?? null, sha1: row.evidence_doc_sha1 ?? null } : null,
+      codeRef: row.evidence_code_path ? { path: row.evidence_code_path, exists: row.evidence_code_exists === 0 ? false : true } : null,
+      codeNode: row.evidence_code_node_id ? { id: row.evidence_code_node_id, path: row.evidence_code_path ?? null, contentHash: row.evidence_code_content_hash ?? null } : null,
+    },
+  }));
+  const supersedes = superRows.map((row) => {
+    const source = row.source_external === 1 ? { external: true } : { doc: row.source_doc };
+    if (row.source_line != null && !row.source_external) source.line = row.source_line;
+    if (row.source_text && !row.source_external) source.text = row.source_text;
+    const target = row.target_external === 1 ? { external: true } : { doc: row.target_doc };
+    if (row.superseded_on && !row.target_external) target.supersededOn = row.superseded_on;
+    return {
+      kind: row.source_kind ?? "supersedes",
+      source,
+      target,
+      evidence: { sourceDoc: row.source_doc ?? null, targetMatch: row.target_match ?? null },
+    };
+  });
+  return {
+    schemaVersion: 1,
+    provider,
+    joins,
+    supersedes,
+    truncated: false,
+    sourceDocMap: {
+      docs: docRows.length,
+      claims: claimRows.length,
+      generatedAt: docRows[0]?.generated_at ?? null,
+    },
+  };
+}
+
+function emptyDocTruth(provider = null) {
+  return { schemaVersion: 1, provider, joins: [], supersedes: [], truncated: false, sourceDocMap: { docs: 0, claims: 0, generatedAt: null } };
 }
 
 function parseJson(text, fallback) {

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "sourceGenerationId": "xxh128:94dac60d14e9d974e9ce1e9ef44f263d",
+  "verdicts": {
+    "reuse": [],
+    "verify": []
+  },
+  "dimensions": {
+    "reuse": [],
+    "synthesize": [
+      {
+        "dimension": "architecture",
+        "reason": "cold_start"
+      },
+      {
+        "dimension": "interfaces",
+        "reason": "cold_start"
+      },
+      {
+        "dimension": "health",
+        "reason": "cold_start"
+      },
+      {
+        "dimension": "contract",
+        "reason": "cold_start"
+      },
+      {
+        "dimension": "security",
+        "reason": "cold_start"
+      },
+      {
+        "dimension": "solid",
+        "reason": "cold_start"
+      }
+    ]
+  },
+  "complete": false
+}
