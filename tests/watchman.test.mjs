@@ -7,7 +7,7 @@ import test from "node:test";
 import { buildGraphGeneration } from "../graph/static-provider.mjs";
 import { CortexRepositoryWorker, RepositoryActor } from "../graph/watchman.mjs";
 import { closeStore, openStore } from "../graph/store-sqlite.mjs";
-import { MAX_SOURCE_FILE_BYTES } from "../graph/stable-read.mjs";
+import { MAX_SOURCE_FILE_BYTES, stableRead } from "../graph/stable-read.mjs";
 import { normalizeEvents } from "../watchman/adapter.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -89,6 +89,95 @@ test("two files arriving during one drain are both applied", async () => {
     const db = openStore(join(repo, ".agent/graph/graph.db"));
     try { assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=1").get().n, 2); }
     finally { closeStore(db); }
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("an event arriving while parsing yields is queued, never lost, and drains", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-late-event-"));
+  cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
+    const firstPath = join(repo, "src/service.ts");
+    const secondPath = join(repo, "src/store.ts");
+    writeFileSync(firstPath, `${readFileSync(firstPath, "utf8")}\nexport const pausedService = true;\n`);
+    writeFileSync(secondPath, `${readFileSync(secondPath, "utf8")}\nexport const lateStore = true;\n`);
+    let parseStarted;
+    const parseReached = new Promise((resolve) => { parseStarted = resolve; });
+    let reads = 0;
+    const readStable = (path) => {
+      const result = stableRead(path);
+      if (reads++ === 0) parseStarted();
+      return result;
+    };
+    const actor = new RepositoryActor({ root: repo, readStable });
+    actor.ingest([{ eventKind: "modify", path: "src/service.ts", observedMs: Date.now() }]);
+    const drain = actor.flush(true);
+    await parseReached;
+    assert.doesNotThrow(() => actor.ingest([{ eventKind: "modify", path: "src/store.ts", observedMs: Date.now() }]));
+    assert.equal(await drain, 2);
+    const db = openStore(join(repo, ".agent/graph/graph.db"));
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=1").get().n, 2);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM event_journal WHERE applied=0").get().n, 0);
+    } finally { closeStore(db); }
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("concurrent flush calls share one in-flight drain", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-flush-guard-"));
+  cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
+    const path = join(repo, "src/service.ts");
+    writeFileSync(path, `${readFileSync(path, "utf8")}\nexport const oneDrain = true;\n`);
+    let parseStarted;
+    const parseReached = new Promise((resolve) => { parseStarted = resolve; });
+    const actor = new RepositoryActor({
+      root: repo,
+      readStable(pathname) {
+        const result = stableRead(pathname);
+        parseStarted();
+        return result;
+      },
+    });
+    actor.ingest([{ eventKind: "modify", path: "src/service.ts", observedMs: Date.now() }]);
+    const first = actor.flush(true);
+    await parseReached;
+    const second = actor.flush(true);
+    assert.strictEqual(second, first);
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult, 1);
+    assert.equal(secondResult, 1);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("a gap recorded during a failed parse survives transaction rollback", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-watchman-gap-rollback-"));
+  cpSync(FIXTURE, repo, { recursive: true });
+  try {
+    buildGraphGeneration(repo, { outDir: ".agent", persist: true });
+    let onGap;
+    const actor = new RepositoryActor({
+      root: repo,
+      adapter: {
+        writeSnapshot: async () => {},
+        eventsSince: async () => [],
+        startWatch: async (_root, _onEvents, gap) => { onGap = gap; return { unsubscribe() {} }; },
+      },
+      readStable(path) {
+        onGap(new Error("parse failed after callback gap"));
+        throw new Error("parse failed after callback gap");
+      },
+    });
+    await actor.start();
+    actor.ingest([{ eventKind: "modify", path: "src/service.ts", observedMs: Date.now() }]);
+    await assert.rejects(actor.flush(true), /parse failed after callback gap/);
+    const db = openStore(join(repo, ".agent/graph/graph.db"));
+    try {
+      assert.equal(db.prepare("SELECT value FROM watch_state WHERE key='event_gap'").get().value, "1");
+      assert.equal(db.prepare("SELECT value FROM watch_state WHERE key='event_gap_reason'").get().value, "watch_subscription_error");
+      assert.match(db.prepare("SELECT value FROM watch_state WHERE key='last_error'").get().value, /parse failed after callback gap/);
+    } finally { closeStore(db); }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 

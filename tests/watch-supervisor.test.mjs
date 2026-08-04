@@ -85,6 +85,41 @@ test("an event gap reports degraded with the recorded error, not current", () =>
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
+test("a thrown watcher callback becomes visible as degraded status", async () => {
+  const repo = makeRepo("cortex-fleet-callback-failure-");
+  const configPath = tempConfigPath();
+  let actorRef;
+  let onEvents;
+  const supervisor = new WatchSupervisor({
+    configPath,
+    reconcile: async () => ({ ok: true }),
+    actorFactory: (options) => {
+      actorRef = new RepositoryActor({
+        ...options,
+        adapter: {
+          writeSnapshot: async () => {},
+          eventsSince: async () => [],
+          startWatch: async (_root, events) => { onEvents = events; return { unsubscribe() {} }; },
+        },
+      });
+      return actorRef;
+    },
+  });
+  try {
+    writeWatchConfig({ repos: [{ root: repo, enabled: true }] }, configPath);
+    await supervisor.start();
+    actorRef.ingest = () => { throw new Error("watch callback failed"); };
+    assert.doesNotThrow(() => onEvents([{ eventKind: "modify", path: "src/service.ts", observedMs: Date.now() }]));
+    await new Promise((resolve) => setImmediate(resolve));
+    const status = supervisor.status().repos[0];
+    assert.equal(status.freshness, FRESHNESS.DEGRADED);
+    assert.equal(status.reason, "watch_callback_error");
+  } finally {
+    await supervisor.stop();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("pending unapplied events report stale, not current", () => {
   const repo = makeRepo("cortex-fleet-pending-");
   const configPath = tempConfigPath();

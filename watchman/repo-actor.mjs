@@ -111,15 +111,21 @@ function writeRepairState(db, state) {
   else db.prepare("DELETE FROM watch_state WHERE key='repair_truncated'").run();
 }
 
-async function applyRepairPaths(db, root, paths, sourceClock, inOuterTransaction, readStable = stableRead) {
+async function prepareRepairPaths(db, root, paths, readStable = stableRead) {
+  const prepared = [];
+  for (const path of paths) prepared.push({ path, delta: await deltaFor(db, root, { eventKind: "repair", path }, readStable) });
+  return prepared;
+}
+
+function applyRepairPaths(db, root, prepared, sourceClock, inOuterTransaction) {
   const batches = [];
-  for (let index = 0; index < paths.length; index += REPAIR_BATCH) batches.push(paths.slice(index, index + REPAIR_BATCH));
+  for (let index = 0; index < prepared.length; index += REPAIR_BATCH) batches.push(prepared.slice(index, index + REPAIR_BATCH));
   for (const batch of batches) {
     const ownBatch = !inOuterTransaction;
     if (ownBatch) db.exec("BEGIN IMMEDIATE");
     try {
-      for (const path of batch) {
-        applyFileDelta(db, { ...await deltaFor(db, root, { eventKind: "repair", path }, readStable), sourceClock }, { inTransaction: true, repoRoot: root, outDir: ".agent" });
+      for (const { path, delta } of batch) {
+        applyFileDelta(db, { ...delta, sourceClock }, { inTransaction: true, repoRoot: root, outDir: ".agent" });
       }
       if (ownBatch) db.exec("COMMIT");
     } catch (error) {
@@ -131,19 +137,26 @@ async function applyRepairPaths(db, root, paths, sourceClock, inOuterTransaction
 
 async function applyJournalEvent(db, root, row, maxDependentFiles = MAX_DEPENDENT_FILES, readStable = stableRead) {
   const closure = collectDependents(db, row.path, { maxHops: MAX_HOPS, maxFiles: maxDependentFiles });
-  const sameOuter = closure.paths.length <= REPAIR_BATCH;
-  if (sameOuter) db.exec("BEGIN IMMEDIATE");
+  const event = { eventKind: row.event_kind, path: row.path, renameTo: row.rename_to };
+  const baseDelta = await deltaFor(db, root, event, readStable);
+  const base = applyFileDelta(db, { ...baseDelta, sourceClock: row.source_clock, journalSeq: row.seq }, { repoRoot: root, outDir: ".agent" });
+  let repairDeltas = [];
   try {
-    const event = { eventKind: row.event_kind, path: row.path, renameTo: row.rename_to };
-    const base = applyFileDelta(db, { ...await deltaFor(db, root, event, readStable), sourceClock: row.source_clock, journalSeq: row.seq }, { inTransaction: sameOuter, repoRoot: root, outDir: ".agent" });
-    if (base.applied && !base.noop && closure.paths.length) await applyRepairPaths(db, root, closure.paths, row.source_clock, sameOuter, readStable);
+    // The base delta is committed before dependent parsing starts. This keeps
+    // all awaits outside write locks while ensuring repair deltas observe the
+    // freshly-applied source facts, matching a cold build.
+    if (base.applied && !base.noop && closure.paths.length) {
+      repairDeltas = await prepareRepairPaths(db, root, closure.paths, readStable);
+      if (repairDeltas.length) applyRepairPaths(db, root, repairDeltas, row.source_clock, false);
+    }
+    db.exec("BEGIN IMMEDIATE");
     if (closure.truncated) writeRepairState(db, { path: row.path, remaining: closure.remaining });
     else writeRepairState(db, null);
     db.prepare("UPDATE event_journal SET applied=1, applied_clock=? WHERE seq=?").run(base.appliedClock ?? row.source_clock, row.seq);
-    if (sameOuter) db.exec("COMMIT");
+    db.exec("COMMIT");
     return base;
   } catch (error) {
-    if (sameOuter) db.exec("ROLLBACK");
+    try { db.exec("ROLLBACK"); } catch {}
     throw error;
   }
 }
@@ -230,6 +243,7 @@ export class RepositoryActor extends EventEmitter {
     // pass.
     this.reconcileInFlight = false;
     this.reconcilePending = false;
+    this.drainInFlight = null;
   }
 
   log(error) {
@@ -291,7 +305,7 @@ export class RepositoryActor extends EventEmitter {
   // this actor (log + failure count), so it stays visible rather than silent.
   guardCallback(work) {
     try { return work(); } catch (error) {
-      try { this.handleFailure(error); } catch { this.log(error); }
+      try { this.handleFailure(error, "watch_callback_error"); } catch { this.log(error); }
       return undefined;
     }
   }
@@ -339,9 +353,15 @@ export class RepositoryActor extends EventEmitter {
     return appended;
   }
 
-  async flush(force = false) {
+  flush(force = false) {
+    if (this.drainInFlight) return this.drainInFlight;
     const db = this.openDbOnce();
-    return await drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles, readStable: this.readStable });
+    const drain = drainJournal(db, this.root, { force, maxDependentFiles: this.maxDependentFiles, readStable: this.readStable });
+    const settledDrain = drain.finally(() => {
+      if (this.drainInFlight === settledDrain) this.drainInFlight = null;
+    });
+    this.drainInFlight = settledDrain;
+    return settledDrain;
   }
 
   scheduleFlush() {
@@ -352,10 +372,11 @@ export class RepositoryActor extends EventEmitter {
     this.timer.unref?.();
   }
 
-  handleFailure(error) {
+  handleFailure(error, reason = null) {
     this.failures += 1;
     this.log(error);
-    if (this.failures >= 5) this.markGap(error, isOverflowError(error) ? "event_overflow" : "watch_subscription_error");
+    if (reason) this.markGap(error, reason);
+    else if (this.failures >= 5) this.markGap(error, isOverflowError(error) ? "event_overflow" : "watch_subscription_error");
     const delay = this.failures >= 5 ? 60000 : Math.min(30000, 1000 * 2 ** (this.failures - 1));
     clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => this.start().catch(() => {}), delay);
