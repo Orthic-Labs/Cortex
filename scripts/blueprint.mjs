@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
 import { createXXHash128 } from "hash-wasm";
+// Phase 7.5 — runtime capability check. Emits `unsupported_node_runtime`
+// with a structured payload before any work begins; surfaces `node:sqlite`
+// availability instead of dying with ERR_UNKNOWN_BUILTIN_MODULE on Node <22.
+import { requireRuntime } from "../lib/runtime-capabilities.mjs";
+requireRuntime();
 
 // XXH3-128 everywhere in blueprint: these are content/identity digests for
 // regenerable artifacts, never tamper-evidence. (Morph's payload_sha256 is the

@@ -94,6 +94,12 @@ const IGNORED = new Set([
   "out",
   "vendor",
   ".serverless",
+  // Defect 17 — fixture leak: eval/fixture repositories used by the
+  // qualification suite. Walking these on a real repo overflows the graph
+  // with hand-built test fixtures and pollutes evidence fingerprints.
+  // Excluded at every nesting depth.
+  "evals",
+  "fixture-repos",
 ]);
 export const SCAN_EXCLUSIONS = Object.freeze([...IGNORED].sort());
 const IGNORED_FILE_NAMES = new Set([
@@ -604,11 +610,69 @@ export function createContextCandidateSet(generation, options = {}) {
   };
 }
 
-export function repositoryIdentity(repoRoot) {
+// Normalize a git remote URL into host/owner/repo so the same repository
+// produces the same identity regardless of where it is checked out. Accepts:
+//   https://github.com/owner/repo(.git)
+//   git@github.com:owner/repo(.git)
+//   ssh://git@github.com/owner/repo(.git)
+//   git://github.com/owner/repo(.git)
+//   /local/path (treated as no remote — caller falls back to a local UUID).
+export function normalizeGitOrigin(rawOrigin) {
+  const origin = String(rawOrigin ?? "").trim();
+  if (!origin) return null;
+  const sshShort = origin.match(/^[a-zA-Z0-9_.-]+@([^:]+):(.+?)(?:\.git)?$/);
+  if (sshShort) return { host: sshShort[1], owner: sshShort[2].split("/").slice(0, -1).join("/") || sshShort[2].split("/")[0], repo: sshShort[2].split("/").at(-1) };
+  const cleaned = origin.replace(/^git\+/, "").replace(/\.git$/, "");
+  try {
+    const url = new URL(cleaned);
+    const parts = url.pathname.replace(/^\//, "").split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+    return { host: url.host, owner: parts.slice(0, -1).join("/"), repo: parts.at(-1) };
+  } catch {
+    return null;
+  }
+}
+
+export function repositoryIdentity(repoRoot, options = {}) {
   const root = canonicalRoot(repoRoot).replaceAll("\\", "/");
+  const installationId = options.installationId ?? process.env.CORTEX_INSTALLATION_ID ?? null;
   const gitOrigin = spawnSync("git", ["-C", root, "config", "--get", "remote.origin.url"], { encoding: "utf8" });
   const origin = gitOrigin.status === 0 ? gitOrigin.stdout.trim() : "";
-  return { repoId: `xxh128:${xxh128(`${root}\n${origin}`)}`, repoRoot: root, originUrl: origin || null };
+  const parsed = origin ? normalizeGitOrigin(origin) : null;
+  // Phase 7.5 — repoId is now derived from normalized host/owner/repo, with
+  // a local UUIDv5 fallback when no remote is configured. Path-dependent
+  // identity (the old "xxh128(absolute_root + origin)") made the same repo
+  // a different identity at every checkout path; consumers downstream
+  // (federation cache, scope grants, orientation receipts) now treat the
+  // GitHub repo "foo/bar" the same regardless of clone location. Keep
+  // `repoRoot` as a SEPARATE field — it still describes WHERE the operation
+  // is anchored, even though it no longer hashes into the id.
+  let repoId;
+  if (parsed) {
+    const components = [parsed.host, parsed.owner, parsed.repo].map((part) => String(part).toLowerCase()).join("/");
+    repoId = `xxh128:${xxh128(`host-owner-repo\n${components}`)}`;
+  } else {
+    // No remote — synthesize a stable local identity from the canonical root
+    // and a process-stable UUID. The UUID is generated once per process
+    // installation so a single checkout keeps a stable identity across
+    // rebuilds; a fresh clone produces a fresh identity (which is the only
+    // honest answer for a repo with no remote).
+    const localKey = process.env.CORTEX_LOCAL_REPO_ID ?? installationId ?? `local:${xxh128(root)}`;
+    repoId = `xxh128:${xxh128(`local\n${localKey}`)}`;
+  }
+  return {
+    repoId,
+    repoRoot: root,
+    originUrl: origin || null,
+    originHost: parsed?.host ?? null,
+    originOwner: parsed?.owner ?? null,
+    originRepo: parsed?.repo ?? null,
+    installationId,
+    // Legacy identity (path-derived): retained so callers that compared
+    // against an older receipt still resolve. Marked deprecated; new code
+    // MUST read `repoId` and `repoRoot` independently.
+    legacyRepoId: `xxh128:${xxh128(`${root}\n${origin}`)}`,
+  };
 }
 
 export function resolveGraphNode(generation, nodeId) {

@@ -16,6 +16,7 @@ import {
   listSymbolsByPath,
   listEdges,
   blastRadius,
+  traversalNeighbors,
   upsertVectors,
   searchSimilar,
   searchGenerationSymbols,
@@ -149,6 +150,98 @@ test("indexes exist on edges(source), edges(target), edges(kind)", () => {
     assert.ok(names.some((n) => n.includes("source")));
     assert.ok(names.some((n) => n.includes("target")));
     assert.ok(names.some((n) => n.includes("kind")));
+  } finally {
+    closeStore(db);
+  }
+});
+
+test("compound indexes for indexed traversal exist after migration 13", () => {
+  const db = openStore(":memory:");
+  try {
+    const rows = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'edges'").all();
+    const names = rows.map((r) => r.name);
+    assert.ok(names.includes("idx_edges_gen_source_kind"), "expected (generation_id, source, kind) compound index");
+    assert.ok(names.includes("idx_edges_gen_target_kind"), "expected (generation_id, target, kind) compound index");
+    const sourceIndex = rows.find((r) => r.name === "idx_edges_gen_source_kind");
+    assert.match(sourceIndex.sql, /generation_id.*source.*kind/i);
+  } finally {
+    closeStore(db);
+  }
+});
+
+test("traversalNeighbors expands the frontier in SQL, bounded by generation_id and depth", () => {
+  const db = openStore(":memory:");
+  try {
+    bulkInsertGeneration(db, sampleGeneration());
+    // sampleGeneration is gen-1: edges are
+    //   b.ts IMPORTS a.ts    (source=b.ts, target=a.ts)
+    //   c.ts IMPORTS b.ts    (source=c.ts, target=b.ts)
+    //   d.ts IMPORTS c.ts    (source=d.ts, target=c.ts)
+    //   file:a.ts CONTAINS symbol:a.ts::foo
+    //
+    // Direction "out" walks edges where edge.source is in the frontier ->
+    // edge.target is new. Direction "in" walks edges where edge.target is in
+    // the frontier -> edge.source is new.
+    //
+    // So from a.ts, going "out" via IMPORTS reaches only a.ts (no outgoing
+    // IMPORTS edges). Going "in" via IMPORTS from a.ts at maxDepth=1 reaches
+    // the seed + b.ts (the 1-hop in-neighbor); maxDepth=2 reaches c.ts;
+    // maxDepth=3 reaches d.ts.
+    const in0 = traversalNeighbors(db, { seedIds: ["file:a.ts"], maxDepth: 0, direction: "in", generationId: "gen-1", kinds: ["IMPORTS"] });
+    assert.deepEqual(in0.seenNodes, ["file:a.ts"]);
+    const in1 = traversalNeighbors(db, { seedIds: ["file:a.ts"], maxDepth: 1, direction: "in", generationId: "gen-1", kinds: ["IMPORTS"] });
+    assert.deepEqual(in1.seenNodes.sort(), ["file:a.ts", "file:b.ts"]);
+    assert.equal(in1.depths.get("file:b.ts"), 1);
+    const in3 = traversalNeighbors(db, { seedIds: ["file:a.ts"], maxDepth: 3, direction: "in", generationId: "gen-1", kinds: ["IMPORTS"] });
+    assert.deepEqual(in3.seenNodes.sort(), ["file:a.ts", "file:b.ts", "file:c.ts", "file:d.ts"]);
+    assert.equal(in3.depths.get("file:d.ts"), 3);
+    // Direction "both" from d.ts at depth 1 reaches c.ts only.
+    const both1 = traversalNeighbors(db, { seedIds: ["file:d.ts"], maxDepth: 1, direction: "both", generationId: "gen-1", kinds: ["IMPORTS"] });
+    assert.deepEqual(both1.seenNodes.sort(), ["file:c.ts", "file:d.ts"]);
+    // No generation_id -> early return (not a crash).
+    assert.deepEqual(traversalNeighbors(db, { seedIds: ["file:a.ts"], maxDepth: 1 }).seenNodes, []);
+  } finally {
+    closeStore(db);
+  }
+});
+
+test("traversalNeighbors honours the kind filter", () => {
+  const db = openStore(":memory:");
+  try {
+    // Build a generation with a mix of edge kinds so the kind filter has
+    // something to do. generationId is explicit so the test does not rely on
+    // the bulkInsertGeneration "unknown" default.
+    const generation = {
+      manifest: { generationId: "gen-kinds" },
+      nodes: [
+        fileNode("a.ts", "h-a"),
+        fileNode("b.ts", "h-b"),
+        symNode("a.ts", "foo", ["Function"]),
+      ],
+      edges: [
+        importEdge("b.ts", "a.ts"),
+        { id: "edge:CONTAINS:file:a.ts->symbol:a.ts::foo", kind: "CONTAINS", source: "file:a.ts", target: "symbol:a.ts::foo", confidence: 1, resolved: true, evidence: [] },
+      ],
+      fileReports: [],
+    };
+    bulkInsertGeneration(db, generation);
+    const onlyImports = traversalNeighbors(db, {
+      seedIds: ["file:a.ts"],
+      maxDepth: 2,
+      direction: "both",
+      generationId: "gen-kinds",
+      kinds: ["IMPORTS"],
+    });
+    // With kinds=["IMPORTS"], the CONTAINS edge to the symbol must NOT be in
+    // the visited set; the symbol must not be visited either.
+    assert.ok(!onlyImports.seenNodes.includes("symbol:a.ts::foo"));
+    const both = traversalNeighbors(db, {
+      seedIds: ["file:a.ts"],
+      maxDepth: 2,
+      direction: "both",
+      generationId: "gen-kinds",
+    });
+    assert.ok(both.seenNodes.includes("symbol:a.ts::foo"));
   } finally {
     closeStore(db);
   }

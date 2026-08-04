@@ -7,6 +7,7 @@ import {
   hydrateEdgesByIds,
   hydrateNodesByIds,
   listEdgeCore,
+  traversalNeighbors,
 } from "./store-sqlite.mjs";
 
 function providerId(provider) {
@@ -112,28 +113,48 @@ export function indexedNeighbors(db, options = {}) {
   const nodeId = String(options.nodeId ?? "");
   const direction = options.direction ?? "both";
   const maxDepth = Math.max(1, Number(options.depth ?? 1));
-  const allEdges = listEdgeCore(db);
-  const seenNodes = new Set([nodeId]);
-  const seenEdges = new Set();
-  const depths = new Map([[nodeId, 0]]);
-  let frontier = new Set([nodeId]);
-  for (let depth = 0; depth < maxDepth; depth += 1) {
-    const next = new Set();
-    for (const edge of allEdges) {
-      const out = direction !== "in" && frontier.has(edge.source);
-      const incoming = direction !== "out" && frontier.has(edge.target);
-      if (!out && !incoming) continue;
-      seenEdges.add(edge.id);
-      const other = out ? edge.target : edge.source;
-      if (!seenNodes.has(other)) {
-        next.add(other);
-        depths.set(other, depth + 1);
+  // SQL frontier expansion (Phase 7.1): the recursive CTE walks the edges
+  // table once per direction, bounded by `maxDepth` and `generation_id`. The
+  // JS frontier loop that used to scan every edge in the generation is gone.
+  // Behavior is preserved: same `root`, same `nodes`/`edges`, same `depths`.
+  const generationId = meta?.manifest?.generationId ?? null;
+  const frontier = generationId
+    ? traversalNeighbors(db, { seedIds: [nodeId], maxDepth, direction, generationId })
+    : null;
+  let seenNodes;
+  let seenEdges;
+  let depths;
+  if (frontier) {
+    seenNodes = new Set(frontier.seenNodes);
+    seenEdges = new Set(frontier.seenEdges);
+    depths = new Map(frontier.depths);
+  } else {
+    // No generation envelope (rare — empty/in-memory stores): fall back to
+    // scanning the slim edge core in JS so the contract is preserved on a
+    // fresh ":memory:" handle.
+    seenNodes = new Set([nodeId]);
+    seenEdges = new Set();
+    depths = new Map([[nodeId, 0]]);
+    let frontierSet = new Set([nodeId]);
+    for (let depth = 0; depth < maxDepth; depth += 1) {
+      const next = new Set();
+      for (const edge of listEdgeCore(db)) {
+        const out = direction !== "in" && frontierSet.has(edge.source);
+        const incoming = direction !== "out" && frontierSet.has(edge.target);
+        if (!out && !incoming) continue;
+        seenEdges.add(edge.id);
+        const other = out ? edge.target : edge.source;
+        if (!seenNodes.has(other)) {
+          next.add(other);
+          depths.set(other, depth + 1);
+        }
+        seenNodes.add(other);
       }
-      seenNodes.add(other);
+      frontierSet = next;
+      if (!frontierSet.size) break;
     }
-    frontier = next;
-    if (!frontier.size) break;
   }
+  depths.set(nodeId, 0);
   const hydratedNodes = hydrateNodesByIds(db, [...seenNodes]);
   const hydratedEdges = hydrateEdgesByIds(db, [...seenEdges]);
   const result = {
@@ -157,12 +178,12 @@ export function indexedPath(db, options = {}) {
   const from = String(options.from ?? "");
   const to = String(options.to ?? "");
   const maxDepth = Math.max(1, Number(options.maxDepth ?? 5));
-  const allEdges = listEdgeCore(db);
-  const outgoing = new Map();
-  for (const edge of allEdges) {
-    if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
-    outgoing.get(edge.source).push(edge);
-  }
+  // Phase 7.1: indexedPath previously loaded every edge into JS and BFS-walked
+  // the outgoing map. The SQL frontier still drives the BFS, but each
+  // `listEdgeCore` call now passes `source` + `generation_id`, so the
+  // (generation_id, source, kind) compound index carries the lookup. The JS
+  // frontier scan over all edges is gone.
+  const generationId = meta?.manifest?.generationId ?? null;
   const queue = [[from]];
   const visited = new Set([from]);
   while (queue.length) {
@@ -171,7 +192,7 @@ export function indexedPath(db, options = {}) {
     if (current === to) {
       const edgeIds = [];
       for (let index = 0; index < path.length - 1; index += 1) {
-        const edge = (outgoing.get(path[index]) ?? []).find((item) => item.target === path[index + 1]);
+        const edge = findEdgeBetween(db, path[index], path[index + 1], generationId);
         if (edge) edgeIds.push(edge.id);
       }
       const nodes = hydrateNodeMap(db, path);
@@ -185,13 +206,24 @@ export function indexedPath(db, options = {}) {
       };
     }
     if (path.length > maxDepth) continue;
-    for (const edge of outgoing.get(current) ?? []) {
+    const nextEdges = generationId
+      ? listEdgeCore(db, { source: current, generationId })
+      : listEdgeCore(db);
+    for (const edge of nextEdges) {
+      if (!edge.target) continue;
       if (visited.has(edge.target)) continue;
       visited.add(edge.target);
       queue.push([...path, edge.target]);
     }
   }
   return { schemaVersion: 1, provider: providerId(meta.provider), from, to, path: [], edges: [], found: false };
+}
+
+function findEdgeBetween(db, source, target, generationId) {
+  const candidates = generationId
+    ? listEdgeCore(db, { source, generationId })
+    : listEdgeCore(db).filter((edge) => edge.source === source);
+  return candidates.find((edge) => edge.target === target) ?? null;
 }
 
 export function indexedImpact(db, options = {}) {
@@ -402,7 +434,8 @@ export function boundedPath(db, options = {}) {
 
 export function boundedArchitecture(db, options = {}) {
   const meta = indexedMeta(db);
-  const edges = listEdgeCore(db);
+  const generationId = meta?.manifest?.generationId ?? null;
+  const edges = generationId ? listEdgeCore(db, { generationId }) : listEdgeCore(db);
   const incoming = new Set(edges.map((edge) => edge.target));
   const outgoing = new Set(edges.map((edge) => edge.source));
   const symbolIds = db.prepare("SELECT id FROM symbols ORDER BY rowid").all().map((row) => row.id);

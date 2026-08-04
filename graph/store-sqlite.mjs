@@ -399,6 +399,22 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_fact_owner_repo_root ON fact_owner(repo_root);
     `);
   },
+  // Migration 13 — compound indexes for indexed traversal.
+  //
+  // Phase 7.1 of the context-stack plan moves the neighbor/path frontier out of
+  // JavaScript into a recursive CTE that joins `edges` on (generation_id, source/target).
+  // Without a compound index, SQLite falls back to scanning every edge in the
+  // generation for each iteration of the recursion. The compound indexes below
+  // let the planner drive the CTE from a generation-bounded seek on the seed
+  // ids, instead of a full scan. Created idempotently so a store rebuilt by an
+  // older build picks them up on next open without conflicting with a future
+  // schema that already names them.
+  (db) => {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_edges_gen_source_kind ON edges(generation_id, source, kind);
+      CREATE INDEX IF NOT EXISTS idx_edges_gen_target_kind ON edges(generation_id, target, kind);
+    `);
+  },
 ];
 
 /** Current schema version = number of migrations. Derived, so it cannot desync. */
@@ -1029,6 +1045,68 @@ export function getGenerationEnvelope(db, key = null) {
     }
   }
   return key === null ? envelope : envelope[key] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Indexed traversal — SQL frontier expansion.
+//
+// Phase 7.1 moves the neighbor/path frontier out of JavaScript into a recursive
+// CTE that joins `edges` on (generation_id, source/target). The CTE keeps the
+// frontier bounded by `maxDepth` and reports the SHORTEST depth each reachable
+// node is reached from the seed set. Direction semantics match `indexedNeighbors`:
+//   - "out"   follows edges where edge.source is in the frontier -> edge.target is new.
+//   - "in"    follows edges where edge.target is in the frontier -> edge.source is new.
+//   - "both"  follows either direction in the same pass and reports each node at
+//             its shortest depth from the seed, regardless of which side matched.
+//
+// Caller passes `kinds` to limit which edge kinds participate (null = all). The
+// generation_id is REQUIRED: an unfiltered scan over every edge of every
+// generation in the store is the very workload this function exists to avoid.
+// ---------------------------------------------------------------------------
+
+export function traversalNeighbors(db, options = {}) {
+  const seedIds = [...new Set((options.seedIds ?? []).map(String))];
+  const maxDepth = Number.isFinite(options.maxDepth) ? Math.max(0, options.maxDepth) : 1;
+  const direction = options.direction ?? "both";
+  const generationId = String(options.generationId ?? "");
+  if (!seedIds.length || !generationId) return { seenNodes: [], seenEdges: [], depths: new Map(), edgeRows: [] };
+  const includeKind = Array.isArray(options.kinds) && options.kinds.length > 0;
+  const kindParam = includeKind ? JSON.stringify(options.kinds) : null;
+  const kindClause = includeKind ? "AND e.kind IN (SELECT value FROM json_each(?))" : "";
+  const inClause = direction === "out" ? "e.source = b.node_id"
+                  : direction === "in" ? "e.target = b.node_id"
+                  : "(e.source = b.node_id OR e.target = b.node_id)";
+  const nextId = direction === "out" ? "e.target"
+               : direction === "in" ? "e.source"
+               : "(CASE WHEN e.source = b.node_id THEN e.target ELSE e.source END)";
+  const seedJson = JSON.stringify(seedIds);
+  const rows = db.prepare(`
+    WITH RECURSIVE frontier(node_id, depth) AS (
+      SELECT je.value, 0 FROM json_each(?) je
+      UNION
+      SELECT ${nextId}, b.depth + 1
+      FROM edges e
+      JOIN frontier b ON ${inClause}
+      WHERE b.depth < ?
+        AND e.generation_id = ?
+        ${kindClause}
+    )
+    SELECT node_id, MIN(depth) AS depth FROM frontier GROUP BY node_id ORDER BY depth, node_id
+  `).all(seedJson, maxDepth, generationId, ...(includeKind ? [kindParam] : []));
+  const seenNodes = rows.map((r) => r.node_id);
+  const depths = new Map(rows.map((r) => [r.node_id, r.depth]));
+  if (!seenNodes.length) return { seenNodes, seenEdges: [], depths, edgeRows: [] };
+  const seenJson = JSON.stringify(seenNodes);
+  const edgeRows = db.prepare(`
+    SELECT e.id, e.kind, e.source, e.target, e.confidence, e.confidence_tier
+    FROM edges e
+    WHERE e.generation_id = ?
+      AND e.source IN (SELECT value FROM json_each(?))
+      AND (e.target IS NULL OR e.target IN (SELECT value FROM json_each(?)))
+      ${kindClause}
+  `).all(generationId, seenJson, seenJson, ...(includeKind ? [kindParam] : []));
+  const seenEdges = new Set(edgeRows.map((row) => row.id));
+  return { seenNodes, seenEdges: [...seenEdges], depths, edgeRows };
 }
 
 /** Read indexed file hashes for freshness checks, without loading graph nodes. */
