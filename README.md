@@ -2,7 +2,7 @@
 
 **Every repository tells two stories: what the docs claim and what the code does. Cortex maps both into one local, evidence-backed graph, so people and agents can find what is true, stale, contradictory, or still unknown — before changing the system.**
 
-<sub>Nodes, edges, and flows are branded <b>Neurons</b>, <b>Synapses</b>, and <b>Circuits</b>. Formerly Blueprint; the <code>blueprint</code> bin survives as a frozen compatibility alias.</sub>
+<sub>Nodes, edges, and flows are branded <b>Neurons</b>, <b>Synapses</b>, and <b>Circuits</b>.</sub>
 
 ![license](https://img.shields.io/badge/license-source--available-5362d8?style=flat-square&labelColor=111318)
 ![storage](https://img.shields.io/badge/graph-node%3Asqlite%2C%20zero%20server-5362d8?style=flat-square&labelColor=111318)
@@ -74,11 +74,10 @@ python3 -m pip install -r requirements-test.txt   # for the full workspace suite
 npm run test:all
 ```
 
-Bins: `cortex`, `cortex-watch`, `cortex-mcp` (MCP server), `cortex-install`, and the frozen `blueprint` alias. Artifact paths (`.agent/`, `.blueprint/manifest.json`), provider IDs, and the `blueprint_orientation` evidence key are frozen for installed-agent compatibility.
+Bins: `cortex`, `cortex-watch`, `cortex-mcp` (MCP server), `cortex-install`.
 
 ## Recent
 
-- **Blueprint → Cortex rename** with a hard compatibility freeze on bins, artifact paths, and evidence keys.
 - **Freshness hardening** — canonicalized watcher paths, snapshot-backed freshness proofs, batched barrier writes, logically-sound incremental graph freshness.
 - **Federation contract** — barrier fan-out across enrolled repos with independent receipts; one repo's timeout can't block another.
 - **MCP server + host installers**, task-scoped grants, bounded neighborhoods, merkle reconciliation, resident watchman.
@@ -91,13 +90,11 @@ Parser depth varies by language (lexical fallback is broader than AST coverage).
 
 Source-available proprietary license for internal use and evaluation; redistribution, repackaging, and competing use are prohibited. See [LICENSE](LICENSE).
 
-<!-- blueprint:docs:start -->
 ## Repository truth docs
 - [Product overview](docs/product.md) — what this is and does (generated, code-grounded)
 - [Architecture](docs/architecture.md) — components, flows, interfaces (generated, code-grounded)
-<!-- blueprint:docs:end -->
 
 ---
 
 <sub><b><a href="https://orthic-labs.github.io">Orthic Labs</a></b> — local-first infrastructure for AI-assisted development.<br>
-<a href="https://github.com/Orthic-Labs/Membrane">Membrane</a> · <a href="https://github.com/Orthic-Labs/Cortex">Cortex</a> · <a href="https://github.com/Orthic-Labs/Sentinel">Sentinel</a> · <a href="https://github.com/Orthic-Labs/Roundtable">Roundtable</a> · <a href="https://github.com/Orthic-Labs/Morph">Morph</a> · <a href="https://github.com/Orthic-Labs/CutRight">CutRight</a> · <a href="https://github.com/Orthic-Labs/claudecodeX">claudecodeX</a></sub>
+<a href="https://github.com/Orthic-Labs/Membrane">Membrane</a> · <a href="https://github.com/Orthic-Labs/Cortex">Cortex</a> · <a href="https://github.com/Orthic-Labs/Sentinel">Sentinel</a> · <a href="https://github.com/Orthic-Labs/Morph">Morph</a> · <a href="https://github.com/Orthic-Labs/CutRight">CutRight</a> · <a href="https://github.com/Orthic-Labs/claudecodeX">claudecodeX</a></sub>
