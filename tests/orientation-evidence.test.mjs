@@ -30,7 +30,7 @@ test("candidateSetDigest is stable for equivalent candidate sets", () => {
   assert.notEqual(candidateSetDigest(a), candidateSetDigest(b));
 });
 
-test("buildOrientationEvidence matches Sentinel-consumable shape", () => {
+test("buildOrientationEvidence matches Forge-consumable shape", () => {
   const receipt = buildOrientationReceipt({
     receiptId: "rec-1",
     sessionId: "s",

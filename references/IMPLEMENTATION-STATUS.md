@@ -100,7 +100,7 @@ output) and also publishes once. Lexical test helpers pass `persist: true` on
 (`orient` / `expand` / `status` / `revoke`) returns a neutral contract (`allow|continue|block|noop`)
 usable by Crypt hosts. Host-owned receipts live in `lib/receipt-store.mjs` (default
 `~/.blueprint/receipts` or `BLUEPRINT_RECEIPT_STORE`) keyed by session/task/repo/generation — data,
-not enforcement. `lib/orientation-evidence.mjs` emits Sentinel-consumable `blueprint_orientation`
+not enforcement. `lib/orientation-evidence.mjs` emits Forge-consumable `blueprint_orientation`
 evidence (+ optional JSON file). No fail-closed hooks, shell classifier, MCP server, or CodeRight
 broker in this release. Standalone packaging is `@orthic-labs/cortex@0.2.0` with `bin`, `files`,
 `engines`, and `exports`; `npm test` runs `tests/*.test.mjs` only; monorepo contract tests live under

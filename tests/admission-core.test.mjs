@@ -93,7 +93,7 @@ test("orient blocks when graph is missing — decision only, no hooks", async ()
   }
 });
 
-test("orient issues a host receipt and Sentinel evidence file", async () => {
+test("orient issues a host receipt and Forge evidence file", async () => {
   const { api, storeDir, evidenceDir } = makeIsolatedAdmission();
   try {
     const result = await api.orient({
