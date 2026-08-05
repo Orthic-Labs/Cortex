@@ -227,7 +227,7 @@ export function extractImports(file, files) {
 }
 
 // Companion to extractImports: returns the RELATIVE import specifiers that
-// looked like a real repo-local import but resolved to no file (blueprint
+// looked like a real repo-local import but resolved to no file (cortex
 // B3 — unresolved references must be tagged, never silently dropped).
 // extractImports() only ever returns specifiers that DID resolve, so this
 // walks the same relative-specifier candidates and reports the misses.

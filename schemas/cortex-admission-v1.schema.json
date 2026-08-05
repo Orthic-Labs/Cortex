@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://orthic.labs/schemas/blueprint-admission-v1.json",
-  "title": "BlueprintAdmissionDecisionV1",
+  "$id": "https://orthic.labs/schemas/cortex-admission-v1.json",
+  "title": "CortexAdmissionDecisionV1",
   "type": "object",
   "additionalProperties": false,
   "required": [

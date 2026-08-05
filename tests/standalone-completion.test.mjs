@@ -1,8 +1,8 @@
-// tests/standalone-completion.test.mjs — Blueprint standalone e2e-finish regression suite
+// tests/standalone-completion.test.mjs — Cortex standalone e2e-finish regression suite
 //
-// Covers the requirements from the `minimax/blueprint-e2e-finish` branch:
+// Covers the requirements from the `minimax/cortex-e2e-finish` branch:
 //   1. No START-HERE write or entrypoint anywhere in the artifact tree.
-//   2. map.json, .blueprint/manifest.json, generated-document headers, graph manifest,
+//   2. map.json, .agent/manifest.json, generated-document headers, graph manifest,
 //      and sourceSignature identify the same generation.
 //   3. Generated docs are excluded from the next build's discovery and signature.
 //   4. Real non-empty ContextCandidateSet on a non-trivial task with repo evidence.
@@ -36,13 +36,13 @@ import { readEnvelope, mutateManifest } from "./_store-helpers.mjs";
 import { readGeneration } from "../graph/static-provider.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-const BLUEPRINT = join(HERE, "..");
-const CLI = join(BLUEPRINT, "scripts/blueprint.mjs");
-const FIXTURE = join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+const CORTEX = join(HERE, "..");
+const CLI = join(CORTEX, "scripts/cortex.mjs");
+const FIXTURE = join(CORTEX, "evals/fixture-repos/typescript-commerce");
 
 
 function makeRepo() {
-  const root = join(tmpdir(), `blueprint-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const root = join(tmpdir(), `cortex-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(root, { recursive: true });
   return root;
 }
@@ -62,7 +62,7 @@ function makeCleanRepo() {
   writeFileSync(join(root, "src/util.ts"), "export const util = () => 1;\n");
   writeFileSync(join(root, "resources/policy.json"), '{"tier":"gold"}\n');
   writeFileSync(join(root, "tsconfig.json"), '{"compilerOptions":{"strict":true}}\n');
-  writeFileSync(join(root, "README.md"), "# Sample\n\nSample repo for blueprint standalone completion.\n");
+  writeFileSync(join(root, "README.md"), "# Sample\n\nSample repo for cortex standalone completion.\n");
   writeFileSync(join(root, "AGENTS.md"), "# Agents\n\n- The product handles transcription.\n- Local-first is implemented.\n");
   return root;
 }
@@ -74,13 +74,13 @@ function runCli(repo, args) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.status !== 0 && !args.includes("--check") && !args.includes("doctor")) {
-    throw new Error(`blueprint ${args.join(" ")} exited ${result.status}: ${result.stderr}`);
+    throw new Error(`cortex ${args.join(" ")} exited ${result.status}: ${result.stderr}`);
   }
   return result.stdout;
 }
 
 // 1) No START-HERE write or entrypoint anywhere in the artifact tree.
-test("standalone: no START-HERE.md is written; map entrypoint is .blueprint/manifest.json", () => {
+test("standalone: no START-HERE.md is written; map entrypoint is .agent/manifest.json", () => {
   const repo = makeRepo();
   try {
     runCli(repo, ["build", "--out", ".agent", "--check"]);
@@ -90,10 +90,10 @@ test("standalone: no START-HERE.md is written; map entrypoint is .blueprint/mani
       ".agent/START-HERE.md must not be written (retired)",
     );
     const map = JSON.parse(readFileSync(join(repo, ".agent/map.json"), "utf8"));
-    assert.equal(map.entrypoint, ".blueprint/manifest.json", "map.entrypoint must point at portable manifest");
-    const manifest = JSON.parse(readFileSync(join(repo, ".blueprint/manifest.json"), "utf8"));
+    assert.equal(map.entrypoint, ".agent/manifest.json", "map.entrypoint must point at portable manifest");
+    const manifest = JSON.parse(readFileSync(join(repo, ".agent/manifest.json"), "utf8"));
     assert.equal(manifest.entrypoint, ".agent/", "manifest.entrypoint must point at .agent/");
-    const skillText = readFileSync(join(BLUEPRINT, "SKILL.md"), "utf8");
+    const skillText = readFileSync(join(CORTEX, "SKILL.md"), "utf8");
     const matches = [...skillText.matchAll(/START-HERE\.md/g)];
     assert.ok(matches.length <= 2, `SKILL.md mentions START-HERE ${matches.length} times; retirement notes only`);
   } finally {
@@ -107,7 +107,7 @@ test("standalone: every artifact agrees on generation identity", () => {
   try {
     runCli(repo, ["build", "--out", ".agent"]);
     const map = JSON.parse(readFileSync(join(repo, ".agent/map.json"), "utf8"));
-    const manifest = JSON.parse(readFileSync(join(repo, ".blueprint/manifest.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(repo, ".agent/manifest.json"), "utf8"));
     const graphManifest = readEnvelope(repo);
     const product = readFileSync(join(repo, "docs/product.md"), "utf8");
     const arch = readFileSync(join(repo, "docs/architecture.md"), "utf8");
@@ -180,9 +180,9 @@ test("standalone: graph candidates emits schema-valid ContextCandidateSet with r
       assert.match(c.sourceHash, /^xxh128:[a-f0-9]{32}$/, `sourceHash must be xxh128:<hex>: ${c.id}`);
       assert.match(c.sourceRef, /:\d+-\d+$/, `sourceRef must include path:startLine-endLine: ${c.id}`);
     }
-    const manifest = JSON.parse(readFileSync(join(repo, ".blueprint/manifest.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(repo, ".agent/manifest.json"), "utf8"));
     assert.equal(set.freshness.revision, manifest.generation.id, "candidate set freshness.revision must match manifest.generation.id");
-    assert.equal(set.provider, manifest.generation.toolVersions.blueprint, "candidate set provider must match manifest");
+    assert.equal(set.provider, manifest.generation.toolVersions.cortex, "candidate set provider must match manifest");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -332,7 +332,7 @@ test("standalone: unchanged rebuild is byte-identical at every artifact", () => 
       ".agent/index.json",
       ".agent/queue.json",
       ".agent/flows.json",
-      ".blueprint/manifest.json",
+      ".agent/manifest.json",
       "docs/product.md",
       "docs/architecture.md",
     ];
@@ -379,14 +379,12 @@ test("standalone: doctor --json output is parseable JSON even on missing artifac
   }
 });
 
-// Discovery must skip .agent/, .audit/, .blueprint/, caches, worktrees.
+// Discovery must skip .agent/, .audit/, caches, worktrees.
 test("standalone: hidden directories are excluded from source discovery", () => {
   const repo = makeRepo();
   try {
     mkdirSync(join(repo, ".agent"), { recursive: true });
     writeFileSync(join(repo, ".agent/leaked.md"), "# leaked\n");
-    mkdirSync(join(repo, ".blueprint"), { recursive: true });
-    writeFileSync(join(repo, ".blueprint/leaked.md"), "# leaked\n");
     mkdirSync(join(repo, ".cache"), { recursive: true });
     writeFileSync(join(repo, ".cache/leaked.md"), "# leaked\n");
     mkdirSync(join(repo, "node_modules"), { recursive: true });
@@ -397,7 +395,7 @@ test("standalone: hidden directories are excluded from source discovery", () => 
     runCli(repo, ["build", "--out", ".agent"]);
     const idx = JSON.parse(readFileSync(join(repo, ".agent/index.json"), "utf8"));
     const paths = idx.files.map((f) => f.path);
-    for (const forbidden of [".agent/leaked.md", ".blueprint/leaked.md", ".cache/leaked.md", "node_modules/leaked.md"]) {
+    for (const forbidden of [".agent/leaked.md", ".cache/leaked.md", "node_modules/leaked.md"]) {
       assert.ok(!paths.includes(forbidden), `${forbidden} must be excluded from source discovery`);
     }
     assert.ok(paths.includes("src/legit.ts"), "real source files must be included");

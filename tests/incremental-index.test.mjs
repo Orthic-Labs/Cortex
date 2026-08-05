@@ -1,6 +1,6 @@
 // B2.2 hard gate — incremental indexing and freshness.
 //
-// The plan (docs/plans/2026-07-10-blueprint-code-graph-visual-explorer-impl.md
+// The plan (docs/plans/2026-07-10-cortex-code-graph-visual-explorer-impl.md
 // §8) named this file as B2's gate and it was never written, so B2 shipped
 // ungated. These tests pin the two correctness properties the incremental path
 // depends on:

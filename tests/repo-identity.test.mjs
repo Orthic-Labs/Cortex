@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -36,7 +36,9 @@ test("repositoryIdentity derives repoId from host/owner/repo, not from the absol
     const idB = repositoryIdentity(rootB);
     assert.equal(idA.repoId, idB.repoId, "same origin at different paths must produce the same repoId");
     assert.notEqual(idA.repoId, idA.legacyRepoId, "legacy path-derived id must differ from new host/owner/repo id");
-    assert.equal(idA.repoRoot, rootA.replaceAll("\\", "/"));
+    // repoRoot is canonicalized, so compare against the resolved path: on macOS
+    // `tmpdir()` is the /var -> /private/var symlink and the raw mkdtemp path never matches.
+    assert.equal(idA.repoRoot, realpathSync(rootA).replaceAll("\\", "/"));
     assert.equal(idA.originHost, "example.com");
     assert.equal(idA.originOwner, "acme");
     assert.equal(idA.originRepo, "widgets");

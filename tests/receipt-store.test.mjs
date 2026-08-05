@@ -13,8 +13,8 @@ import {
 
 test("receipt store defaults outside the repo tree", () => {
   const dir = defaultReceiptStoreDir();
-  assert.ok(!dir.includes(`${join("blueprint", ".agent")}`));
-  assert.match(dir, /\.blueprint[/\\]receipts$/);
+  assert.ok(!dir.includes(`${join("cortex", ".agent")}`));
+  assert.match(dir, /\.agent[/\\]receipts$/);
 });
 
 test("put/get/findActive keyed by session/task/repo/generation", () => {

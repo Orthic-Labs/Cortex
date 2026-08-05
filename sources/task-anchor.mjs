@@ -19,7 +19,7 @@
 //   - bare trailing tokens like ".ts", ".mjs", ".md" that the path
 //     regex would otherwise miss
 //
-// This adapter does NOT call into Blueprint; it only inspects the task
+// This adapter does NOT call into Cortex; it only inspects the task
 // string and the filesystem. Symbol resolution is handled by `graph-resolve.mjs`.
 
 import { existsSync, statSync } from "node:fs";
@@ -34,7 +34,7 @@ import {
   xxh3Hex,
 } from "./_shared.mjs";
 
-const ADAPTER_ID = "rightcontext-sources/task-anchor";
+const ADAPTER_ID = "membrane-sources/task-anchor";
 const ADAPTER_LAYER = 1; // Layer 1 — explicit user intent (anchors)
 
 const PATH_LIKE_RE =
@@ -178,7 +178,7 @@ export function produce(task, scope) {
         endLine: body.endLine,
         bodyHash: xxh3Hex(body.text),
         estimatedTokens: Math.max(1, body.endLine - body.startLine + 1),
-        resolver: `rightcontext sources read --anchor ${safe}`,
+        resolver: `membrane sources read --anchor ${safe}`,
       }),
     );
   }

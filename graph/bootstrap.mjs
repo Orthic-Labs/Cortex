@@ -1,21 +1,21 @@
-// Bootstrap from the tracked `.blueprint/` portable contract.
+// Bootstrap from the tracked `.agent/` portable contract.
 //
-// If `.blueprint/manifest.json` exists in the repo, it is the authoritative
+// If `.agent/manifest.json` exists in the repo, it is the authoritative
 // descriptor for the canonical graph generation. Bootstrap verifies the
 // recorded sourceHash against the current checkout; on match, it returns the
 // tracked generation descriptor. On mismatch, it returns `null` so callers
 // fall back to `buildGraphGeneration`.
 //
 // Per dispatch G1: "Add bootstrap behavior that reconstructs a usable local
-// graph from tracked `.blueprint/` data and the current checkout without
+// graph from tracked `.agent/` data and the current checkout without
 // machine-specific paths." Tracked portable contract files:
-//   .blueprint/manifest.json
-//   .blueprint/schemas/*.json
-//   .blueprint/coverage.json
-//   .blueprint/contradictions.json
+//   .agent/manifest.json
+//   .agent/schemas/*.json
+//   .agent/coverage.json
+//   .agent/contradictions.json
 // Machine-local artifacts (kept untracked):
-//   .blueprint/index.jsonl
-//   .blueprint/cache/  .blueprint/tmp/  .blueprint/worktrees/
+//   .agent/index.jsonl
+//   .agent/cache/  .agent/tmp/  .agent/worktrees/
 //
 // The manifest itself contains no absolute paths; it identifies a generation
 // by its content-hash and supported languages, and the source tree by the
@@ -28,12 +28,12 @@ import { scanSourcesPublic, sourceHashPublic } from "./static-provider.mjs";
 import { findAbsolutePathIndicators, validatePortableManifest } from "./portable-manifest.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const BLUEPRINT_DIR_NAME = ".blueprint";
+export const AGENT_DIR_NAME = ".agent";
 export const MANIFEST_NAME = "manifest.json";
 
 function findTrackedManifest(repoRoot) {
   const root = resolve(repoRoot);
-  const directPath = join(root, BLUEPRINT_DIR_NAME, MANIFEST_NAME);
+  const directPath = join(root, AGENT_DIR_NAME, MANIFEST_NAME);
   if (existsSync(directPath)) {
     return directPath;
   }
@@ -41,7 +41,7 @@ function findTrackedManifest(repoRoot) {
 }
 
 function manifestPathFor(repoRoot) {
-  return join(resolve(repoRoot), BLUEPRINT_DIR_NAME, MANIFEST_NAME);
+  return join(resolve(repoRoot), AGENT_DIR_NAME, MANIFEST_NAME);
 }
 
 /**
@@ -99,7 +99,7 @@ export function bootstrapFromTracked(repoRoot) {
         revision: gen.id,
         indexedAt: manifest.generatedAt,
         stale: false,
-        sourceKind: "blueprint-tracked",
+        sourceKind: "agent-tracked",
         toolVersions: gen.toolVersions ?? {},
         providerCapabilities: gen.providerCapabilities ?? manifest.capabilities?.outputs ?? [],
         supportedEdgeTypes: gen.supportedEdgeTypes ?? [],

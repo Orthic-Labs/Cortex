@@ -8,7 +8,7 @@ import { buildGraphGeneration } from "../graph/static-provider.mjs";
 import { checkScopeGrant, issueScopeGrant } from "../lib/receipt-store.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
-const CLI = join(ROOT, "scripts/blueprint.mjs");
+const CLI = join(ROOT, "scripts/cortex.mjs");
 const INSTALLER = join(ROOT, "scripts/cortex-install.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 

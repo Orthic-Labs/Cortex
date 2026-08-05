@@ -12,7 +12,7 @@ import {
 } from "../graph/static-provider.mjs";
 
 function withLanguageFixture(run) {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-languages-"));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "cortex-languages-"));
   try {
     fs.mkdirSync(path.join(repo, "python"));
     fs.writeFileSync(path.join(repo, "python", "service.py"), [
@@ -61,7 +61,7 @@ function withLanguageFixture(run) {
 }
 
 function withFiles(files, run) {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-stack-"));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "cortex-stack-"));
   try {
     for (const [relativePath, contents] of Object.entries(files)) {
       const absolutePath = path.join(repo, relativePath);

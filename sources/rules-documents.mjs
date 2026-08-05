@@ -33,7 +33,7 @@ import {
   safeResolve,
 } from "./_shared.mjs";
 
-const ADAPTER_ID = "rightcontext-sources/rules-documents";
+const ADAPTER_ID = "membrane-sources/rules-documents";
 const ADAPTER_LAYER = 2; // Layer 2 — instruction / rules corpus
 const MAX_NESTED_AGENTS_DEPTH = 4;
 

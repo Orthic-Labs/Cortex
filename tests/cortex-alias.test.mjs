@@ -6,12 +6,12 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const ROOT = join(import.meta.dirname, "..");
-const CLI = join(ROOT, "scripts/blueprint.mjs");
+const CLI = join(ROOT, "scripts/cortex.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 
 test("Cortex alias exposes orient contract and branded help", () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.bin.cortex, "./scripts/blueprint.mjs");
+  assert.equal(pkg.bin.cortex, "./scripts/cortex.mjs");
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /Cortex/);

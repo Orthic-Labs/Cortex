@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const ROOT = join(import.meta.dirname, "..");
-const CLI = join(ROOT, "scripts/blueprint.mjs");
+const CLI = join(ROOT, "scripts/cortex.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 
 function run(repo, args) {

@@ -5,7 +5,7 @@
 // SELECTED provider, a graph carries two layers (AST primary + lexical
 // fallback), and a version bump in EITHER must invalidate it — otherwise a
 // fixed extractor silently leaves every existing graph stale with no rebuild
-// prompt, which is the exact silent-staleness class Blueprint exists to catch.
+// prompt, which is the exact silent-staleness class Cortex exists to catch.
 //
 // static-provider.mjs cannot import treesitter-provider.mjs for this: that
 // module pulls in web-tree-sitter and hash-wasm at load, and static-provider is
@@ -16,14 +16,14 @@
 import { PRECISION_TIERS } from "./precision-tiers.mjs";
 
 export const STATIC_PROVIDER = {
-  id: "blueprint-static",
+  id: "cortex-static",
   version: "repo-local-deterministic-v3",
   license: "workspace-owned",
   precisionTier: PRECISION_TIERS.LEXICAL,
 };
 
 export const TREESITTER_PROVIDER = {
-  id: "blueprint-treesitter",
+  id: "cortex-treesitter",
   version: "standalone-v1",
   license: "workspace-owned",
   precisionTier: PRECISION_TIERS.AST,

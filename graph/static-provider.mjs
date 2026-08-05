@@ -53,15 +53,20 @@ export { augmentGenerationWithScip } from "./scip-provider.mjs";
 
 const PROVIDER = STATIC_PROVIDER;
 
+// Cortex writes its own graph into `--out`, and tests point that at suffixed
+// directories (`.agent-test73`, `.agent-test-graph`). Naming only `.agent` let a
+// leaked run directory count graph.db/-shm/-wal as unparseable source, which
+// reported a healthy repo as `degraded`.
+function isCortexOutputDir(name) {
+  return /^\.agent(-|$)/.test(name);
+}
+
 const IGNORED = new Set([
   // VCS internals — git refs, codex checkpoints, branch metadata. Walking
   // these on a real repo overflows both the stack and memory because they
   // contain transient file handles that disappear between scans.
   ".git",
   ".codex-tmp",
-  // Portable contract surface — tracked `.blueprint/` contains manifests and
-  // schemas but never source code. Excluded at every nesting depth.
-  ".blueprint",
   // Local graph/build caches and generated internals.
   ".agent",
   ".agent-test-graph",
@@ -106,7 +111,7 @@ export const SCAN_EXCLUSIONS = Object.freeze([...IGNORED].sort());
 const IGNORED_FILE_NAMES = new Set([
   ".DS_Store",
   "Thumbs.db",
-  // Blueprint's own generated docs. They must not be re-indexed or they
+  // Cortex's own generated docs. They must not be re-indexed or they
   // would perturb the graph's source hash between rebuilds.
   "product.md",
   "architecture.md",
@@ -216,11 +221,11 @@ function inheritSourceObservation(outDir, generation) {
  * the async belongs at the build boundary, which is the only place that needs it.
  *
  * Degrades to lexical-only on any failure: the lexical graph is a correct, if
- * shallower, result, and `blueprint build` must not become dependent on a WASM
- * grammar load succeeding. Opt out with BLUEPRINT_TREESITTER=0.
+ * shallower, result, and `cortex build` must not become dependent on a WASM
+ * grammar load succeeding. Opt out with CORTEX_TREESITTER=0.
  */
 export async function augmentGenerationWithTreeSitter(generation, repoRoot, options = {}) {
-  if (options.treesitter === false || process.env.BLUEPRINT_TREESITTER === "0") {
+  if (options.treesitter === false || process.env.CORTEX_TREESITTER === "0") {
     return { state: "disabled" };
   }
   const root = canonicalRoot(repoRoot);
@@ -235,7 +240,7 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
     //
     // It is not the ONLY provider, and cannot be today: tree-sitter has
     // registered extractors for 10 extensions, while the lexical layer parses
-    // 30. Dropping the lexical layer would blind Blueprint to Swift, C/C++,
+    // 30. Dropping the lexical layer would blind Cortex to Swift, C/C++,
     // shell, SQL, PowerShell, Vue and Astro — i.e. to every iOS app in the
     // suite and every Windows installer script. So the lexical layer remains,
     // demoted to fallback for exactly the extensions tree-sitter cannot parse.
@@ -275,7 +280,7 @@ export async function augmentGenerationWithTreeSitter(generation, repoRoot, opti
     }
     return { state: "ok", summary };
   } catch (err) {
-    const failure = { provider: "blueprint-treesitter", state: "unavailable", reason: String(err?.message ?? err) };
+    const failure = { provider: "cortex-treesitter", state: "unavailable", reason: String(err?.message ?? err) };
     generation.augmentation = { treesitter: failure };
     return failure;
   }
@@ -394,7 +399,7 @@ export function graphStatus(repoRoot, outDir, options = {}) {
  *
  * Returns null when no graph has been built here, so callers distinguish "build
  * one" from "the graph is empty". There is deliberately no JSON path: if the
- * database is absent the answer is `blueprint build`, which is cheap relative to
+ * database is absent the answer is `cortex build`, which is cheap relative to
  * carrying a second serialization format forever.
  */
 export function readGeneration(repoRoot, outDir) {
@@ -412,7 +417,7 @@ export function graphCapabilities(repoRoot, options = {}) {
   return {
     schemaVersion: 1,
     provider: PROVIDER,
-    // blueprint B4 — the highest precision tier THIS provider can achieve.
+    // cortex B4 — the highest precision tier THIS provider can achieve.
     // AST/COMPILER tiers, when available, come from separate providers
     // (graph/treesitter-provider.mjs, graph/scip-provider.mjs) that augment
     // the same generation; see graphPrecisionProbe() for the combined view.
@@ -421,7 +426,7 @@ export function graphCapabilities(repoRoot, options = {}) {
       order: PRECISION_TIER_ORDER,
       current: PROVIDER.precisionTier,
     },
-    // blueprint B3 — the confidence-tier vocabulary every edge is tagged
+    // cortex B3 — the confidence-tier vocabulary every edge is tagged
     // with. Exported so consumers can filter by minimum tier.
     edgeConfidenceTiers: {
       order: EDGE_CONFIDENCE_TIER_ORDER,
@@ -444,7 +449,7 @@ export function graphCapabilities(repoRoot, options = {}) {
   };
 }
 
-// blueprint B4 — combined precision-tier probe across all three providers.
+// cortex B4 — combined precision-tier probe across all three providers.
 // Honest by construction: LEXICAL and AST are always "ok" (static-provider
 // always runs; treesitter-provider's WASM grammars ship in the workspace and
 // its own augment step reports its own degrade separately), COMPILER reflects
@@ -455,7 +460,7 @@ export function graphPrecisionProbe(repoRoot, options = {}) {
     schemaVersion: 1,
     tiers: [
       { tier: PRECISION_TIERS.LEXICAL, provider: PROVIDER.id, state: "ok" },
-      { tier: PRECISION_TIERS.AST, provider: "blueprint-treesitter", state: "ok" },
+      { tier: PRECISION_TIERS.AST, provider: "cortex-treesitter", state: "ok" },
       {
         tier: PRECISION_TIERS.COMPILER,
         provider: scip.provider.id,
@@ -598,7 +603,7 @@ export function createContextCandidateSet(generation, options = {}) {
       protected: item.isAnchor,
       exact: item.isExact,
       recoverable: true,
-      resolver: `blueprint graph resolve --node ${item.result.id}`,
+      resolver: `cortex graph resolve --node ${item.result.id}`,
       text: item.result.qualifiedName || item.result.name,
     });
   }
@@ -609,7 +614,7 @@ export function createContextCandidateSet(generation, options = {}) {
     repoRoot: options.repoRoot ?? generation.repoRoot ?? null,
     receiptId: options.receiptId ?? null,
     traceId: options.traceId ?? randomUUID(),
-    task: String(options.task ?? options.query ?? "Blueprint graph retrieval"),
+    task: String(options.task ?? options.query ?? "Cortex graph retrieval"),
     mode: options.mode ?? "survey",
     provider: generation.provider.id,
     freshness: {
@@ -1138,7 +1143,7 @@ function pathPayload(generation, nodeIds) {
 // artifact was being versioned, which made the graph structurally stale exactly
 // during active development and forced an overlay subsystem to compensate.
 //
-// The database is a local index. It is gitignored, it is rebuilt by `blueprint
+// The database is a local index. It is gitignored, it is rebuilt by `cortex
 // build`, and if it is absent or stale the answer is to build — never to fall
 // back to a second format. SQLite's transaction gives atomicity directly, so the
 // write-body-then-manifest ordering the JSON path needed is gone with it.
@@ -1221,13 +1226,13 @@ function buildGenerationFromSources(root, source, options = {}) {
     for (const imported of extractImports(file, source.files)) {
       const targetNode = fileNodes.get(imported);
       // A resolved import specifier is deterministic path resolution — the
-      // most certain tier we have (blueprint B3).
+      // most certain tier we have (cortex B3).
       if (targetNode) {
         edges.push(importEdgeRecord(sourceNode, targetNode, imported, true, [fileEvidence(file, 1, 1)]));
       }
     }
     // Unresolved relative imports must be tagged and kept, never dropped
-    // (blueprint B3). extractImports() only returns hits; this is the miss list.
+    // (cortex B3). extractImports() only returns hits; this is the miss list.
     for (const specifier of extractUnresolvedImportSpecifiers(file, source.files)) {
       edges.push(importEdgeRecord(sourceNode, null, specifier, false, [fileEvidence(file, 1, 1)]));
     }
@@ -1372,7 +1377,7 @@ function scanSources(root, fileLimit = 0, walkOptions = {}) {
     let normalizedText = text;
     if (path === "README.md") {
       normalizedText = text.replace(
-        /\n?<!-- blueprint:docs:start -->[\s\S]*?<!-- blueprint:docs:end -->\n?/,
+        /\n?<!-- cortex:docs:start -->[\s\S]*?<!-- cortex:docs:end -->\n?/,
         "",
       );
       normalizedBytes = Buffer.from(normalizedText, "utf8");
@@ -1514,7 +1519,7 @@ function walk(root, options = {}) {
         const absolutePath = join(directory, entry.name);
         const repoPath = normalizePath(relative(root, absolutePath));
         if (entry.isDirectory()) {
-          if (IGNORED.has(entry.name)) continue;
+          if (IGNORED.has(entry.name) || isCortexOutputDir(entry.name)) continue;
           if (pathMatchesIgnoredPrefix(repoPath.endsWith("/") ? repoPath : `${repoPath}/`, ignoredPrefixes)) continue;
           if (gitEligible && !gitEligible.directories.has(repoPath)) continue;
           childDirectories.push(absolutePath);
@@ -1583,7 +1588,7 @@ function addCallEdges(files, nodes, edges, options = {}) {
       const imported = namedTargets.filter((target) => importedPaths.has(target.path) && target.id !== source.id);
       const uniqueFallback = namedTargets.length === 1 && namedTargets[0].id !== source.id ? namedTargets : [];
       // Tier is DERIVED from which resolution strategy actually produced the
-      // match — not hardcoded — per blueprint B3. Same-file name match is
+      // match — not hardcoded — per cortex B3. Same-file name match is
       // bounded (no cross-module collision possible); an import-linked or
       // repo-wide-unique match crosses file boundaries on a heuristic.
       const [resolvedTargets, tier] = sameFile.length > 0
@@ -1599,7 +1604,7 @@ function addCallEdges(files, nodes, edges, options = {}) {
       // Ambiguous call: 2+ OTHER (non-self) candidate symbols share this
       // name repo-wide and none is in the same file or an imported file, so
       // none can be honestly preferred. Tagged UNRESOLVED and kept — never
-      // silently dropped, never promoted by guessing one (blueprint B3).
+      // silently dropped, never promoted by guessing one (cortex B3).
       //
       // Excludes self on purpose: containsCall/extractCallNames' regex can
       // match a function's OWN declaration line as if it called itself
@@ -1702,7 +1707,7 @@ function generationId(nodes, edges, files) {
   return computeGenerationId(nodes, edges, sourceHash(files));
 }
 
-// Blueprint's own generated docs (docs/product.md, docs/architecture.md) carry a
+// Cortex's own generated docs (docs/product.md, docs/architecture.md) carry a
 // generation header as their first line. They are OUTPUTS of a build, not source
 // truth, and they embed the generationId — so every build rewrites them and, if
 // they were hashed, the graph would be stale the instant it finished. The build
@@ -1717,7 +1722,7 @@ function generationId(nodes, edges, files) {
 //
 // Excluded from the HASH only: the docs remain scanned, remain graph nodes, and
 // still take part in doc↔code joins. A real source edit still moves the hash.
-const GENERATED_DOC_MARKER = "<!-- generated by blueprint";
+const GENERATED_DOC_MARKER = "<!-- generated by cortex";
 
 function isGeneratedDoc(file) {
   return typeof file.lines?.[0] === "string" && file.lines[0].startsWith(GENERATED_DOC_MARKER);
@@ -1746,9 +1751,9 @@ function normalizePath(value) {
 
 // XXH3-128 (via hash-wasm) — content hashing for change detection and
 // dedup only (file bytes, source-tree fingerprint, generation id). No trust
-// boundary depends on collision resistance here: the blueprint→Crypt
+// boundary depends on collision resistance here: the cortex→Crypt
 // federation provider reads only the generation identity, never validates it
-// cryptographically (membrane/engine/federation/providers/blueprint.py).
+// cryptographically (membrane/engine/federation/providers/cortex.py).
 // The hasher's construction is async (WASM init); init()/update()/digest()
 // are synchronous once it exists, so the async cost is paid exactly once at
 // module load (top-level await) and every call site below stays synchronous

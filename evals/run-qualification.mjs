@@ -86,7 +86,7 @@ export function loadTasks(jsonlPath) {
       protectedAnchors: Array.isArray(raw.protectedAnchors) ? raw.protectedAnchors.slice() : [],
       maxPacketTokens: Number(raw.maxPacketTokens) || 0,
       freshness: raw.freshness ?? "current",
-      qualificationClass: raw.qualificationClass ?? "blueprint_integration",
+      qualificationClass: raw.qualificationClass ?? "cortex_integration",
       oracle,
     });
   }
@@ -123,7 +123,7 @@ const GRAPHIFY_CAPABILITIES = new Set([
   "test_coverage",
 ]);
 
-const BLUEPRINT_STATIC_CAPABILITIES = new Set([
+const CORTEX_STATIC_CAPABILITIES = new Set([
   "symbol_definition",
   "call_path",
   "import_dependency",
@@ -193,7 +193,7 @@ export function makeFallbackProvider() {
   };
 }
 
-export function makeBlueprintStaticProvider(opts = {}) {
+export function makeCortexStaticProvider(opts = {}) {
   const schemaPath = opts.schemaPath ? resolve(opts.schemaPath) : null;
   const timings = [];
   const snapshots = new Map();
@@ -207,13 +207,13 @@ export function makeBlueprintStaticProvider(opts = {}) {
     return snapshot;
   };
   return {
-    id: "blueprint-static",
-    kind: "blueprint-static",
-    capabilities: new Set(BLUEPRINT_STATIC_CAPABILITIES),
+    id: "cortex-static",
+    kind: "cortex-static",
+    capabilities: new Set(CORTEX_STATIC_CAPABILITIES),
     async probe() {
       return {
         available: true,
-        kind: "blueprint-static",
+        kind: "cortex-static",
         version: "repo-local-deterministic-v0",
         license: "workspace-owned",
         persistence: "regenerable",
@@ -221,8 +221,8 @@ export function makeBlueprintStaticProvider(opts = {}) {
       };
     },
     async execute(task, repoRoot) {
-      if (!BLUEPRINT_STATIC_CAPABILITIES.has(task.kind)) {
-        return { state: "unsupported", reason: `blueprint_static_${task.kind}_unsupported` };
+      if (!CORTEX_STATIC_CAPABILITIES.has(task.kind)) {
+        return { state: "unsupported", reason: `cortex_static_${task.kind}_unsupported` };
       }
       const snapshot = getSnapshot(repoRoot, task.freshness === "current");
       return {
@@ -238,7 +238,7 @@ export function makeBlueprintStaticProvider(opts = {}) {
       if (!existsSync(sourceRepo)) {
         return { execution: { state: "error", reason: "freshness_fixture_missing" } };
       }
-      const suiteRoot = mkdtempSync(join(tmpdir(), "blueprint-b0-static-"));
+      const suiteRoot = mkdtempSync(join(tmpdir(), "cortex-b0-static-"));
       const suiteRepo = join(suiteRoot, "fixture & mkdir B0_PWNED");
       cpSync(sourceRepo, suiteRepo, { recursive: true });
       const checks = {};
@@ -349,7 +349,7 @@ function countOccurrences(text, term) {
 }
 
 function collectTextFiles(root) {
-  const ignored = new Set([".agent", ".agent-test-graph", ".blueprint", ".git", ".codebase-memory", "node_modules", "target", "dist", "build"]);
+  const ignored = new Set([".agent", ".agent-test-graph", ".git", ".codebase-memory", "node_modules", "target", "dist", "build"]);
   const files = [];
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -610,17 +610,17 @@ function escapeRegExp(value) {
 
 /**
  * Tree-sitter AST provider, registered so the GATES decide whether it should
- * replace blueprint-static as the selected provider. It is already wired into
- * `blueprint build` as a union augmentation (see augmentGenerationWithTreeSitter);
+ * replace cortex-static as the selected provider. It is already wired into
+ * `cortex build` as a union augmentation (see augmentGenerationWithTreeSitter);
  * this registration is what turns "it produces richer nodes" into a measured
  * claim instead of an assertion.
  *
  * Snapshot is mapped into the harness's node shape ({labels,name,qualifiedName,
  * path,startLine,endLine,contentHash}) so rankStaticEvidence and the existing
- * scoring apply unchanged — the comparison against blueprint-static is
+ * scoring apply unchanged — the comparison against cortex-static is
  * apples-to-apples.
  */
-export function makeBlueprintTreeSitterProvider(opts = {}) {
+export function makeCortexTreeSitterProvider(opts = {}) {
   const schemaPath = opts.schemaPath ? resolve(opts.schemaPath) : null;
   const timings = [];
   const snapshots = new Map();
@@ -698,29 +698,29 @@ export function makeBlueprintTreeSitterProvider(opts = {}) {
   };
 
   return {
-    id: "blueprint-treesitter",
-    kind: "blueprint-treesitter",
-    capabilities: new Set(BLUEPRINT_STATIC_CAPABILITIES),
+    id: "cortex-treesitter",
+    kind: "cortex-treesitter",
+    capabilities: new Set(CORTEX_STATIC_CAPABILITIES),
     async probe() {
       try {
         const mod = await import("../graph/treesitter-provider.mjs");
         return {
           available: true,
-          kind: "blueprint-treesitter",
-          version: `${mod.PROVIDER?.id ?? "blueprint-treesitter"}@${mod.PROVIDER?.version ?? "0"}`,
+          kind: "cortex-treesitter",
+          version: `${mod.PROVIDER?.id ?? "cortex-treesitter"}@${mod.PROVIDER?.version ?? "0"}`,
           license: "workspace-owned",
           persistence: "regenerable",
           nativeDependencies: [],
-          capabilities: [...BLUEPRINT_STATIC_CAPABILITIES],
+          capabilities: [...CORTEX_STATIC_CAPABILITIES],
         };
       } catch (err) {
         unavailableReason = String(err?.message ?? err);
-        return { available: false, kind: "blueprint-treesitter", reason: unavailableReason };
+        return { available: false, kind: "cortex-treesitter", reason: unavailableReason };
       }
     },
     async execute(task, repoRoot) {
-      if (!BLUEPRINT_STATIC_CAPABILITIES.has(task.kind)) {
-        return { state: "unsupported", reason: `blueprint_treesitter_${task.kind}_unsupported` };
+      if (!CORTEX_STATIC_CAPABILITIES.has(task.kind)) {
+        return { state: "unsupported", reason: `cortex_treesitter_${task.kind}_unsupported` };
       }
       try {
         const snapshot = await getSnapshot(repoRoot, task.freshness === "current");
@@ -744,7 +744,7 @@ export function makeBlueprintTreeSitterProvider(opts = {}) {
       // name contains shell metacharacters. If any provider path interpolates
       // into a shell, `B0_PWNED` appears beside the repo and shellInterpolation
       // fails.
-      const suiteRoot = mkdtempSync(join(tmpdir(), "blueprint-b0-treesitter-"));
+      const suiteRoot = mkdtempSync(join(tmpdir(), "cortex-b0-treesitter-"));
       const suiteRepo = join(suiteRoot, "fixture & mkdir B0_PWNED");
       cpSync(sourceRepo, suiteRepo, { recursive: true });
       const checks = {};
@@ -979,8 +979,8 @@ export function makeCodebaseMemoryProvider(opts = {}) {
       }
     },
     async execute(task, repoRoot) {
-      if (task.qualificationClass === "blueprint_integration") {
-        return { state: "unsupported", reason: "blueprint_document_join_required" };
+      if (task.qualificationClass === "cortex_integration") {
+        return { state: "unsupported", reason: "cortex_document_join_required" };
       }
       if (task.qualificationClass === "mandatory_structural") {
         const snapshot = await loadSnapshot(repoRoot);
@@ -1038,8 +1038,8 @@ export function makeCodebaseMemoryProvider(opts = {}) {
       if (!existsSync(sourceRepo)) {
         return { execution: { state: "error", reason: "freshness_fixture_missing" } };
       }
-      const suiteRoot = mkdtempSync(join(tmpdir(), "blueprint-b0-cbm-"));
-      const outsideRoot = mkdtempSync(join(tmpdir(), "blueprint-b0-outside-"));
+      const suiteRoot = mkdtempSync(join(tmpdir(), "cortex-b0-cbm-"));
+      const outsideRoot = mkdtempSync(join(tmpdir(), "cortex-b0-outside-"));
       const suiteCache = join(suiteRoot, "cache");
       const suiteRepo = join(suiteRoot, "fixture & mkdir B0_PWNED");
       cpSync(sourceRepo, suiteRepo, { recursive: true });
@@ -1190,8 +1190,8 @@ export function makeCodebaseMemoryProvider(opts = {}) {
         indexBytes: recursiveSize(measurementCache),
         peakRssBytes,
         peakRssState: peakRssBytes === null ? "not_sampled_under_diagnostics_interval" : "measured",
-        fullBlueprintGenerationMs: null,
-        fullBlueprintGenerationState: "unavailable_before_B1_through_B6",
+        fullCortexGenerationMs: null,
+        fullCortexGenerationState: "unavailable_before_B1_through_B6",
         incrementalEditMs: null,
         incrementalEditState: "measured_in_fixture_freshness_suite_only",
         indexJsonlBytes: null,
@@ -1208,7 +1208,7 @@ export function makeCodebaseMemoryProvider(opts = {}) {
         peakRssBytes: null,
         indexBytes: existsSync(cacheDir) ? recursiveSize(cacheDir) : 0,
         providerIndexMs: roundMs(timings.filter((item) => item.tool === "index_repository").reduce((sum, item) => sum + item.ms, 0)),
-        measurementBoundary: "provider_only_not_complete_blueprint_generation",
+        measurementBoundary: "provider_only_not_complete_cortex_generation",
       };
     },
     async close() {},
@@ -1280,7 +1280,7 @@ function candidateFromSnapshot(snapshot) {
     traceId: "11111111-1111-4111-8111-111111111111",
     task: "Resolve exact provider evidence",
     mode: "verify",
-    provider: "blueprint",
+    provider: "cortex",
     freshness: { revision: node.contentHash, indexedAt: new Date().toISOString(), stale: false },
     providerCeiling: { maxCandidates: 40, maxEstimatedTokens: 8000 },
     candidates: [{
@@ -1301,7 +1301,7 @@ function candidateFromSnapshot(snapshot) {
       protected: false,
       exact: true,
       recoverable: true,
-      resolver: `blueprint resolve ${node.qualifiedName || node.name}`,
+      resolver: `cortex resolve ${node.qualifiedName || node.name}`,
       text: node.name,
     }],
     omissions: [],
@@ -1794,10 +1794,10 @@ function listArg(value, fallback) {
 
 function makeProviderByName(name, opts = {}) {
   switch (name) {
-    case "blueprint-static":
-      return makeBlueprintStaticProvider(opts);
-    case "blueprint-treesitter":
-      return makeBlueprintTreeSitterProvider(opts);
+    case "cortex-static":
+      return makeCortexStaticProvider(opts);
+    case "cortex-treesitter":
+      return makeCortexTreeSitterProvider(opts);
     case "fallback":
       return makeFallbackProvider(opts);
     case "codebase-memory":
@@ -1837,7 +1837,7 @@ function qualificationFingerprint({ fixturesPath, schemaPath, providerNames, rea
   const hash = { update(v) { xxhasher.update(typeof v === "string" ? v : v); return hash; },
                  digest(enc) { return xxhasher.digest(enc); } };
   for (const value of [
-    "blueprint-provider-qualification-v1",
+    "cortex-provider-qualification-v1",
     process.platform,
     process.arch,
     JSON.stringify(providerNames),
@@ -1856,7 +1856,7 @@ function qualificationFingerprint({ fixturesPath, schemaPath, providerNames, rea
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  const providerNames = listArg(args.providers, ["fallback", "blueprint-static", "blueprint-treesitter", "codebase-memory", "graphify"]);
+  const providerNames = listArg(args.providers, ["fallback", "cortex-static", "cortex-treesitter", "codebase-memory", "graphify"]);
   const fixturesPath = String(args.fixtures ?? resolve(process.cwd(), "evals/graph-tasks.jsonl"));
   const outPath = String(args.out ?? resolve(process.cwd(), "qualification.json"));
   const schemaPath = String(
@@ -1873,7 +1873,7 @@ async function main() {
   };
   const budgets = {
     coldStartMs: Number(args["budget-cold-start-ms"] ?? 1000),
-    fullBlueprintGenerationMs: Number(args["budget-full-blueprint-ms"] ?? 600000),
+    fullCortexGenerationMs: Number(args["budget-full-cortex-ms"] ?? 600000),
     providerFullMs: Number(args["budget-provider-full-ms"] ?? 300000),
     incrementalEditMs: Number(args["budget-incremental-ms"] ?? 5000),
     queryP95Ms: Number(args["budget-query-p95-ms"] ?? 1000),
@@ -1917,9 +1917,9 @@ async function main() {
           schemaPath,
         }
       // Any provider that runs the contract suite needs the schema. Listing
-      // providers individually silently starves a new one — blueprint-treesitter
+      // providers individually silently starves a new one — cortex-treesitter
       // failed the contract gate purely because it received {}.
-      : ["blueprint-static", "blueprint-treesitter"].includes(name)
+      : ["cortex-static", "cortex-treesitter"].includes(name)
         ? { schemaPath }
         : {};
     const provider = makeProviderByName(name, providerOptions);
@@ -1986,8 +1986,8 @@ function evaluateBudgets(measurements, budgets) {
       queryP95Ms: measuredBudget(measurement.queryP95Ms, budgets.queryP95Ms),
       peakRssBytes: measuredBudget(measurement.peakRssBytes, budgets.peakRssBytes),
       indexBytes: measuredBudget(measurement.indexBytes, budgets.indexBytes),
-      fullBlueprintGenerationMs: measuredBudget(
-        measurement.fullBlueprintGenerationMs, budgets.fullBlueprintGenerationMs,
+      fullCortexGenerationMs: measuredBudget(
+        measurement.fullCortexGenerationMs, budgets.fullCortexGenerationMs,
       ),
     },
   }));

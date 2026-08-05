@@ -23,7 +23,7 @@ import { seedStore } from "../_store-helpers.mjs";
 import { findWorkspaceRoot } from "../_workspace-root.mjs";
 
 const ROOT = findWorkspaceRoot(HERE, { required: false });
-const BLUEPRINT = path.resolve(HERE, "../..");
+const CORTEX = path.resolve(HERE, "../..");
 const SCHEMA = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
 const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
 import { PYTHON } from "../python-test-runtime.mjs";
@@ -158,10 +158,10 @@ test("workingTreeSummary reports unavailable outside a git repo", { skip: worksp
 // ---- graph-resolve ----
 
 test("graph-resolve: emits file and symbol candidates when graph is available", { skip: workspaceSkip }, () => {
-  const fixture = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+  const fixture = path.join(CORTEX, "evals/fixture-repos/typescript-commerce");
   withTempRepo("resolve", (repo) => {
     cpSync(fixture, repo, { recursive: true });
-    spawnSync(process.execPath, [path.join(BLUEPRINT, "scripts/blueprint.mjs"), "graph", "build", "--out", ".agent"], { cwd: repo, stdio: "pipe" });
+    spawnSync(process.execPath, [path.join(CORTEX, "scripts/cortex.mjs"), "graph", "build", "--out", ".agent"], { cwd: repo, stdio: "pipe" });
     // The path must exist IN THE FIXTURE. This previously read
     // "src/services/checkout.ts", which the fixture does not contain — and the
     // test still passed, because graph-resolve was looking for the generation at
@@ -289,7 +289,7 @@ test("index: produceCandidatesWithTelemetry runs every adapter once and dedupes"
     spawnSync("git", ["commit", "-q", "-m", "init"], { cwd: repo, stdio: "ignore" });
     writeFileSync(path.join(repo, "src/a.ts"), "export const a = 99;\n");
     const result = produceCandidatesWithTelemetry("audit src/a.ts", { repoRoot: repo });
-    assert.equal(result.provider, "rightcontext-sources");
+    assert.equal(result.provider, "membrane-sources");
     assert.equal(result.adapters.length, 6);
     for (const entry of result.adapters) {
       assert.ok(typeof entry.id === "string");

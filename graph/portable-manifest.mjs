@@ -1,4 +1,4 @@
-// Portable `.blueprint/manifest.json` path validation — repo-relative only.
+// Portable `.agent/manifest.json` path validation — repo-relative only.
 
 const ABSOLUTE_INDICATORS = [
   { pattern: /[A-Za-z]:[\\/]/, code: "windows_drive" },

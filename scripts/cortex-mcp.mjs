@@ -52,7 +52,7 @@ async function barrier(repoRoot) {
 function orientPayload(root, generation, receipt) {
   const status = graphStatus(root, OUT_DIR);
   const map = readJson(join(root, OUT_DIR, "map.json"), {});
-  const manifest = readJson(join(root, ".blueprint/manifest.json"), {});
+  const manifest = readJson(join(root, ".agent/manifest.json"), {});
   const flowInventory = readJson(join(root, OUT_DIR, "flows.json"), { flows: [] });
   const query = "";
   const identity = repositoryIdentity(root);

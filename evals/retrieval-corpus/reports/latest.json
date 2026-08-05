@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "schema": "cortex-retrieval-report-v1",
-  "runAt": "2026-08-04T22:07:56.580Z",
+  "runAt": "2026-08-05T09:14:20.962Z",
   "corpusPath": "/Volumes/D/claude/cortex/evals/retrieval-corpus/corpus.v1.json",
   "corpusSize": 30,
   "corpusClassCounts": {
@@ -24,33 +24,33 @@
       "abstainedCorrectly": 7,
       "junkOnNoGold": 0,
       "abstainedOnPositiveGold": 3,
-      "avgLatencyMs": 0.08933333333333925,
-      "avgRetrievedPerQuery": 3.466666666666667,
-      "avgUsedPerQuery": 3.466666666666667,
+      "avgLatencyMs": 0.04210833333333331,
+      "avgRetrievedPerQuery": 3.4,
+      "avgUsedPerQuery": 3.4,
       "freshnessFailures": 0,
       "total": 30
     },
     "graph": {
       "hitRate": 0.8666666666666667,
-      "mrr": 0.6972222222222222,
+      "mrr": 0.7333333333333333,
       "abstainedCorrectly": 7,
       "junkOnNoGold": 0,
       "abstainedOnPositiveGold": 3,
-      "avgLatencyMs": 1.8248178999999993,
-      "avgRetrievedPerQuery": 3.7333333333333334,
-      "avgUsedPerQuery": 3.7333333333333334,
+      "avgLatencyMs": 0.7400277666666691,
+      "avgRetrievedPerQuery": 3.7,
+      "avgUsedPerQuery": 3.7,
       "freshnessFailures": 0,
       "total": 30
     },
     "hybrid": {
       "hitRate": 0.8666666666666667,
-      "mrr": 0.7972222222222223,
+      "mrr": 0.8,
       "abstainedCorrectly": 7,
       "junkOnNoGold": 0,
       "abstainedOnPositiveGold": 3,
-      "avgLatencyMs": 0.5178250666666694,
-      "avgRetrievedPerQuery": 3.2666666666666666,
-      "avgUsedPerQuery": 3.2666666666666666,
+      "avgLatencyMs": 0.29875279999999693,
+      "avgRetrievedPerQuery": 3.2333333333333334,
+      "avgUsedPerQuery": 3.2333333333333334,
       "freshnessFailures": 0,
       "total": 30
     }
@@ -169,15 +169,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.7146669999999631,
-        "graph": 3.677792000000011,
-        "hybrid": 1.5055420000000481
+        "lexical": 0.3062500000000057,
+        "graph": 1.1863749999999982,
+        "hybrid": 0.5096249999999998
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 10,
           "used": 10,
-          "tokens": 807
+          "tokens": 799
         },
         "graph": {
           "retrieved": 9,
@@ -455,15 +455,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.08087500000004866,
-        "graph": 3.6891669999999976,
-        "hybrid": 0.6312499999999659
+        "lexical": 0.054082999999991443,
+        "graph": 0.9300000000000068,
+        "hybrid": 0.31512499999999477
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 10,
           "used": 10,
-          "tokens": 799
+          "tokens": 793
         },
         "graph": {
           "retrieved": 8,
@@ -712,7 +712,7 @@
           "strategy": "graph",
           "hit": true,
           "score": 1,
-          "rank": 2,
+          "rank": 1,
           "reason": "hit"
         },
         "hybrid": {
@@ -725,25 +725,25 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.10854100000000244,
-        "graph": 1.362874999999974,
-        "hybrid": 0.3441670000000272
+        "lexical": 0.031666000000001304,
+        "graph": 0.7410419999999931,
+        "hybrid": 0.2565409999999986
       },
       "tokenCounts": {
         "lexical": {
-          "retrieved": 4,
-          "used": 4,
-          "tokens": 316
+          "retrieved": 3,
+          "used": 3,
+          "tokens": 234
         },
         "graph": {
-          "retrieved": 5,
-          "used": 5,
-          "tokens": 244
+          "retrieved": 4,
+          "used": 4,
+          "tokens": 196
         },
         "hybrid": {
-          "retrieved": 5,
-          "used": 5,
-          "tokens": 234
+          "retrieved": 4,
+          "used": 4,
+          "tokens": 188
         }
       },
       "fresh": true,
@@ -764,13 +764,6 @@
             "source": "lexical"
           },
           {
-            "id": "file:.agent-test73/map.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "lexical"
-          },
-          {
             "id": "symbol:src/store.ts::OrderStore",
             "kind": "class",
             "abstained": false,
@@ -779,14 +772,6 @@
           }
         ],
         "graph": [
-          {
-            "id": "file:.agent-test73/map.json",
-            "path": ".agent-test73/map.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "graph"
-          },
           {
             "id": "symbol:src/store.ts::OrderStore",
             "path": "src/store.ts",
@@ -846,14 +831,6 @@
             "source": "hybrid"
           },
           {
-            "id": "file:.agent-test73/map.json",
-            "path": ".agent-test73/map.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "hybrid"
-          },
-          {
             "id": "symbol:src/service.ts::OrderService.placeOrder",
             "path": "src/service.ts",
             "kind": "symbol",
@@ -892,7 +869,7 @@
           "strategy": "graph",
           "hit": true,
           "score": 1,
-          "rank": 4,
+          "rank": 3,
           "reason": "hit"
         },
         "hybrid": {
@@ -900,42 +877,35 @@
           "strategy": "hybrid",
           "hit": true,
           "score": 1,
-          "rank": 4,
+          "rank": 3,
           "reason": "hit"
         }
       },
       "latenciesMs": {
-        "lexical": 0.0472920000000272,
-        "graph": 1.6289580000000115,
-        "hybrid": 0.40962500000000546
+        "lexical": 0.03220799999999713,
+        "graph": 0.6964590000000044,
+        "hybrid": 0.2539170000000013
       },
       "tokenCounts": {
         "lexical": {
-          "retrieved": 3,
-          "used": 3,
-          "tokens": 263
+          "retrieved": 2,
+          "used": 2,
+          "tokens": 180
         },
         "graph": {
-          "retrieved": 6,
-          "used": 6,
-          "tokens": 317
+          "retrieved": 5,
+          "used": 5,
+          "tokens": 267
         },
         "hybrid": {
-          "retrieved": 6,
-          "used": 6,
-          "tokens": 306
+          "retrieved": 5,
+          "used": 5,
+          "tokens": 258
         }
       },
       "fresh": true,
       "results": {
         "lexical": [
-          {
-            "id": "file:.agent-test73/flows.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "lexical"
-          },
           {
             "id": "symbol:src/service.ts::OrderService.placeOrder",
             "kind": "symbol",
@@ -952,14 +922,6 @@
           }
         ],
         "graph": [
-          {
-            "id": "file:.agent-test73/flows.json",
-            "path": ".agent-test73/flows.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "graph"
-          },
           {
             "id": "symbol:src/service.ts::OrderService.placeOrder",
             "path": "src/service.ts",
@@ -1014,14 +976,6 @@
             "id": "symbol:test/service.test.ts::placeOrder stores a new order",
             "path": "test/service.test.ts",
             "kind": "symbol",
-            "abstained": false,
-            "reason": null,
-            "source": "hybrid"
-          },
-          {
-            "id": "file:.agent-test73/flows.json",
-            "path": ".agent-test73/flows.json",
-            "kind": "file",
             "abstained": false,
             "reason": null,
             "source": "hybrid"
@@ -1094,15 +1048,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.04204099999998334,
-        "graph": 0.9652499999999691,
-        "hybrid": 0.7849579999999605
+        "lexical": 0.029083999999983234,
+        "graph": 0.7157090000000039,
+        "hybrid": 0.2674169999999947
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 5,
           "used": 5,
-          "tokens": 402
+          "tokens": 398
         },
         "graph": {
           "retrieved": 7,
@@ -1313,15 +1267,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.17912500000005593,
-        "graph": 2.8359159999999974,
-        "hybrid": 1.2912500000000477
+        "lexical": 0.039083000000005086,
+        "graph": 0.8238749999999868,
+        "hybrid": 0.36429099999998016
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 10,
           "used": 10,
-          "tokens": 803
+          "tokens": 795
         },
         "graph": {
           "retrieved": 8,
@@ -1583,15 +1537,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.06766699999997172,
-        "graph": 2.553625000000011,
-        "hybrid": 0.5696250000000305
+        "lexical": 0.04091700000000742,
+        "graph": 1.0767079999999964,
+        "hybrid": 0.3558749999999975
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 10,
           "used": 10,
-          "tokens": 811
+          "tokens": 803
         },
         "graph": {
           "retrieved": 8,
@@ -1840,7 +1794,7 @@
           "strategy": "graph",
           "hit": true,
           "score": 1,
-          "rank": 2,
+          "rank": 1,
           "reason": "hit"
         },
         "hybrid": {
@@ -1853,25 +1807,25 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.05729100000002063,
-        "graph": 1.3684160000000247,
-        "hybrid": 1.5985000000000014
+        "lexical": 0.04620799999997871,
+        "graph": 1.131750000000011,
+        "hybrid": 1.1301249999999925
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 10,
           "used": 10,
-          "tokens": 765
+          "tokens": 750
         },
         "graph": {
-          "retrieved": 7,
-          "used": 7,
-          "tokens": 316
+          "retrieved": 8,
+          "used": 8,
+          "tokens": 355
         },
         "hybrid": {
-          "retrieved": 6,
-          "used": 6,
-          "tokens": 256
+          "retrieved": 7,
+          "used": 7,
+          "tokens": 293
         }
       },
       "fresh": true,
@@ -1894,13 +1848,6 @@
           {
             "id": "symbol:src/config.ts::ORDER_DB_PATH",
             "kind": "symbol",
-            "abstained": false,
-            "reason": null,
-            "source": "lexical"
-          },
-          {
-            "id": "file:.agent-test73/config.json",
-            "kind": "file",
             "abstained": false,
             "reason": null,
             "source": "lexical"
@@ -1946,17 +1893,16 @@
             "abstained": false,
             "reason": null,
             "source": "lexical"
+          },
+          {
+            "id": "symbol:src/service.ts::existing",
+            "kind": "symbol",
+            "abstained": false,
+            "reason": null,
+            "source": "lexical"
           }
         ],
         "graph": [
-          {
-            "id": "file:.agent-test73/config.json",
-            "path": ".agent-test73/config.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "graph"
-          },
           {
             "id": "file:src/config.ts",
             "path": "src/config.ts",
@@ -1968,6 +1914,14 @@
           {
             "id": "file:src/routes.ts",
             "path": "src/routes.ts",
+            "kind": "file",
+            "abstained": false,
+            "reason": null,
+            "source": "graph"
+          },
+          {
+            "id": "file:src/service.ts",
+            "path": "src/service.ts",
             "kind": "file",
             "abstained": false,
             "reason": null,
@@ -1998,8 +1952,16 @@
             "source": "graph"
           },
           {
-            "id": "file:src/service.ts",
-            "path": "src/service.ts",
+            "id": "file:src/store.ts",
+            "path": "src/store.ts",
+            "kind": "file",
+            "abstained": false,
+            "reason": null,
+            "source": "graph"
+          },
+          {
+            "id": "file:test/service.test.ts",
+            "path": "test/service.test.ts",
             "kind": "file",
             "abstained": false,
             "reason": null,
@@ -2032,14 +1994,6 @@
             "source": "hybrid"
           },
           {
-            "id": "file:.agent-test73/config.json",
-            "path": ".agent-test73/config.json",
-            "kind": "file",
-            "abstained": false,
-            "reason": null,
-            "source": "hybrid"
-          },
-          {
             "id": "file:src/routes.ts",
             "path": "src/routes.ts",
             "kind": "file",
@@ -2050,6 +2004,22 @@
           {
             "id": "file:src/service.ts",
             "path": "src/service.ts",
+            "kind": "file",
+            "abstained": false,
+            "reason": null,
+            "source": "hybrid"
+          },
+          {
+            "id": "file:src/store.ts",
+            "path": "src/store.ts",
+            "kind": "file",
+            "abstained": false,
+            "reason": null,
+            "source": "hybrid"
+          },
+          {
+            "id": "file:test/service.test.ts",
+            "path": "test/service.test.ts",
             "kind": "file",
             "abstained": false,
             "reason": null,
@@ -2100,15 +2070,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.08920899999998255,
-        "graph": 4.149999999999977,
-        "hybrid": 0.9453330000000051
+        "lexical": 0.0796670000000006,
+        "graph": 1.1227080000000171,
+        "hybrid": 0.8119580000000042
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 3,
           "used": 3,
-          "tokens": 236
+          "tokens": 234
         },
         "graph": {
           "retrieved": 4,
@@ -2254,9 +2224,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.25129100000003746,
-        "graph": 0.20566700000000537,
-        "hybrid": 0.023665999999991527
+        "lexical": 0.06112499999997567,
+        "graph": 0.030708000000004176,
+        "hybrid": 0.023416999999994914
       },
       "tokenCounts": {
         "lexical": {
@@ -2338,9 +2308,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.10987499999998818,
-        "graph": 0.04008299999998144,
-        "hybrid": 0.028540999999961514
+        "lexical": 0.027000000000015234,
+        "graph": 0.014499999999998181,
+        "hybrid": 0.011583000000001675
       },
       "tokenCounts": {
         "lexical": {
@@ -2422,9 +2392,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.028999999999996362,
-        "graph": 0.01258300000000645,
-        "hybrid": 0.019125000000030923
+        "lexical": 0.019042000000013104,
+        "graph": 0.01187500000000341,
+        "hybrid": 0.008832999999981439
       },
       "tokenCounts": {
         "lexical": {
@@ -2509,9 +2479,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.0508750000000191,
-        "graph": 0.012833000000000538,
-        "hybrid": 0.010541999999986729
+        "lexical": 0.013291999999978543,
+        "graph": 0.005416999999994232,
+        "hybrid": 0.006249999999994316
       },
       "tokenCounts": {
         "lexical": {
@@ -2596,9 +2566,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.026833000000010543,
-        "graph": 0.005625000000009095,
-        "hybrid": 0.004416999999989457
+        "lexical": 0.04641700000001947,
+        "graph": 0.011207999999982121,
+        "hybrid": 0.019834000000003016
       },
       "tokenCounts": {
         "lexical": {
@@ -2683,15 +2653,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.031708999999978005,
-        "graph": 3.1777080000000524,
-        "hybrid": 0.32541700000001583
+        "lexical": 0.03187500000001364,
+        "graph": 0.6240000000000236,
+        "hybrid": 0.18491599999998698
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 1,
           "used": 1,
-          "tokens": 78
+          "tokens": 77
         },
         "graph": {
           "retrieved": 1,
@@ -2778,20 +2748,20 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.022125000000016826,
-        "graph": 3.309750000000008,
-        "hybrid": 0.35045900000000074
+        "lexical": 0.013125000000002274,
+        "graph": 1.1459169999999972,
+        "hybrid": 0.2222500000000025
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 2,
           "used": 2,
-          "tokens": 156
+          "tokens": 155
         },
         "graph": {
           "retrieved": 3,
           "used": 3,
-          "tokens": 143
+          "tokens": 140
         },
         "hybrid": {
           "retrieved": 2,
@@ -2835,8 +2805,8 @@
             "source": "graph"
           },
           {
-            "id": "file:config/blueprint.json",
-            "path": "config/blueprint.json",
+            "id": "file:config/cortex.json",
+            "path": "config/cortex.json",
             "kind": "file",
             "abstained": false,
             "reason": null,
@@ -2905,15 +2875,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.01883399999996982,
-        "graph": 2.5415419999999926,
-        "hybrid": 0.21791699999999992
+        "lexical": 0.015291999999988093,
+        "graph": 0.6539579999999887,
+        "hybrid": 0.16633399999997778
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 1,
           "used": 1,
-          "tokens": 70
+          "tokens": 69
         },
         "graph": {
           "retrieved": 1,
@@ -2997,9 +2967,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.023458000000005086,
-        "graph": 0.007499999999993179,
-        "hybrid": 0.005249999999989541
+        "lexical": 0.018583000000006678,
+        "graph": 0.005458000000004404,
+        "hybrid": 0.004124999999987722
       },
       "tokenCounts": {
         "lexical": {
@@ -3084,9 +3054,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.2197500000000332,
-        "graph": 0.015625,
-        "hybrid": 0.006541999999967629
+        "lexical": 0.05816599999999994,
+        "graph": 0.013292000000006965,
+        "hybrid": 0.01099999999999568
       },
       "tokenCounts": {
         "lexical": {
@@ -3171,15 +3141,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.06166600000000244,
-        "graph": 1.4267080000000192,
-        "hybrid": 0.27070900000001075
+        "lexical": 0.02804100000000176,
+        "graph": 2.1952500000000157,
+        "hybrid": 0.35941700000000765
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 6,
           "used": 6,
-          "tokens": 469
+          "tokens": 464
         },
         "graph": {
           "retrieved": 7,
@@ -3381,15 +3351,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.07083399999999074,
-        "graph": 7.0715000000000146,
-        "hybrid": 0.26720799999998235
+        "lexical": 0.016708999999991647,
+        "graph": 0.7543330000000026,
+        "hybrid": 0.21587499999998272
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 2,
           "used": 2,
-          "tokens": 167
+          "tokens": 165
         },
         "graph": {
           "retrieved": 4,
@@ -3516,15 +3486,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.027875000000051386,
-        "graph": 4.037374999999997,
-        "hybrid": 0.4145840000000476
+        "lexical": 0.014791999999999916,
+        "graph": 0.6393329999999935,
+        "hybrid": 0.22812500000000568
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 6,
           "used": 6,
-          "tokens": 469
+          "tokens": 464
         },
         "graph": {
           "retrieved": 7,
@@ -3723,9 +3693,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.06679200000002083,
-        "graph": 0.03204099999999244,
-        "hybrid": 0.024499999999989086
+        "lexical": 0.012792000000018788,
+        "graph": 0.007375000000024556,
+        "hybrid": 0.005915999999984933
       },
       "tokenCounts": {
         "lexical": {
@@ -3810,15 +3780,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.07154199999996536,
-        "graph": 2.928957999999966,
-        "hybrid": 0.5068340000000262
+        "lexical": 0.040832999999992126,
+        "graph": 1.696708000000001,
+        "hybrid": 0.4933330000000069
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 1,
           "used": 1,
-          "tokens": 97
+          "tokens": 96
         },
         "graph": {
           "retrieved": 2,
@@ -3913,15 +3883,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.029791999999986274,
-        "graph": 2.2632500000000277,
-        "hybrid": 0.2995000000000232
+        "lexical": 0.05158300000002214,
+        "graph": 1.0614170000000058,
+        "hybrid": 0.26037500000001046
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 6,
           "used": 6,
-          "tokens": 465
+          "tokens": 460
         },
         "graph": {
           "retrieved": 6,
@@ -4124,15 +4094,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.015207999999972799,
-        "graph": 0.8531659999999874,
-        "hybrid": 3.573165999999958
+        "lexical": 0.020375000000001364,
+        "graph": 0.7794159999999977,
+        "hybrid": 0.1946659999999838
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 1,
           "used": 1,
-          "tokens": 97
+          "tokens": 96
         },
         "graph": {
           "retrieved": 2,
@@ -4224,9 +4194,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.03408300000000963,
-        "graph": 0.0071659999999837964,
-        "hybrid": 0.005041000000005624
+        "lexical": 0.013291999999978543,
+        "graph": 0.005500000000012051,
+        "hybrid": 0.004209000000003016
       },
       "tokenCounts": {
         "lexical": {
@@ -4311,15 +4281,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.06020800000004556,
-        "graph": 3.6235829999999964,
-        "hybrid": 0.8266670000000431
+        "lexical": 0.033749999999997726,
+        "graph": 1.1425419999999917,
+        "hybrid": 1.5742089999999962
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 7,
           "used": 7,
-          "tokens": 568
+          "tokens": 563
         },
         "graph": {
           "retrieved": 10,
@@ -4577,15 +4547,15 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.037082999999995536,
-        "graph": 0.9213330000000042,
-        "hybrid": 0.2591669999999908
+        "lexical": 0.021250000000009095,
+        "graph": 2.9545830000000137,
+        "hybrid": 0.6817090000000121
       },
       "tokenCounts": {
         "lexical": {
           "retrieved": 6,
           "used": 6,
-          "tokens": 469
+          "tokens": 464
         },
         "graph": {
           "retrieved": 7,
@@ -4784,9 +4754,9 @@
         }
       },
       "latenciesMs": {
-        "lexical": 0.03445900000002666,
-        "graph": 0.018541999999968084,
-        "hybrid": 0.015249999999980446
+        "lexical": 0.046750000000002956,
+        "graph": 0.023416999999994914,
+        "hybrid": 0.02133400000002439
       },
       "tokenCounts": {
         "lexical": {

@@ -27,7 +27,7 @@ import {
   tryGit,
 } from "./_shared.mjs";
 
-const ADAPTER_ID = "rightcontext-sources/git-metadata";
+const ADAPTER_ID = "membrane-sources/git-metadata";
 const ADAPTER_LAYER = 1; // Layer 1 — authoritative repository state
 const DEFAULT_BODY_BYTE_CAP = 1200;
 const TRUNCATION_MARKER = "\n\n[…git metadata truncated…]";

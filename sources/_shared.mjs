@@ -29,7 +29,6 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 const IGNORED_DIRS = new Set([
   ".agent",
   ".audit",
-  ".blueprint",
   ".cache",
   ".git",
   ".next",
@@ -65,7 +64,7 @@ export const SUPPORTED_EXTENSIONS = new Set([
   ...FILE_ONLY_EXTENSIONS,
 ]);
 
-export const SCOPE_PROVIDER = "rightcontext-sources";
+export const SCOPE_PROVIDER = "membrane-sources";
 
 // Default byte cap applied to any single rule/document candidate. The plan
 // locks this at 1500; long rules still surface as candidates but the body is
@@ -175,7 +174,7 @@ export function makeCandidate({
     protected: Boolean(isProtected),
     exact: Boolean(exact),
     recoverable: Boolean(recoverable),
-    resolver: resolver ?? `rightcontext sources resolve --id ${id}`,
+    resolver: resolver ?? `membrane sources resolve --id ${id}`,
     text: text ?? "",
   };
 }

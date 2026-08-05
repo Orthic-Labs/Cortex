@@ -4,7 +4,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { applyFileDelta, DOC_PROVIDER, MAX_DEPENDENT_FILES, MAX_HOPS, STRUCTURAL_PROVIDER } from "../graph/delta-store.mjs";
 import { parseFileFacts } from "../graph/static-provider.mjs";
 import { buildIncrementalTreeSitterFacts, SUPPORTED_EXTENSIONS } from "../graph/treesitter-provider.mjs";
-import { extractDoc, isDoc, loadConfig } from "../scripts/blueprint.mjs";
+import { extractDoc, isDoc, loadConfig } from "../scripts/cortex.mjs";
 import { MAX_SOURCE_FILE_BYTES, stableRead } from "../graph/stable-read.mjs";
 import { collectDependents, closeStore, listFileMetadata, listSymbolMetadata, openStore, openStoreReadOnly } from "../graph/store-sqlite.mjs";
 import { eventsSince, startWatch, writeSnapshot } from "./adapter.mjs";

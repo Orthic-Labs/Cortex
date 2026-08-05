@@ -34,7 +34,7 @@ function normalizePath(root, value) {
 // a glob; do not reintroduce `**` or trailing `/**` here, it silently no-ops.
 // `extra` therefore carries exact relative paths — the caller (repo-actor via
 // the supervisor) resolves them from its own root before passing them in.
-const EXCLUDED_NAMES = Object.freeze([".git", "node_modules", ".agent", ".blueprint", ...SCAN_EXCLUSIONS]);
+const EXCLUDED_NAMES = Object.freeze([".git", "node_modules", ".agent", ...SCAN_EXCLUSIONS]);
 
 // The scanner prunes any directory whose NAME is excluded, at any depth. The
 // watcher cannot: per the note above, a bare name only excludes that name

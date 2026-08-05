@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CLI = path.resolve(HERE, "../scripts/blueprint.mjs");
+const CLI = path.resolve(HERE, "../scripts/cortex.mjs");
 
 function run(repo, args) {
   return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8" });
@@ -24,10 +24,10 @@ function findAuditCollector() {
   }
 }
 
-test("Blueprint hygiene facts are cached, generation-bound, and become stale with the graph", {
+test("Cortex hygiene facts are cached, generation-bound, and become stale with the graph", {
   skip: findAuditCollector() ? false : "requires workspace Audit collector",
 }, () => {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "blueprint-hygiene-"));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "cortex-hygiene-"));
   try {
     fs.mkdirSync(path.join(repo, "src"));
     fs.writeFileSync(path.join(repo, "src", "large.ts"), [

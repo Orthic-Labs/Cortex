@@ -16,14 +16,14 @@ function makeIsolatedAdmission(overrides = {}) {
       manifestDigest: "sha256:manifest-fixed",
       generatedAt: "gen:fixed",
     },
-    provider: { id: "blueprint-static" },
+    provider: { id: "cortex-static" },
     sourceObservation: { dirty: false },
     nodes: [],
     edges: [],
   };
   const candidateSet = {
     schemaVersion: 1,
-    provider: "blueprint-static",
+    provider: "cortex-static",
     freshness: { revision: "xxh128:gen-fixed", manifestDigest: "sha256:manifest-fixed" },
     candidates: [
       {
@@ -84,7 +84,7 @@ test("orient blocks when graph is missing — decision only, no hooks", async ()
     });
     assert.equal(result.action, "block");
     assert.equal(result.reasonCode, "missing_graph");
-    assert.match(result.nextAction, /blueprint build/);
+    assert.match(result.nextAction, /cortex build/);
     assert.ok(DECISION_ACTIONS.includes(result.action));
     assert.equal(result.schemaVersion, 1);
   } finally {
@@ -108,11 +108,11 @@ test("orient issues a host receipt and Sentinel evidence file", async () => {
     assert.ok(result.receiptId);
     assert.ok(result.allowedScopes.includes("src/a.ts"));
     assert.ok(result.allowedScopes.includes("src/b.ts"));
-    assert.equal(result.evidence.kind, "blueprint_orientation");
-    assert.equal(result.evidence.locator, `blueprint://receipt/${result.receiptId}`);
+    assert.equal(result.evidence.kind, "cortex_orientation");
+    assert.equal(result.evidence.locator, `cortex://receipt/${result.receiptId}`);
     assert.ok(result.evidencePath);
     const onDisk = JSON.parse(readFileSync(result.evidencePath, "utf8"));
-    assert.equal(onDisk.kind, "blueprint_orientation");
+    assert.equal(onDisk.kind, "cortex_orientation");
     assert.equal(result.receipt.generationId, "xxh128:gen-fixed");
     assert.equal(result.receipt.sessionId, "sess-1");
 

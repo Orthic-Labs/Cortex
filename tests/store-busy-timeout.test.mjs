@@ -11,8 +11,10 @@ import { openStore, openStoreReadOnly, closeStore } from "../graph/store-sqlite.
 test("writable and read-only stores both wait out contention instead of failing instantly", () => {
   const dir = mkdtempSync(join(tmpdir(), "cortex-busy-"));
   const dbPath = join(dir, "graph.db");
+  // Writers wait longer than readers on purpose: a blocked reader can retry cheaply,
+  // while a blocked writer loses a whole build generation.
   const writer = openStore(dbPath);
-  assert.equal(writer.prepare("PRAGMA busy_timeout").get().timeout, 5000);
+  assert.equal(writer.prepare("PRAGMA busy_timeout").get().timeout, 30000);
   const reader = openStoreReadOnly(dbPath);
   assert.equal(reader.prepare("PRAGMA busy_timeout").get().timeout, 5000);
   reader.close();

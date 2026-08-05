@@ -9,12 +9,12 @@ import { fileURLToPath } from "node:url";
 import { bootstrapFromTracked } from "../graph/bootstrap.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BLUEPRINT = path.resolve(HERE, "..");
-const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
-const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+const CORTEX = path.resolve(HERE, "..");
+const CLI = path.join(CORTEX, "scripts/cortex.mjs");
+const FIXTURE = path.join(CORTEX, "evals/fixture-repos/typescript-commerce");
 
 function copyFixture(prefix) {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), `blueprint-${prefix}-`));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), `cortex-${prefix}-`));
   fs.cpSync(FIXTURE, repo, { recursive: true });
   return repo;
 }
@@ -31,7 +31,7 @@ test("build-produced portable manifest bootstraps its graph generation", () => {
   const repo = copyFixture("p0-bootstrap");
   try {
     build(repo);
-    const manifestPath = path.join(repo, ".blueprint", "manifest.json");
+    const manifestPath = path.join(repo, ".agent", "manifest.json");
     const graphPath = path.join(repo, ".agent", "graph", "graph.db");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 

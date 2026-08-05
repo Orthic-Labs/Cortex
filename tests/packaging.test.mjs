@@ -10,13 +10,12 @@ const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 
 test("package.json exposes standalone version, bin, engines, and files", () => {
   assert.equal(pkg.name, "@orthic-labs/cortex");
-  assert.equal(pkg.bin?.cortex, "./scripts/blueprint.mjs");
+  assert.equal(pkg.bin?.cortex, "./scripts/cortex.mjs");
   assert.match(String(pkg.version), /^\d+\.\d+\.\d+/);
   assert.equal(pkg.type, "module");
   assert.ok(pkg.engines?.node);
   assert.match(pkg.engines.node, />=22\.13/);
-  assert.equal(pkg.bin?.blueprint, "./scripts/blueprint.mjs");
-  assert.ok(existsSync(join(ROOT, "scripts/blueprint.mjs")));
+  assert.ok(existsSync(join(ROOT, "scripts/cortex.mjs")));
   assert.ok(Array.isArray(pkg.files));
   for (const required of ["scripts/", "graph/", "lib/", "sources/", "schemas/"]) {
     assert.ok(pkg.files.includes(required), `files must include ${required}`);
@@ -32,5 +31,5 @@ test("admission library and schemas ship in the package surface", () => {
   assert.ok(existsSync(join(ROOT, "lib/admission.mjs")));
   assert.ok(existsSync(join(ROOT, "lib/receipt-store.mjs")));
   assert.ok(existsSync(join(ROOT, "lib/orientation-evidence.mjs")));
-  assert.ok(existsSync(join(ROOT, "schemas/blueprint-admission-v1.schema.json")));
+  assert.ok(existsSync(join(ROOT, "schemas/cortex-admission-v1.schema.json")));
 });

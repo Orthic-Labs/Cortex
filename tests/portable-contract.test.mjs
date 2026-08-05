@@ -6,7 +6,7 @@
 //   - bootstrap rejects manifests that bake in absolute machine paths
 //   - collision-safe IDs when duplicate file/symbol slugs would otherwise clash
 //   - doctor states (missing/stale/degraded/ready) with machine-readable reasons
-//   - tracked .blueprint/ portable contract works without machine-specific paths
+//   - tracked .agent/ portable contract works without machine-specific paths
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -22,17 +22,17 @@ import {
   sourceHashPublic as sourceHash,
 } from "../graph/static-provider.mjs";
 import {
-  BLUEPRINT_DIR_NAME,
+  AGENT_DIR_NAME,
   MANIFEST_NAME,
   bootstrapFromTracked,
 } from "../graph/bootstrap.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BLUEPRINT = path.resolve(HERE, "..");
-const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+const CORTEX = path.resolve(HERE, "..");
+const FIXTURE = path.join(CORTEX, "evals/fixture-repos/typescript-commerce");
 
 function copyFixture() {
-  const dir = path.join(os.tmpdir(), `blueprint-portable-${process.pid}-${Date.now()}`);
+  const dir = path.join(os.tmpdir(), `cortex-portable-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, dir, { recursive: true });
   return dir;
 }
@@ -159,26 +159,26 @@ test("bootstrap returns ready when the tracked manifest matches the current sour
     const hash = sourceHash(sources.files);
     const manifest = {
       schemaVersion: 1,
-      provider: "blueprint-static",
+      provider: "cortex-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
       generation: {
         id: "test-bootstrap-ready",
-        toolVersions: { blueprint: "0.4.2" },
+        toolVersions: { cortex: "0.4.2" },
         supportedEdgeTypes: ["CALLS", "IMPORTS"],
         supportedLanguages: ["typescript"],
       },
       repo: { rootName: "typescript-commerce", sourceHash: hash, fileCount: sources.files.length },
       frozen: true,
     };
-    writeJson(path.join(repo, BLUEPRINT_DIR_NAME, MANIFEST_NAME), manifest);
+    writeJson(path.join(repo, AGENT_DIR_NAME, MANIFEST_NAME), manifest);
 
     const result = bootstrapFromTracked(repo);
     assert.equal(result.state, "ready");
     assert.equal(result.descriptor.frozen, true);
     assert.equal(result.descriptor.contentHash, hash);
     assert.equal(result.descriptor.id, "test-bootstrap-ready");
-    assert.deepEqual(result.descriptor.toolVersions, { blueprint: "0.4.2" });
+    assert.deepEqual(result.descriptor.toolVersions, { cortex: "0.4.2" });
     assert.deepEqual(result.descriptor.supportedEdgeTypes, ["CALLS", "IMPORTS"]);
     assert.deepEqual(result.descriptor.supportedLanguages, ["typescript"]);
     // The tracked descriptor must carry NO absolute machine paths.
@@ -196,13 +196,13 @@ test("bootstrap returns stale when the tracked manifest does not match the sourc
     const manifest = {
       schemaVersion: 1,
       generationId: "test-bootstrap-stale",
-      provider: "blueprint-static",
+      provider: "cortex-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
       repo: { rootName: "typescript-commerce", sourceHash: "xxh128:" + "0".repeat(32), fileCount: 0 },
       frozen: true,
     };
-    writeJson(path.join(repo, BLUEPRINT_DIR_NAME, MANIFEST_NAME), manifest);
+    writeJson(path.join(repo, AGENT_DIR_NAME, MANIFEST_NAME), manifest);
 
     const result = bootstrapFromTracked(repo);
     assert.equal(result.state, "stale");
@@ -220,7 +220,7 @@ test("bootstrap rejects manifests that bake in absolute machine paths", () => {
     const manifest = {
       schemaVersion: 1,
       generationId: "test-bootstrap-absolute-path",
-      provider: "blueprint-static",
+      provider: "cortex-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
       // Bake an absolute Windows path into the manifest.
@@ -232,7 +232,7 @@ test("bootstrap rejects manifests that bake in absolute machine paths", () => {
       },
       frozen: true,
     };
-    writeJson(path.join(repo, BLUEPRINT_DIR_NAME, MANIFEST_NAME), manifest);
+    writeJson(path.join(repo, AGENT_DIR_NAME, MANIFEST_NAME), manifest);
 
     const result = bootstrapFromTracked(repo);
     assert.equal(result.state, "corrupt");
@@ -251,12 +251,12 @@ test("bootstrap rejects manifests with unsupported schemaVersion", () => {
     const manifest = {
       schemaVersion: 99,
       generationId: "test-bootstrap-bad-version",
-      provider: "blueprint-static",
+      provider: "cortex-static",
       generatedAt: "2026-07-12T17:00:00Z",
       complete: true,
       repo: { rootName: "typescript-commerce", sourceHash: "xxh128:" + "0".repeat(32) },
     };
-    writeJson(path.join(repo, BLUEPRINT_DIR_NAME, MANIFEST_NAME), manifest);
+    writeJson(path.join(repo, AGENT_DIR_NAME, MANIFEST_NAME), manifest);
     const result = bootstrapFromTracked(repo);
     assert.equal(result.state, "corrupt");
     assert.ok(result.errors.some((e) => e.includes("schemaVersion")));
@@ -341,7 +341,7 @@ test("doctor is JSON-parseable and reports ready state for a clean fixture", () 
 });
 
 function spawnBuild(repo, outDir) {
-  const cli = path.resolve(BLUEPRINT, "scripts/blueprint.mjs");
+  const cli = path.resolve(CORTEX, "scripts/cortex.mjs");
   const result = spawnSync(process.execPath, [cli, "build", "--out", outDir], {
     cwd: repo,
     encoding: "utf8",
@@ -354,7 +354,7 @@ function spawnBuild(repo, outDir) {
 
 function spawnDoc(repo, outDir) {
   // Use the CLI so we exercise the doctor payload shape exactly as a caller would.
-  const cli = path.resolve(BLUEPRINT, "scripts/blueprint.mjs");
+  const cli = path.resolve(CORTEX, "scripts/cortex.mjs");
   const result = spawnSync(
     process.execPath,
     [cli, "doctor", "--out", outDir],

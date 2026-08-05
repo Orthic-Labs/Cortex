@@ -8,12 +8,12 @@ import { fileURLToPath } from "node:url";
 import { closeStore, openStore, readManifestEnvelope } from "../graph/store-sqlite.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BLUEPRINT = path.resolve(HERE, "..");
-const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
-const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+const CORTEX = path.resolve(HERE, "..");
+const CLI = path.join(CORTEX, "scripts/cortex.mjs");
+const FIXTURE = path.join(CORTEX, "evals/fixture-repos/typescript-commerce");
 
-test("regular blueprint build writes graph and flow artifacts beside bootstrap map", () => {
-  const repo = path.join(os.tmpdir(), `blueprint-live-build-${process.pid}-${Date.now()}`);
+test("regular cortex build writes graph and flow artifacts beside bootstrap map", () => {
+  const repo = path.join(os.tmpdir(), `cortex-live-build-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
     assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: repo }).status, 0);
@@ -25,19 +25,19 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     const result = spawnSync(process.execPath, [CLI, "build", "--out", ".agent", "--check"], { cwd: repo, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /phase1_maintenance=complete/);
-    assert.match(result.stdout, /full_blueprint=not_requested/);
+    assert.match(result.stdout, /full_cortex=not_requested/);
     assert.doesNotMatch(result.stdout, /next=phase2/);
     assert.ok(fs.existsSync(path.join(repo, ".agent/map.json")), "map.json must exist");
     assert.ok(fs.existsSync(path.join(repo, ".agent/graph/graph.db")), "graph store must exist");
     assert.ok(fs.existsSync(path.join(repo, ".agent/flows.json")), "flows.json must exist");
-    assert.ok(fs.existsSync(path.join(repo, ".blueprint/manifest.json")), ".blueprint/manifest.json must exist");
+    assert.ok(fs.existsSync(path.join(repo, ".agent/manifest.json")), ".agent/manifest.json must exist");
     assert.equal(fs.existsSync(path.join(repo, ".agent/START-HERE.md")), false, "START-HERE.md must NOT exist (retired)");
-    const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
+    const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".agent/manifest.json"), "utf8"));
     assert.equal(manifest.entrypoint, ".agent/");
     // Tree-sitter is the SELECTED provider once it parses anything in the repo
     // (it cleared every qualification gate the lexical incumbent has). The
     // lexical layer stays as the fallback for the extensions it cannot parse.
-    assert.equal(manifest.generation.provider ?? manifest.generation.toolVersions?.blueprint ?? null, "blueprint-treesitter");
+    assert.equal(manifest.generation.provider ?? manifest.generation.toolVersions?.cortex ?? null, "cortex-treesitter");
     assert.equal(manifest.generation.baseCommit, baseCommit);
     const graph = openStore(path.join(repo, ".agent/graph/graph.db"));
     try {
@@ -51,7 +51,7 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
       closeStore(graph);
     }
     const map = JSON.parse(fs.readFileSync(path.join(repo, ".agent/map.json"), "utf8"));
-    assert.equal(map.entrypoint, ".blueprint/manifest.json");
+    assert.equal(map.entrypoint, ".agent/manifest.json");
 
     // A dirty tree no longer defers the build — the graph is a local index, not
     // a committed artifact — so the build succeeds and indexes what is on disk.
@@ -62,7 +62,7 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     // …and it says so honestly: a graph built from uncommitted content does not
     // correspond to any commit, so baseCommit is null and the state is recorded
     // as a dirty overlay rather than silently claiming the last commit.
-    const dirtyManifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
+    const dirtyManifest = JSON.parse(fs.readFileSync(path.join(repo, ".agent/manifest.json"), "utf8"));
     assert.equal(dirtyManifest.generation.baseCommit, null);
     assert.equal(dirtyManifest.generation.sourceState, "dirty_overlay");
 
@@ -72,7 +72,7 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
     assert.equal(rerun.status, 0, rerun.stderr || rerun.stdout);
     assert.match(rerun.stdout, /built .agent\/map.json/);
     assert.match(rerun.stdout, /phase1_ready/);
-    assert.match(rerun.stdout, /full_blueprint=incomplete/);
+    assert.match(rerun.stdout, /full_cortex=incomplete/);
     assert.match(rerun.stdout, /next=phase2/);
     assert.ok(fs.existsSync(path.join(repo, ".agent/graph/graph.db")), "graph store must be rebuilt by bare command");
   } finally {
@@ -81,7 +81,7 @@ test("regular blueprint build writes graph and flow artifacts beside bootstrap m
 });
 
 test("build stays fresh when tracked generated docs are rewritten", () => {
-  const repo = path.join(os.tmpdir(), `blueprint-generated-docs-${process.pid}-${Date.now()}`);
+  const repo = path.join(os.tmpdir(), `cortex-generated-docs-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
     fs.renameSync(path.join(repo, "docs/ARCHITECTURE.md"), path.join(repo, "docs/design.md"));
@@ -97,7 +97,7 @@ test("build stays fresh when tracked generated docs are rewritten", () => {
     });
     assert.equal(first.status, 0, first.stderr || first.stdout);
     assert.equal(spawnSync("git", [
-      "add", "-f", ".agent", ".blueprint", "docs/product.md", "docs/architecture.md",
+      "add", "-f", ".agent", "docs/product.md", "docs/architecture.md",
     ], { cwd: repo }).status, 0);
     assert.equal(spawnSync("git", ["commit", "--quiet", "-m", "track generated docs"], { cwd: repo }).status, 0);
 
@@ -115,7 +115,7 @@ test("build stays fresh when tracked generated docs are rewritten", () => {
       encoding: "utf8",
     });
     assert.equal(status.status, 0, status.stderr || status.stdout);
-    const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".blueprint/manifest.json"), "utf8"));
+    const manifest = JSON.parse(fs.readFileSync(path.join(repo, ".agent/manifest.json"), "utf8"));
     assert.equal(manifest.generation.sourceState, "clean");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });

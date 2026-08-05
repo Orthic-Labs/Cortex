@@ -9,15 +9,15 @@ import { findWorkspaceRoot } from "../_workspace-root.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = findWorkspaceRoot(HERE, { required: false });
-const BLUEPRINT = path.resolve(HERE, "../..");
-const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
-const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+const CORTEX = path.resolve(HERE, "../..");
+const CLI = path.join(CORTEX, "scripts/cortex.mjs");
+const FIXTURE = path.join(CORTEX, "evals/fixture-repos/typescript-commerce");
 const SCHEMA = ROOT ? path.join(ROOT, "tools/lib/context-contracts.schema.json") : null;
 import { PYTHON } from "../python-test-runtime.mjs";
 const workspaceSkip = ROOT ? false : "requires parent monorepo context contracts";
 
 test("graph candidates CLI validates as ContextCandidateSet v1", { skip: workspaceSkip }, () => {
-  const repo = path.join(os.tmpdir(), `blueprint-candidate-contract-${process.pid}-${Date.now()}`);
+  const repo = path.join(os.tmpdir(), `cortex-candidate-contract-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
     const build = spawnSync(process.execPath, [CLI, "graph", "build", "--out", ".agent"], {
@@ -33,11 +33,11 @@ test("graph candidates CLI validates as ContextCandidateSet v1", { skip: workspa
     const generatedPayload = JSON.parse(generated.stdout);
     assert.equal(generatedPayload.candidates.length > 0, true);
     assert.equal(
-      Number.isFinite(generatedPayload?._rightcontext?.stageElapsedMs?.repo_code_scan),
+      Number.isFinite(generatedPayload?._membrane?.stageElapsedMs?.repo_code_scan),
       true,
       "candidate CLI must emit a content-free repo scan duration",
     );
-    assert.equal(generatedPayload._rightcontext.stageElapsedMs.repo_code_scan >= 0, true);
+    assert.equal(generatedPayload._membrane.stageElapsedMs.repo_code_scan >= 0, true);
     const validator = String.raw`
 import json, sys
 from jsonschema import Draft202012Validator
@@ -59,7 +59,7 @@ sys.exit(1 if errors else 0)
 
 test("candidate set applies real tiering: anchors reserved, exact flagged, overflow receipted", async () => {
   const { buildGraphGeneration, createContextCandidateSet } = await import("../../graph/static-provider.mjs");
-  const repo = path.join(os.tmpdir(), `blueprint-tiering-${process.pid}-${Date.now()}`);
+  const repo = path.join(os.tmpdir(), `cortex-tiering-${process.pid}-${Date.now()}`);
   fs.mkdirSync(repo, { recursive: true });
   try {
     spawnSync("git", ["init", "-q"], { cwd: repo });
@@ -100,7 +100,7 @@ test("pinned generation answers from the store alone — no source-tree walk", (
   // staleness by walking/hashing sources. Proven structurally: delete every
   // source file after build; only the store remains. A tree walk would see a
   // stale/missing repo and refuse — the pinned door must still answer.
-  const repo = path.join(os.tmpdir(), `blueprint-pinned-door-${process.pid}-${Date.now()}`);
+  const repo = path.join(os.tmpdir(), `cortex-pinned-door-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, repo, { recursive: true });
   try {
     const build = spawnSync(process.execPath, [CLI, "graph", "build", "--out", ".agent"], {

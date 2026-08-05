@@ -1,7 +1,7 @@
 // Adapter 2 — Current dirty files and diffs.
 //
 // Reads `git status --porcelain` and `git diff` to surface the working-tree
-// overlay that Blueprint (a generation artifact) does not know about yet.
+// overlay that Cortex (a generation artifact) does not know about yet.
 // Per the dispatch overlay ownership: G1 detects, G3 ranks, G5 (this lane)
 // produces typed candidates; this adapter never ranks — `providerScore`
 // is a uniform 0.95 for tracked-overlay files and 0.7 for untracked files.
@@ -38,7 +38,7 @@ import {
   tryGit,
 } from "./_shared.mjs";
 
-const ADAPTER_ID = "rightcontext-sources/dirty-files";
+const ADAPTER_ID = "membrane-sources/dirty-files";
 const ADAPTER_LAYER = 1; // Layer 1 — live working-tree truth beats stale graph
 const DEFAULT_DIFF_BYTE_CAP = 4000;
 const TRUNCATION_MARKER = "\n\n[…diff truncated; per-file byte cap applied…]";

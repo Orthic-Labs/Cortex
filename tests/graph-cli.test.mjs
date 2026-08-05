@@ -10,13 +10,13 @@ import { closeStore, openStore } from "../graph/store-sqlite.mjs";
 import { markDomainPending, readPendingDomains } from "../graph/delta-store.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BLUEPRINT = path.resolve(HERE, "..");
-const CLI = path.join(BLUEPRINT, "scripts/blueprint.mjs");
-const SKILL = path.join(BLUEPRINT, "SKILL.md");
-const FIXTURE = path.join(BLUEPRINT, "evals/fixture-repos/typescript-commerce");
+const CORTEX = path.resolve(HERE, "..");
+const CLI = path.join(CORTEX, "scripts/cortex.mjs");
+const SKILL = path.join(CORTEX, "SKILL.md");
+const FIXTURE = path.join(CORTEX, "evals/fixture-repos/typescript-commerce");
 
 function copyFixture() {
-  const dir = path.join(os.tmpdir(), `blueprint-graph-cli-${process.pid}-${Date.now()}`);
+  const dir = path.join(os.tmpdir(), `cortex-graph-cli-${process.pid}-${Date.now()}`);
   fs.cpSync(FIXTURE, dir, { recursive: true });
   return dir;
 }
@@ -25,7 +25,7 @@ function run(args, cwd) {
   return spawnSync(process.execPath, [CLI, ...args], { cwd, encoding: "utf8" });
 }
 
-test("blueprint graph build/status/search works from a repo root", () => {
+test("cortex graph build/status/search works from a repo root", () => {
   const repo = copyFixture();
   try {
     fs.writeFileSync(path.join(repo, "opaque.png"), Buffer.from([0, 1, 2, 3, 255]));
@@ -38,7 +38,7 @@ test("blueprint graph build/status/search works from a repo root", () => {
 
     const status = run(["graph", "status", "--out", ".agent"], repo);
     assert.equal(status.status, 0, status.stderr);
-    assert.match(status.stdout, /graph fresh provider=blueprint-static/);
+    assert.match(status.stdout, /graph fresh provider=cortex-static/);
 
     const search = run(["graph", "search", "--query", "placeOrder", "--out", ".agent", "--limit", "3"], repo);
     assert.equal(search.status, 0, search.stderr);
@@ -60,7 +60,7 @@ test("blueprint graph build/status/search works from a repo root", () => {
   }
 });
 
-test("blueprint graph status exits distinctly when no generation exists", () => {
+test("cortex graph status exits distinctly when no generation exists", () => {
   const repo = copyFixture();
   try {
     const status = run(["graph", "status", "--out", ".agent"], repo);

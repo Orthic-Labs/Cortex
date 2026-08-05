@@ -8,7 +8,7 @@ import { buildNeighborhood } from "../graph/neighborhood.mjs";
 import { buildGraphGeneration, readGeneration } from "../graph/static-provider.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
-const CLI = join(ROOT, "scripts/blueprint.mjs");
+const CLI = join(ROOT, "scripts/cortex.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 const SCHEMA = join(ROOT, "schemas/repository-neighborhood-v1.schema.json");
 import { PYTHON } from "./python-test-runtime.mjs";

@@ -41,8 +41,8 @@ function sampleGeneration() {
       { id: "edge:CONTAINS:file:a.ts->symbol:a.ts::foo", kind: "CONTAINS", source: "file:a.ts", target: "symbol:a.ts::foo", confidence: 1, resolved: true, evidence: [] },
     ],
     fileReports: [
-      { path: "a.ts", language: "typescript", provider: "blueprint-treesitter", parseStatus: "ok", errorNodeCount: 0 },
-      { path: "b.ts", language: "typescript", provider: "blueprint-treesitter", parseStatus: "ok", errorNodeCount: 0 },
+      { path: "a.ts", language: "typescript", provider: "cortex-treesitter", parseStatus: "ok", errorNodeCount: 0 },
+      { path: "b.ts", language: "typescript", provider: "cortex-treesitter", parseStatus: "ok", errorNodeCount: 0 },
     ],
   };
 }
@@ -335,7 +335,7 @@ test("blastRadius on a node with no dependents returns just the seed at depth 0"
 });
 
 test("store is regenerable: a fresh openStore on a new file has zero rows until populated", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blueprint-store-sqlite-"));
+  const dir = mkdtempSync(join(tmpdir(), "cortex-store-sqlite-"));
   const dbPath = join(dir, "graph.sqlite");
   try {
     const db = openStore(dbPath);

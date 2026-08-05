@@ -1,7 +1,7 @@
 // Adapter 6 — Live files newer than the graph.
 //
 // Detects files whose working-tree mtime or content hash has moved past
-// the Blueprint graph generation timestamp. Per dispatch overlay ownership:
+// the Cortex graph generation timestamp. Per dispatch overlay ownership:
 // G1 detects, G3 ranks, G5 (this lane) produces typed candidates.
 //
 // Strategy:
@@ -19,7 +19,7 @@
 //   - `dirty-files` = `git status` overlay (tracked-status-aware)
 //   - `live-overlay` = mtime/hash drift against the graph generation,
 //     including untracked files not yet noticed by git, and files that
-//     moved past the most recent Blueprint rebuild.
+//     moved past the most recent Cortex rebuild.
 //
 // Both emit at Layer 1 with providerScore 0.85–0.95 depending on signal
 // strength. The planner picks one (or none) per file via its dedupe rule.
@@ -39,13 +39,13 @@ import {
   tryGit,
 } from "./_shared.mjs";
 
-const ADAPTER_ID = "rightcontext-sources/live-overlay";
+const ADAPTER_ID = "membrane-sources/live-overlay";
 const ADAPTER_LAYER = 1; // Layer 1 — live working-tree truth
 const DEFAULT_BODY_BYTE_CAP = 2000;
 const TRUNCATION_MARKER = "\n\n[…file body truncated; per-file byte cap applied…]";
 
 function loadGenerationMeta(repoRoot) {
-  // The graph lives in graph.db. `.blueprint/index.jsonl` is not a second copy
+  // The graph lives in graph.db. `.agent/index.jsonl` is not a second copy
   // of it — it is the lighter bootstrap index, present when a repo has been
   // indexed but never fully built, so it stays as a distinct source.
   const dbPath = join(repoRoot, ".agent", "graph", "graph.db");
@@ -68,7 +68,7 @@ function loadGenerationMeta(repoRoot) {
     } catch { /* unreadable store — fall through to the bootstrap index */ }
   }
   const candidates = [
-    join(repoRoot, ".blueprint", "index.jsonl"),
+    join(repoRoot, ".agent", "index.jsonl"),
   ];
   for (const path of candidates) {
     if (!existsSync(path)) continue;
@@ -205,7 +205,7 @@ export function produce(task, scope) {
         endLine: body.lines,
         bodyHash: body.bodyHash,
         estimatedTokens: Math.max(1, body.lines),
-        resolver: `blueprint graph overlay --check ${safe}`,
+        resolver: `cortex graph overlay --check ${safe}`,
       }),
     );
   }
@@ -217,7 +217,7 @@ export const adapterInfo = {
   id: ADAPTER_ID,
   layer: ADAPTER_LAYER,
   provider: SCOPE_PROVIDER,
-  description: "Live files whose content or mtime has moved past the Blueprint graph generation.",
+  description: "Live files whose content or mtime has moved past the Cortex graph generation.",
 };
 
 export const _internals = { loadGenerationMeta, walkFiles, gitIgnored };

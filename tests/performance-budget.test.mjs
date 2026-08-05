@@ -10,7 +10,7 @@ import { closeStore, openStore } from "../graph/store-sqlite.mjs";
 import { CortexRepositoryWorker } from "../watchman/repo-actor.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
-const CLI = join(ROOT, "scripts/blueprint.mjs");
+const CLI = join(ROOT, "scripts/cortex.mjs");
 const FIXTURE = join(ROOT, "evals/fixture-repos/typescript-commerce");
 
 function run(repo, args) {

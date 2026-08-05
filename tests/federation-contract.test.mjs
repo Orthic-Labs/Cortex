@@ -46,7 +46,7 @@ test("barrier-all returns independent receipts and candidate identities", () => 
     assert.equal(candidateA.repoRoot, canonicalA);
     assert.equal(candidateB.repoRoot, canonicalB);
     assert.equal(candidateA.receiptId, null);
-    const cliCandidate = spawnSync(process.execPath, [join(ROOT, "scripts/blueprint.mjs"), "candidates", "--repo-id", "explicit-repo", "--query", "placeOrder", "--json"], { cwd: repoA, encoding: "utf8" });
+    const cliCandidate = spawnSync(process.execPath, [join(ROOT, "scripts/cortex.mjs"), "candidates", "--repo-id", "explicit-repo", "--query", "placeOrder", "--json"], { cwd: repoA, encoding: "utf8" });
     assert.equal(cliCandidate.status, 0, cliCandidate.stderr);
     assert.equal(JSON.parse(cliCandidate.stdout).repoId, "explicit-repo");
   } finally {

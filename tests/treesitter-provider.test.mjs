@@ -15,7 +15,7 @@ function findNode(nodes, qualifiedName) {
 }
 
 test("provider identity and capability surface are well-formed", () => {
-  assert.equal(PROVIDER.id, "blueprint-treesitter");
+  assert.equal(PROVIDER.id, "cortex-treesitter");
   assert.ok(PROVIDER.version);
   const caps = graphCapabilities();
   assert.equal(caps.provider.id, PROVIDER.id);

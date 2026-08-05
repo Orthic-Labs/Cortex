@@ -1,7 +1,7 @@
 {
   "name": "@orthic-labs/cortex",
   "version": "0.2.0",
-  "description": "Cortex (formerly Blueprint): local evidence-backed repository map — documents, claims, code graph (Neurons/Synapses/Circuits), and orientation admission library.",
+  "description": "Cortex: local evidence-backed repository map — documents, claims, code graph (Neurons/Synapses/Circuits), and orientation admission library.",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "packageManager": "pnpm@11.18.0",
@@ -9,8 +9,7 @@
     "node": ">=22.13"
   },
   "bin": {
-    "blueprint": "./scripts/blueprint.mjs",
-    "cortex": "./scripts/blueprint.mjs",
+    "cortex": "./scripts/cortex.mjs",
     "cortex-watch": "./scripts/cortex-watch.mjs",
     "cortex-mcp": "./scripts/cortex-mcp.mjs",
     "cortex-install": "./scripts/cortex-install.mjs"

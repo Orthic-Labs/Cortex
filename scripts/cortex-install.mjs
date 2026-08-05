@@ -10,7 +10,7 @@ const END = "<!-- cortex:end -->";
 const MESSAGE = "Run cortex_orient first — Cortex Graph has current repository truth.";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER_SCRIPT = join(SCRIPT_DIR, "cortex-mcp.mjs");
-const BLUEPRINT_SCRIPT = join(SCRIPT_DIR, "blueprint.mjs");
+const CORTEX_SCRIPT = join(SCRIPT_DIR, "cortex.mjs");
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -116,7 +116,7 @@ function installGitHooks(state, root) {
   const gitPath = execFileSync("git", ["-C", root, "rev-parse", "--git-path", "hooks"], { encoding: "utf8" }).trim();
   const hooksDir = gitPath.startsWith("/") ? gitPath : resolve(root, gitPath);
   for (const name of ["post-checkout", "post-merge", "post-rewrite", "post-checkout.cmd", "post-merge.cmd", "post-rewrite.cmd"]) remember(state, join(hooksDir, name));
-  execFileSync(process.execPath, [BLUEPRINT_SCRIPT, "hooks", "install-git"], { cwd: root, stdio: "ignore" });
+  execFileSync(process.execPath, [CORTEX_SCRIPT, "hooks", "install-git"], { cwd: root, stdio: "ignore" });
 }
 
 function restore(root, state) {
@@ -150,7 +150,7 @@ function grantCheck(root) {
   let allowed = false;
   if (requestedPath) {
     try {
-      execFileSync(process.execPath, [BLUEPRINT_SCRIPT, "grant", "check", "--task", task, "--path", requestedPath], { cwd: root, stdio: "ignore" });
+      execFileSync(process.execPath, [CORTEX_SCRIPT, "grant", "check", "--task", task, "--path", requestedPath], { cwd: root, stdio: "ignore" });
       allowed = true;
     } catch {}
   }
