@@ -8,7 +8,8 @@
 // explicitly given (or ':memory:'); it never resolves or writes outside that.
 
 import { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { statSync } from "node:fs";
 import { computeFullLedger } from "./merkle-ledger.mjs";
 
@@ -23,7 +24,12 @@ import { computeFullLedger } from "./merkle-ledger.mjs";
 // Opens (creating if absent) the sqlite file at `dbPath`, or an in-memory
 // database when `dbPath` is ":memory:" or omitted. Always runs migrate()
 // before returning, so every caller gets a ready-to-use store.
-export function openStore(dbPath = ":memory:") {
+//
+// `options.upToVersion` caps how far migrations run — used ONLY to build the
+// N-2/N-1 fixture stores in fixtures/stores/ so tests can prove migrate() can
+// read and upgrade the previous two minor schema lines. Production always
+// passes no cap (full latest schema).
+export function openStore(dbPath = ":memory:", options = {}) {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA foreign_keys = ON;");
   if (dbPath !== ":memory:") {
@@ -38,8 +44,50 @@ export function openStore(dbPath = ":memory:") {
     // waits far longer rather than surfacing a spurious lock error.
     db.exec("PRAGMA busy_timeout = 30000;");
   }
-  migrate(db);
+  migrateDb(db, { dbPath, upToVersion: options.upToVersion });
   return db;
+}
+
+// Location for pre-migration safety copies. One per from-version, so an
+// interrupted upgrade can be rolled back to the exact schema it started from.
+export function migrationBackupPath(dbPath, fromVersion) {
+  const norm = String(dbPath).replaceAll("\\", "/").replace(/\/+$/, "");
+  const name = norm.slice(norm.lastIndexOf("/") + 1);
+  return join(dirname(norm), "backups", `graph.db.before-migrate-v${fromVersion}`);
+}
+
+export function migrationHasBackup(dbPath, fromVersion) {
+  return existsSync(migrationBackupPath(dbPath, fromVersion));
+}
+
+/**
+ * Restore the pre-migration backup made before an interrupted schema upgrade.
+ *
+ * migrateDb() writes a backup of the store file BEFORE applying any migration
+ * (when the store already has schema version >= 1). If a migration is killed
+ * mid-apply (process kill, disk error, crash), the store file can be left
+ * half-upgraded while the meta row still says the OLD version. Repairing means:
+ * restore the exact pre-migration bytes, then re-run migrate() from scratch on
+ * the next open. Returns { restored, reason } instead of throwing, so doctor
+ * repair plans can treat an absent backup as a typed finding, not a crash.
+ */
+export function repairInterruptedMigration(dbPath, fromVersion) {
+  const backupPath = migrationBackupPath(dbPath, fromVersion);
+  if (!existsSync(backupPath)) return { restored: false, reason: "no_backup" };
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const target = dbPath + suffix;
+    if (existsSync(target)) rmSync(target, { force: true });
+  }
+  mkdirSync(dirname(dbPath), { recursive: true });
+  copyFileSync(backupPath, dbPath);
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("PRAGMA journal_mode = WAL;");
+    migrateDb(db, { dbPath });
+    return { restored: true, fromVersion };
+  } finally {
+    db.close();
+  }
 }
 
 /**
@@ -516,11 +564,46 @@ export function listArtifactState(db) {
   return db.prepare("SELECT artifact, generation_id AS generationId, fingerprint, updated_ms AS updatedMs FROM artifact_state ORDER BY artifact").all();
 }
 
-export function migrate(db) {
+/**
+ * Apply pending migrations up to SCHEMA_VERSION (or `upToVersion` for fixture
+ * stores). Before applying ANY upgrade to a non-empty store (schema version >=
+ * 1), copies the current store bytes to a backup path so an interrupted
+ * migration can be rolled back via repairInterruptedMigration(). Backups are
+ * deliberately created for from-version only — the restore target is the exact
+ * schema the store was on before the upgrade.
+ */
+export function migrate(db, options = {}) {
+  return migrateDb(db, { dbPath: options.dbPath, upToVersion: options.upToVersion });
+}
+
+export function migrateDb(db, { dbPath = null, upToVersion = null } = {}) {
   db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
   let version = getSchemaVersion(db);
   const initialVersion = version;
-  while (version < MIGRATIONS.length) {
+  const target = upToVersion === null || !Number.isInteger(upToVersion)
+    ? MIGRATIONS.length
+    : Math.max(0, Math.min(MIGRATIONS.length, upToVersion));
+  if (dbPath && dbPath !== ":memory:") {
+    // Pre-migration safety copy for EXISTING stores only. A brand-new store
+    // (version 0) has nothing to lose; backing it up would only paper over a
+    // broken migration that should fail loudly instead.
+    if (initialVersion > 0 && initialVersion < target && !migrationHasBackup(dbPath, initialVersion)) {
+      const backupPath = migrationBackupPath(dbPath, initialVersion);
+      try {
+        // Force any committed WAL contents into the main file first — copying
+        // only the main file while a -wal holds committed pages would freeze
+        // the store at a stale state.
+        db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        mkdirSync(dirname(backupPath), { recursive: true });
+        copyFileSync(dbPath, backupPath);
+      } catch (error) {
+        // A backup that cannot be written is a hard stop — migrating without a
+        // restore path turns an interrupted migration into data loss.
+        throw new Error(`cannot back up store before migration: ${error?.message ?? error}`);
+      }
+    }
+  }
+  while (version < target) {
     db.exec("BEGIN;");
     try {
       MIGRATIONS[version](db);

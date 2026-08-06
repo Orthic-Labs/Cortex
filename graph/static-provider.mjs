@@ -293,7 +293,16 @@ export function graphStatus(repoRoot, outDir, options = {}) {
   // for a second format.
   const manifestPath = join(resolve(root, outDir), "graph", "graph.db");
   if (!existsSync(manifestPath)) return { state: "missing", manifestPath };
-  const store = openStoreReadOnly(manifestPath);
+  // D51: a corrupt store must surface as a TYPED state, never an untyped
+  // crash. "file is not a database" is the classic hostile-input signature
+  // (a repo ships garbage bytes in .agent/graph/graph.db); the graph status
+  // ladder (missing|corrupt|degraded|...) already has the right vocabulary.
+  let store;
+  try {
+    store = openStoreReadOnly(manifestPath);
+  } catch (error) {
+    return { state: "corrupt", manifestPath, storeError: String(error?.message ?? error) };
+  }
   let manifest;
   let envelope;
   let recordedHashes = new Map();
@@ -317,6 +326,10 @@ export function graphStatus(repoRoot, outDir, options = {}) {
         eventGap: watchState.event_gap === "1",
       };
     }
+  } catch (error) {
+    // A store that opens but fails on its first query is corrupt (hostile or
+    // truncated bytes). Typed state, not a throw.
+    return { state: "corrupt", manifestPath, storeError: String(error?.message ?? error) };
   } finally {
     closeStore(store);
   }
@@ -1153,6 +1166,34 @@ function writeGeneration(outDir, generation) {
   const graphDir = join(outDir, "graph");
   mkdirSync(graphDir, { recursive: true });
   const dbPath = join(graphDir, "graph.db");
+  // D51: a corrupt store ahead of a persist is typed, recoverable state. The
+  // store is the BUILD's output and this write replaces it wholesale, so a
+  // hostile/truncated prior store is removed (with its WAL/SHM sidecars)
+  // rather than crashing the indexer. Non-corruption open failures still
+  // surface as a typed error.
+  if (existsSync(dbPath)) {
+    try {
+      const probe = openStoreReadOnly(dbPath);
+      try {
+        // A corrupt SQLite file can OPEN read-only without error; only the
+        // first page read trips it. Probe with a trivial query so hostile
+        // bytes are actually detected, not just opened.
+        probe.prepare("SELECT count(*) AS n FROM sqlite_master").get();
+      } finally {
+        closeStore(probe);
+      }
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      if (/not a database|file is encrypted|malformed/i.test(message)) {
+        for (const suffix of ["", "-wal", "-shm"]) {
+          const sidecar = dbPath + suffix;
+          if (existsSync(sidecar)) rmSync(sidecar, { force: true });
+        }
+      } else {
+        throw new Error(`graph_publication_failed: ${message}`);
+      }
+    }
+  }
   const db = openStore(dbPath);
   try {
     saveGeneration(db, generation, { populateState: true });

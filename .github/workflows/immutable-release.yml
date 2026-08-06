@@ -1,0 +1,204 @@
+name: immutable-release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (vX.Y.Z)'
+        required: true
+      dry_run:
+        description: 'Run all gates but do not publish or sign'
+        required: false
+        default: 'false'
+
+# D53: a release cannot bypass any required gate. This workflow is the
+# authoritative gate chain: tests, qualification (schema + security +
+# hardening), package, signing (Apple + Azure), notarization, SBOM,
+# provenance (attest + OIDC), clean-host install→init→query→MCP→update→
+# rollback→uninstall, update + rollback contract, and uninstall proof.
+# The dry-run path runs every gate but does not sign or publish, so a
+# rehearsal can prove the chain end-to-end before a real release.
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:all
+  qualification:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node --test tests/contracts-v1.test.mjs
+      - run: node --test "tests/security/**/*.test.mjs" tests/mcp-root-confinement.test.mjs tests/plugin-boundary.test.mjs tests/support-bundle-redaction.test.mjs
+      - run: node --test tests/store-migrations.test.mjs tests/store-rollback.test.mjs tests/performance-envelopes.test.mjs tests/cross-platform-paths.test.mjs
+      - run: node --test tests/soak-contract.test.mjs tests/daemon-recovery.test.mjs tests/freshness-regressions.test.mjs
+      - run: node scripts/ci/check-network-boundary.mjs
+  package:
+    needs: [qualification]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/test-package.mjs
+      - run: node scripts/release/build-candidate.mjs --platform current --out "release/candidates/ubuntu"
+      - run: node scripts/release/check-release.mjs release/candidates/ubuntu
+  macos-sign-and-notarize:
+    needs: [package]
+    if: ${{ inputs.dry_run != 'true' }}
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/release/stage-runtime.mjs --out "${{ runner.temp }}/cortex-runtime"
+      - name: Sign and notarize
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          cd release/macos
+          bash ../../scripts/release/macos/sign-and-package.sh "${{ runner.temp }}/cortex-runtime"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-macos-signed
+          path: release/macos/Cortex-*.pkg
+  windows-sign:
+    needs: [package]
+    if: ${{ inputs.dry_run != 'true' }}
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/release/stage-runtime.mjs --out "${{ runner.temp }}/cortex-runtime"
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ runner.temp }}\cortex-runtime
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - run: pwsh -File scripts/release/windows/build-installer.ps1 -Staging "${{ runner.temp }}\cortex-runtime" -OutDir "${{ runner.temp }}"
+      - run: pwsh -File scripts/release/windows/verify-signatures.ps1 -Root "${{ runner.temp }}\cortex-runtime"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-windows-signed
+          path: ${{ runner.temp }}\Cortex-*.exe
+  sbom:
+    needs: [package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/release/sbom.mjs --candidate release/candidates/ubuntu --out release/candidates/ubuntu/SBOM.spdx.json
+  provenance:
+    needs: [package, macos-sign-and-notarize, windows-sign, sbom]
+    if: ${{ inputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: cortex-macos-signed
+          path: release/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: cortex-windows-signed
+          path: release/windows
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: release/candidates/ubuntu
+          predicate-type: "https://slsa.dev/provenance/v1"
+  clean-host-install:
+    needs: [package, macos-sign-and-notarize, windows-sign, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      # Rehearsal: install → init → query → MCP → update → rollback → uninstall
+      # on a fresh VM. A dry-run rehearsal is required before any real
+      # release is tagged as immutable.
+      - run: node scripts/release/clean-host-smoke.mjs --candidate release/candidates/ubuntu
+  publish-npm:
+    needs: [clean-host-install, provenance]
+    if: ${{ inputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      # OIDC trusted publishing — no long-lived NPM_TOKEN fallback.
+      - uses: actions/attest@v4
+        with:
+          subject-path: package.json
+          predicate-type: "https://slsa.dev/provenance/v1"
+      - run: pnpm publish --provenance --access public
