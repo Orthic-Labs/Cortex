@@ -1,133 +1,100 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+// D07: MCP adapter over the shared application service. The server root is
+// supplied at process start (--root, --repo-id, CORTEX_REPO_ROOTS); tool
+// inputs never accept an unrestricted repoRoot. Exactly six default tools.
+// Every result passes through redactForEgress.
+
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import {
-  createContextCandidateSet,
-  graphNeighbors,
-  graphStatus,
-  queryGraph,
-  readGeneration,
-  repositoryIdentity,
-} from "../graph/static-provider.mjs";
-import { buildNeighborhood } from "../graph/neighborhood.mjs";
-import { syncToCurrentSourceAtPath } from "../graph/barrier.mjs";
+
+import { createCortexApplicationService } from "../lib/application/service.mjs";
+import { RootRegistry } from "../lib/application/root-registry.mjs";
+import { redactForEgress } from "../lib/redaction.mjs";
 
 const OUT_DIR = ".agent";
-const MESSAGE = "Run cortex_orient first — Cortex Graph has current repository truth.";
 
-function sessionKey() {
-  return String(process.env.CORTEX_SESSION_ID ?? process.env.CLAUDE_SESSION_ID ?? process.env.MCP_SESSION_ID ?? "default").replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
-function readJson(path, fallback) {
-  if (!existsSync(path)) return fallback;
-  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return fallback; }
-}
-
-function markOriented(repoRoot) {
-  const markerDir = join(repoRoot, OUT_DIR, "graph");
-  mkdirSync(markerDir, { recursive: true });
-  writeFileSync(join(markerDir, `cortex-orient-session-${sessionKey()}.marker`), `${Date.now()}\n`, "utf8");
-}
-
-function result(payload, isError = false) {
-  return { isError, content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
-}
-
-async function barrier(repoRoot) {
-  const root = resolve(repoRoot);
-  const dbPath = join(root, OUT_DIR, "graph", "graph.db");
-  if (!existsSync(dbPath)) {
-    return { root, receipt: { receiptId: null, barrierResult: "missing" }, generation: null };
+function parseRootConfig() {
+  const argv = process.argv.slice(2);
+  const flags = new Map();
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--root") { flags.set("root", argv[index + 1]); index += 1; }
+    else if (token === "--repo-id") { flags.set("repoId", argv[index + 1]); index += 1; }
+    else if (token.startsWith("--root=")) flags.set("root", token.slice(7));
+    else if (token.startsWith("--repo-id=")) flags.set("repoId", token.slice(10));
   }
-  const receipt = await syncToCurrentSourceAtPath(root, { outDir: OUT_DIR, timeoutMs: 2000 });
-  if (receipt.barrierResult !== "caught_up") return { root, receipt, generation: null };
-  return { root, receipt, generation: readGeneration(root, OUT_DIR) };
+  const envRoots = String(process.env.CORTEX_REPO_ROOTS ?? "").split(":").filter(Boolean);
+  return { root: flags.get("root"), repoId: flags.get("repoId"), envRoots };
 }
 
-function orientPayload(root, generation, receipt) {
-  const status = graphStatus(root, OUT_DIR);
-  const map = readJson(join(root, OUT_DIR, "map.json"), {});
-  const manifest = readJson(join(root, ".agent/manifest.json"), {});
-  const flowInventory = readJson(join(root, OUT_DIR, "flows.json"), { flows: [] });
-  const query = "";
-  const identity = repositoryIdentity(root);
-  const candidates = createContextCandidateSet(generation, { task: query, query, maxCandidates: 40, ...identity, repoRoot: root, receiptId: receipt.receiptId });
-  const flows = Array.isArray(flowInventory.flows) ? flowInventory.flows : [];
-  const topCircuits = flows.slice(0, 5).map((flow, index) => ({
-    name: flow.name ?? flow.entry?.name ?? flow.terminal?.name ?? flow.id ?? `circuit-${index + 1}`,
-    files: [...new Set((Array.isArray(flow.path) ? flow.path : []).map((node) => node?.path).filter(Boolean))].slice(0, 10),
-  }));
-  return {
-    schemaVersion: 1,
-    product: "cortex",
-    generationId: status.manifest?.generationId ?? null,
-    manifestDigest: status.manifest?.manifestDigest ?? null,
-    freshness: { state: status.state, checkedAt: new Date().toISOString() },
-    entrypoint: map.entrypoint ?? manifest.entrypoint ?? null,
-    topCircuits,
-    candidates,
-    freshnessReceipt: receipt,
-    receiptId: receipt.receiptId,
-  };
-}
-
-async function cortexOrient(repoRoot) {
-  const state = await barrier(repoRoot);
-  if (!state.generation) {
-    const payload = { error: state.receipt.barrierResult === "missing" ? "graph_missing" : "stale_blocked", receiptId: state.receipt.receiptId, barrier: state.receipt };
-    return result(payload, true);
+function buildService() {
+  const { root, repoId, envRoots } = parseRootConfig();
+  const entries = [];
+  if (root) entries.push({ root: resolve(root), repoId });
+  for (const envRoot of envRoots) entries.push({ root: resolve(envRoot) });
+  if (!entries.length) {
+    throw new Error("cortex-mcp requires --root, --repo-id, or CORTEX_REPO_ROOTS");
   }
-  markOriented(state.root);
-  return result(orientPayload(state.root, state.generation, state.receipt));
+  const registry = new RootRegistry(entries);
+  return createCortexApplicationService({ outDir: OUT_DIR, rootRegistry: registry, allowEmbeddedRoot: false });
 }
 
-async function cortexExpand(repoRoot, anchors, budgetTokens) {
-  const state = await barrier(repoRoot);
-  if (!state.generation) {
-    const payload = { error: state.receipt.barrierResult === "missing" ? "graph_missing" : "stale_blocked", receiptId: state.receipt.receiptId, barrier: state.receipt };
-    return result(payload, true);
-  }
-  const payload = buildNeighborhood(state.generation, anchors, { budgetTokens, receiptId: state.receipt.receiptId, ...repositoryIdentity(state.root) });
-  return result(payload);
-}
-
-async function cortexResolve(repoRoot, query) {
-  const state = await barrier(repoRoot);
-  if (!state.generation) {
-    const payload = { error: state.receipt.barrierResult === "missing" ? "graph_missing" : "stale_blocked", receiptId: state.receipt.receiptId, barrier: state.receipt };
-    return result(payload, true);
-  }
-  const searchResults = queryGraph(state.generation, { query, limit: 20 });
-  const merged = searchResults.map((match) => ({
-    ...match,
-    neighbors: graphNeighbors(state.generation, { nodeId: match.id, depth: 1 }),
-  }));
-  return result({ schemaVersion: 1, provider: state.generation.provider.id, query, receiptId: state.receipt.receiptId, results: merged, freshnessReceipt: state.receipt });
+function call(fn) {
+  return Promise.resolve()
+    .then(fn)
+    .then((value) => ({ content: [{ type: "text", text: JSON.stringify(redactForEgress(value), null, 2) }] }))
+    .catch((error) => ({
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({
+        schemaVersion: 1,
+        error: { code: error.code ?? "internal_error", message: String(error.message ?? error), details: redactForEgress(error.details ?? {}) },
+      }, null, 2) }],
+    }));
 }
 
 export function createCortexMcpServer() {
+  const service = buildService();
   const server = new McpServer({ name: "cortex", version: "0.2.0" });
+  const common = { repoId: z.string().optional(), generation: z.string().optional(), allowStale: z.boolean().optional() };
+
   server.registerTool("cortex_orient", {
-    description: "Orient against current repository truth before reading files.",
-    inputSchema: { repoRoot: z.string().min(1) },
-  }, ({ repoRoot }) => cortexOrient(repoRoot));
+    description: "Establish current repository and generation context.",
+    inputSchema: { ...common, task: z.string().optional(), query: z.string().optional(), limit: z.number().int().min(1).max(100).optional() },
+  }, (input) => call(() => service.orient(input)));
+
+  server.registerTool("cortex_search", {
+    description: "Search symbols, files, claims, routes, and concepts.",
+    inputSchema: { ...common, query: z.string().min(1), limit: z.number().int().min(1).max(100).optional() },
+  }, (input) => call(() => service.search(input)));
+
   server.registerTool("cortex_expand", {
-    description: "Expand protected anchors into a bounded repository neighborhood.",
-    inputSchema: { repoRoot: z.string().min(1), anchors: z.array(z.string()).min(1), budgetTokens: z.number().int().positive().optional() },
-  }, ({ repoRoot, anchors, budgetTokens }) => cortexExpand(repoRoot, anchors, budgetTokens ?? 8000));
-  server.registerTool("cortex_resolve", {
-    description: "Resolve a repository query into search matches with graph neighbors.",
-    inputSchema: { repoRoot: z.string().min(1), query: z.string().min(1) },
-  }, ({ repoRoot, query }) => cortexResolve(repoRoot, query));
+    description: "Expand one anchor into a bounded evidence slice.",
+    inputSchema: { ...common, anchor: z.string().min(1), depth: z.number().int().min(1).max(5).optional(), budget: z.number().int().min(128).max(32000).optional(), cursor: z.string().optional() },
+  }, (input) => call(() => service.expand(input)));
+
+  server.registerTool("cortex_impact", {
+    description: "Return upstream impact, tests, routes, schemas, and uncertainty.",
+    inputSchema: { ...common, anchor: z.string().min(1), depth: z.number().int().min(1).max(8).optional(), budget: z.number().int().min(128).max(32000).optional(), cursor: z.string().optional() },
+  }, (input) => call(() => service.impact(input)));
+
+  server.registerTool("cortex_doc_truth", {
+    description: "Return current, stale, contradicted, and unknown document claims.",
+    inputSchema: { ...common, claimId: z.string().optional(), kind: z.string().optional(), limit: z.number().int().min(1).max(1000).optional() },
+  }, (input) => call(() => service.documentTruth(input)));
+
+  server.registerTool("cortex_status", {
+    description: "Return freshness, coverage, service health, and repair actions.",
+    inputSchema: common,
+  }, (input) => call(() => service.status(input)));
+
   return server;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const server = createCortexMcpServer();
   await server.connect(new StdioServerTransport());
 }

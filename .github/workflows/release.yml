@@ -1,0 +1,98 @@
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (vX.Y.Z)'
+        required: true
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+jobs:
+  macos-sign:
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/release/stage-runtime.mjs --out "${{ runner.temp }}/cortex-runtime"
+      - name: Sign and notarize
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          cd release/macos
+          bash ../../scripts/release/macos/sign-and-package.sh "${{ runner.temp }}/cortex-runtime"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-macos-signed
+          path: release/macos/Cortex-*.pkg
+  windows-sign:
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/release/stage-runtime.mjs --out "${{ runner.temp }}/cortex-runtime"
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ runner.temp }}\cortex-runtime
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Build per-user installer
+        run: pwsh -File scripts/release/windows/build-installer.ps1 -Staging "${{ runner.temp }}\cortex-runtime" -OutDir "${{ runner.temp }}"
+      - name: Verify signatures
+        run: pwsh -File scripts/release/windows/verify-signatures.ps1 -Root "${{ runner.temp }}\cortex-runtime"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-windows-signed
+          path: ${{ runner.temp }}\Cortex-*.exe
+  publish-npm:
+    runs-on: ubuntu-latest
+    environment: release
+    needs: [macos-sign, windows-sign]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:all
+      - run: node scripts/test-package.mjs
+      - uses: actions/attest@v4
+        with:
+          subject-path: package.json
+          predicate-type: "https://slsa.dev/provenance/v1"
+      - run: pnpm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

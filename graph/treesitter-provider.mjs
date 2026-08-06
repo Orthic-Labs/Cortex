@@ -88,7 +88,7 @@
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Parser, Language } from "web-tree-sitter";
 import { createXXHash128, xxhash128 } from "hash-wasm";
@@ -100,6 +100,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const requireFromHere = createRequire(import.meta.url);
 const GRAMMAR_PACKAGE_JSON = requireFromHere.resolve("tree-sitter-wasms/package.json");
 const WASM_DIR = join(dirname(GRAMMAR_PACKAGE_JSON), "out");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Identity lives in provider-identity.mjs so static-provider can read it for the
 // staleness check without importing this module (and with it web-tree-sitter).
@@ -254,9 +255,17 @@ const GRAMMAR_PACKAGE = readGrammarPackageInfo();
 
 const languageCache = new Map(); // languageId -> { language, parser, grammar } | { error, grammar }
 
-async function loadLanguageRecord(languageId) {
+export async function loadLanguageRecord(languageId) {
   if (languageCache.has(languageId)) return languageCache.get(languageId);
-  const entry = Object.values(LANGUAGES).find((item) => item.id === languageId);
+  let entry = Object.values(LANGUAGES).find((item) => item.id === languageId);
+  if (!entry) {
+    // Polyglot batches route through the grammar catalog (36 bundled WASMs).
+    try {
+      const catalog = JSON.parse(readFileSync(join(REPO_ROOT, "grammars", "catalog.json"), "utf8"));
+      const grammar = catalog.grammars.find((item) => item.language === languageId);
+      if (grammar) entry = { id: languageId, grammarFile: grammar.grammarFile };
+    } catch {}
+  }
   if (!entry) {
     const missing = { error: `no grammar registered for language "${languageId}"`, grammar: null };
     languageCache.set(languageId, missing);
@@ -808,12 +817,50 @@ function countErrorNodes(rootNode) {
   return count;
 }
 
+export function genericEngineEnabled() {
+  // Legacy extractors remain the default until D22 parity passes; the generic
+  // walker runs behind CORTEX_AST_ENGINE=generic for differential testing.
+  return process.env.CORTEX_AST_ENGINE === "generic";
+}
+
 export async function extractFile(file) {
   const path = normalizePath(file.path);
   const normalizedFile = { ...file, path };
   const extension = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
   const entry = LANGUAGES[extension];
   const fileNode = buildFileNode(normalizedFile);
+
+  if (genericEngineEnabled() && entry && typeof entry.id === "string" && entry.id.length) {
+    const record = await loadLanguageRecord(entry.id);
+    if (record.language) {
+      try {
+        const { walkTable } = await import("./generic-ast-walker.mjs");
+        const { defineLanguageTable } = await import("./language-table.mjs");
+        const table = defineLanguageTable({
+          id: entry.id,
+          extensions: [extension],
+          grammarFile: record.grammar ?? `${entry.id}.wasm`,
+          factProfile: "code",
+          functions: [{ nodeTypes: [entry.functionNode ?? "function_declaration"], name: { field: "name" }, labels: ["Function"], container: "file" }],
+          classes: [{ nodeTypes: entry.classNode ? [entry.classNode] : [], name: { field: "name" }, labels: ["Class"] }],
+          imports: [{ nodeTypes: entry.importNode ? [entry.importNode] : [], name: { field: entry.importNameField ?? "path" } }],
+          calls: [{ nodeTypes: entry.callNode ? [entry.callNode] : [], name: { field: entry.callNameField ?? "name" } }],
+          comments: [{ nodeTypes: entry.commentNode ? [entry.commentNode] : [] }],
+        });
+        const result = walkTable({ table, tree: record.language, filePath: path, providerId: PROVIDER.id, grammarHash: record.grammarHash ?? null, precisionTier: "AST" });
+        return {
+          path, language: entry.id, provider: PROVIDER.id, grammar: record.grammar,
+          parseStatus: result.reports.some((r) => r.kind === "parse_failed") ? "failed" : result.reports.some((r) => r.kind === "partial_parse") ? "partial" : "ok",
+          errorNodeCount: 0,
+          nodes: [fileNode, ...result.nodes],
+          edges: result.edges,
+          generic: true,
+        };
+      } catch {
+        // Fall through to the legacy extractor on any walker error.
+      }
+    }
+  }
 
   if (!entry) {
     return {

@@ -1,0 +1,31 @@
+name: publish-package-managers
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.1
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: node --test tests/package-manager-manifests.test.mjs
+      - run: ruby -c release/homebrew/cortex.rb
+      - run: node -e "JSON.parse(require('fs').readFileSync('server.json','utf8'))"
+      # Downstream PRs only — never rewrites an existing release.
+      - name: Open Homebrew tap PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: Orthic-Labs/homebrew-tap
+          branch: cortex-${{ github.ref_name }}
+          title: "cortex ${{ github.ref_name }}"
+          delete-branch: true
