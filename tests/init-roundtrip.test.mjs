@@ -2,7 +2,7 @@
 // for Claude Code, Codex, Cursor, and generic hosts.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,8 +102,57 @@ test("init state validator rejects corrupt and escaping restore plans", async ()
   if (typeof module.validateInstallState !== "function") return;
   const root = makeRepo("generic");
   try {
-    assert.throws(() => module.validateInstallState(root, { files: { [join(root, "..", "escape")]: { exists: false } } }), /state_invalid/);
-    assert.throws(() => module.validateInstallState(root, { files: { [root]: { exists: false } } }), /state_invalid/);
-    assert.doesNotThrow(() => module.validateInstallState(root, { files: { [join(root, "empty")]: { exists: true, bytes: "", content: "" } } }));
+    assert.throws(() => module.validateInstallState(root, { version: 1, files: { [join(root, "..", "escape")]: { exists: false } } }), /state_invalid/);
+    assert.throws(() => module.validateInstallState(root, { version: 1, files: { [root]: { exists: false } } }), /state_invalid/);
+    assert.throws(() => module.validateInstallState(root, { version: 1, files: { [join(root, "corrupt")]: { exists: true, bytes: "*" } } }), /state_invalid/);
+    assert.throws(() => module.validateInstallState(root, { version: 1, files: { [join(root, "random.txt")]: { exists: false, installed: "a".repeat(64) } } }), /state_invalid/);
+    assert.throws(() => module.validateInstallState(root, { version: 1, files: { [join(root, "CORTEX-AGENT.md")]: { exists: false } } }), /state_invalid/);
+    assert.doesNotThrow(() => module.validateInstallState(root, { version: 1, files: { [join(root, "CORTEX-AGENT.md")]: { exists: true, bytes: "", content: "", installed: "a".repeat(64) } } }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("uninstall rejects a symlinked state parent", (t) => {
+  const root = makeRepo("generic"), outside = mkdtempSync(join(tmpdir(), "cortex-state-outside-"));
+  try {
+    mkdirSync(join(outside, "graph")); writeFileSync(join(outside, "graph", "cortex-install-state.json"), '{"version":1,"files":{}}');
+    try { symlinkSync(outside, join(root, ".agent"), process.platform === "win32" ? "junction" : "dir"); } catch { t.skip("symlink privilege unavailable"); return; }
+    const result = spawnSync(process.execPath, [CORTEX, "uninstall", "--root", root, "--json"], { encoding: "utf8" });
+    assert.notEqual(result.status, 0); assert.ok(readFileSync(join(outside, "graph", "cortex-install-state.json"), "utf8"));
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("uninstall preserves host edits made after init", () => {
+  const root = makeRepo("generic");
+  try {
+    const file = join(root, "CORTEX-AGENT.md");
+    assert.equal(applyInitPlan({ root, plan: buildInitPlan({ root, host: "generic", mcp: "off", watch: "off" }), build: false }).ok, true);
+    writeFileSync(file, "# user edit\n");
+    const result = spawnSync(process.execPath, [CORTEX, "uninstall", "--root", root, "--json"], { encoding: "utf8" });
+    assert.notEqual(result.status, 0); assert.equal(readFileSync(file, "utf8"), "# user edit\n");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("install state integrity rejects repo-side snapshot tampering", async () => {
+  const root = makeRepo("generic"), keyDir = mkdtempSync(join(tmpdir(), "cortex-state-keys-"));
+  try {
+    const integrity = await import("../lib/init/state-integrity.mjs");
+    assert.equal(typeof integrity.sealInstallState, "function");
+    const state = { version: 1, files: { [join(root, "CORTEX-AGENT.md")]: { exists: false, bytes: null, installed: "a".repeat(64) } } };
+    const sealed = integrity.sealInstallState(root, state, { stateKeyDir: keyDir });
+    assert.doesNotThrow(() => integrity.verifyInstallState(root, sealed, { stateKeyDir: keyDir }));
+    sealed.files[join(root, "CORTEX-AGENT.md")].exists = true;
+    assert.throws(() => integrity.verifyInstallState(root, sealed, { stateKeyDir: keyDir }), /state_integrity_invalid/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(keyDir, { recursive: true, force: true }); }
+});
+
+test("init apply preserves corrupt state and its external key", async () => {
+  const root = makeRepo("generic"), integrity = await import("../lib/init/state-integrity.mjs"), path = join(root, ".agent", "graph", "cortex-install-state.json");
+  try {
+    mkdirSync(join(root, ".agent", "graph"), { recursive: true });
+    const sealed = integrity.sealInstallState(root, { version: 1, files: {} }), corrupt = { ...sealed, integrity: { ...sealed.integrity, tag: "0".repeat(64) } };
+    writeFileSync(path, JSON.stringify(corrupt));
+    assert.equal(applyInitPlan({ root, plan: buildInitPlan({ root, host: "generic", mcp: "off", watch: "off" }), build: false }).ok, false);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), corrupt);
+    assert.doesNotThrow(() => integrity.verifyInstallState(root, sealed));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

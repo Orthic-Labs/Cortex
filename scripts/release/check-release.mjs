@@ -4,8 +4,9 @@
 // impossible in this workflow.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export function verifyCandidate(candidateDir) {
@@ -16,35 +17,67 @@ export function verifyCandidate(candidateDir) {
   const sbomPath = join(dir, "SBOM.spdx.json");
   const catalogPath = join(dir, "artifact-catalog.json");
   for (const [name, path] of [["compatibility.json", compatibilityPath], ["checksums.txt", checksumsPath], ["SBOM.spdx.json", sbomPath], ["artifact-catalog.json", catalogPath]]) {
-    if (!existsSync(path)) problems.push(`missing ${name}`);
+    if (!existsSync(path) || !lstatSync(path).isFile()) problems.push(`missing ${name} or unsafe`);
   }
   if (problems.length) return { ok: false, problems };
 
   const compatibility = JSON.parse(readFileSync(compatibilityPath, "utf8"));
   const checksumLines = readFileSync(checksumsPath, "utf8").trim().split("\n").filter(Boolean);
-  const byName = new Map(checksumLines.map((line) => {
-    const [hash, ...rest] = line.split("  ");
-    return [rest.join("  "), hash];
-  }));
+  const checksums = checksumLines.map((line) => /^([a-f0-9]{64})  ([^\r\n]+)$/.exec(line)).filter(Boolean);
+  if (checksums.length !== checksumLines.length) problems.push("checksums.txt has invalid entries");
+  const byName = new Map(checksums.map(([, hash, name]) => [name, hash]));
+  const names = (compatibility.artifacts ?? []).map((artifact) => artifact.name);
+  const safe = (name) => typeof name === "string" && name.length > 0 && !isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`) && !name.includes("../") && !name.includes("\\..\\");
+  if (!compatibility.packageName || !names.length || new Set(names).size !== names.length || names.some((name) => !safe(name))) problems.push("unsafe or duplicate artifact inventory");
+  if (new Set(checksums.map(([, , name]) => name)).size !== checksums.length || new Set(byName.keys()).size !== names.length || names.some((name) => !byName.has(name)) || [...byName.keys()].some((name) => !names.includes(name))) problems.push("checksums.txt does not exactly inventory artifacts");
 
   for (const artifact of compatibility.artifacts ?? []) {
+    if (!safe(artifact.name)) continue;
     const path = join(dir, artifact.name);
-    if (!existsSync(path)) { problems.push(`artifact missing on disk: ${artifact.name}`); continue; }
+    if (!existsSync(path) || !lstatSync(path).isFile()) { problems.push(`artifact missing or unsafe on disk: ${artifact.name}`); continue; }
+    if (!/^[a-f0-9]{64}$/.test(artifact.sha256 ?? "")) { problems.push(`invalid checksum: ${artifact.name}`); continue; }
     const actual = createHash("sha256").update(readFileSync(path)).digest("hex");
     if (actual !== artifact.sha256) problems.push(`checksum mismatch: ${artifact.name}`);
     if (byName.get(artifact.name) !== artifact.sha256) problems.push(`checksums.txt mismatch: ${artifact.name}`);
   }
-  for (const line of checksumLines) {
-    const [, name] = line.split("  ");
+  for (const [, , name] of checksums) {
     if (!existsSync(join(dir, name))) problems.push(`checksums.txt references missing file: ${name}`);
   }
 
   const sbom = JSON.parse(readFileSync(sbomPath, "utf8"));
   if (sbom.spdxVersion !== "SPDX-2.3") problems.push("SBOM is not SPDX-2.3");
   const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-  if (!Array.isArray(catalog.files)) problems.push("artifact catalog has no files array");
+  if (!Array.isArray(catalog.files) || new Set(catalog.files).size !== catalog.files.length || catalog.checksums !== "checksums.txt" || catalog.version !== compatibility.version || catalog.platform !== compatibility.platform || catalog.files.length !== names.length || catalog.files.some((name) => !names.includes(name))) problems.push("artifact catalog does not exactly inventory artifacts");
+  const tarballs = names.filter((name) => name.endsWith(".tgz"));
+  const expectedTarball = `${String(compatibility.packageName).replace(/^@/, "").replaceAll("/", "-")}-${compatibility.version}.tgz`;
+  if (tarballs.length !== 1 || tarballs[0] !== expectedTarball) problems.push("candidate must contain exactly one package tarball");
+  else {
+    try {
+      const entries = execFileSync("tar", ["-tf", join(dir, tarballs[0])], { encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
+      const types = execFileSync("tar", ["-tvf", join(dir, tarballs[0])], { encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
+      const safeEntry = (entry) => entry === "package/" || (entry.startsWith("package/") && !entry.includes("\\") && !entry.split("/").includes(".."));
+      if (!entries.includes("package/package.json") || new Set(entries).size !== entries.length || entries.some((entry) => !safeEntry(entry)) || types.length !== entries.length || types.some((entry) => !/^[\-d]/.test(entry))) throw new Error("unsafe tar entries");
+      const packaged = JSON.parse(execFileSync("tar", ["-xOf", join(dir, tarballs[0]), "package/package.json"], { encoding: "utf8" }));
+      if (packaged.name !== compatibility.packageName || packaged.version !== compatibility.version) problems.push("tarball package identity mismatch");
+    } catch { problems.push("tarball package metadata unreadable"); }
+  }
+  const disk = walkFiles(dir);
+  const expected = new Set(["compatibility.json", "checksums.txt", "artifact-catalog.json", ...names]);
+  if (disk.some((name) => !expected.has(name)) || [...expected].some((name) => !disk.includes(name))) problems.push("candidate contains unlisted or missing files");
 
   return { ok: problems.length === 0, problems, compatibility, catalog };
+}
+
+function walkFiles(root, dir = root) {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) return ["__unsafe__"];
+    if (stat.isDirectory()) out.push(...walkFiles(root, path));
+    else out.push(relative(root, path).replaceAll("\\", "/"));
+  }
+  return out;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {

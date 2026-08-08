@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { generateKeyPairSync, sign } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -47,7 +48,7 @@ test("update manifest validates against UpdateManifestV1", () => {
       commit: "a".repeat(40),
       publishedAt: "2026-08-05T10:10:02.050Z",
       artifacts: [{ name: "cortex-linux-x64.tar.gz", platform: "linux", arch: "x64", sha256: "deadbeef", size: 1024, signed: false, sbom: "SBOM.spdx.json" }],
-      signature: "sig-1",
+      signatureAlgorithm: "Ed25519", keyId: "test-key", signature: "sig-1",
     };
     const path = join(dir, "manifest.json");
     writeFileSync(path, JSON.stringify(manifest));
@@ -58,10 +59,10 @@ test("update manifest validates against UpdateManifestV1", () => {
   }
 });
 
-test("manifest signature verification rejects missing and invalid signatures", () => {
+test("manifest signature verification never has a success default", () => {
   assert.equal(verifyManifestSignature({ signature: "" }).ok, false);
   assert.equal(verifyManifestSignature({ signature: "x" }, { verify: () => false }).ok, false);
-  assert.equal(verifyManifestSignature({ signature: "x" }, { verify: () => true }).ok, true);
+  assert.equal(verifyManifestSignature({ signature: "x" }, { verify: () => true }).ok, false);
 });
 
 test("artifact checksum verification rejects mismatches", () => {
@@ -73,7 +74,7 @@ test("artifact checksum verification rejects mismatches", () => {
 
 test("downgrade and replay are rejected", () => {
   assert.equal(rejectDowngrade("0.1.0", "0.2.0").ok, false);
-  assert.equal(rejectDowngrade("0.2.0", "0.2.0").ok, true);
+  assert.equal(rejectDowngrade("0.2.0", "0.2.0").ok, false);
   assert.equal(rejectDowngrade("0.3.0", "0.2.0").ok, true);
   assert.equal(rejectReplay({ commit: "abc" }, ["abc"]).ok, false);
   assert.equal(rejectReplay({ commit: "abc" }, ["def"]).ok, true);
@@ -83,7 +84,7 @@ test("store backup copies the database before update", () => {
   const root = mkdtempSync(join(tmpdir(), "cortex-update-backup-"));
   try {
     mkdirSync(join(root, ".agent", "graph"), { recursive: true });
-    writeFileSync(join(root, ".agent", "graph", "graph.db"), "sqlite-bytes");
+    const db = new DatabaseSync(join(root, ".agent", "graph", "graph.db")); db.exec("CREATE TABLE state (value TEXT)"); db.close();
     const result = backupStore(root);
     assert.equal(result.backedUp, true);
     assert.ok(result.path);
@@ -108,7 +109,7 @@ test("cortex update apply for source owner requires a signed manifest path", () 
   assert.ok(payload.action === "delegate" || payload.action === "require-signed-manifest");
 });
 
-test("Ed25519 manifest verification trusts only an explicit public key", async () => {
+test("Ed25519 manifest verification trusts only a pinned key-id map", async () => {
   const module = await import("../lib/update/manifest.mjs");
   assert.equal(typeof module.canonicalManifestPayload, "function");
   assert.equal(typeof module.verifySignedManifest, "function");
@@ -116,13 +117,30 @@ test("Ed25519 manifest verification trusts only an explicit public key", async (
   const dir = mkdtempSync(join(tmpdir(), "cortex-update-key-"));
   try {
     const keys = generateKeyPairSync("ed25519");
-    const manifest = { schemaVersion: 1, channel: "stable", version: "0.3.0", commit: "a".repeat(40), publishedAt: "2026-08-08T00:00:00Z", artifacts: [], publicKey: "attacker-controlled", signature: "" };
+    const manifest = { schemaVersion: 1, channel: "stable", version: "0.3.0", commit: "a".repeat(40), publishedAt: "2026-08-08T00:00:00Z", artifacts: [], signatureAlgorithm: "Ed25519", keyId: "ephemeral", signature: "" };
     manifest.signature = sign(null, Buffer.from(module.canonicalManifestPayload(manifest)), keys.privateKey).toString("base64");
-    const trusted = join(dir, "trusted.pem");
-    writeFileSync(trusted, keys.publicKey.export({ type: "spki", format: "pem" }));
-    assert.equal(module.verifySignedManifest(manifest, { publicKeyPath: trusted }).ok, true);
+    const trustedKeys = { ephemeral: keys.publicKey.export({ type: "spki", format: "pem" }) };
+    assert.equal(module.verifySignedManifest(manifest, { trustedKeys }).ok, true);
     manifest.version = "9.9.9";
-    assert.equal(module.verifySignedManifest(manifest, { publicKeyPath: trusted }).ok, false);
-    assert.equal(module.verifySignedManifest(manifest, {}).reason, "missing_public_key");
+    assert.equal(module.verifySignedManifest(manifest, { trustedKeys }).ok, false);
+    assert.equal(module.verifySignedManifest(manifest, {}).reason, "update_trust_root_missing");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("trusted key root accepts only a unique strict key list", async () => {
+  const { loadTrustedUpdateKeys } = await import("../lib/update/manifest.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "cortex-trust-root-"));
+  try {
+    const path = join(dir, "trusted-update-keys.json");
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, keys: [{ keyId: "release-1", algorithm: "Ed25519", publicKey: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----" }] }));
+    assert.equal(loadTrustedUpdateKeys(path)["release-1"].includes("BEGIN PUBLIC KEY"), true);
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, keys: [{ keyId: "release-1", algorithm: "Ed25519", publicKey: "one" }, { keyId: "release-1", algorithm: "Ed25519", publicKey: "two" }] }));
+    assert.throws(() => loadTrustedUpdateKeys(path), /update_trust_root_corrupt/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("CLI rejects caller-provided update trust material", () => {
+  const result = spawnSync(process.execPath, [CLI, "update", "apply", "--public-key", "attacker.pem", "--json"], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.equal(JSON.parse(result.stdout).reason, "public_key_argument_forbidden");
 });

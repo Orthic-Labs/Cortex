@@ -1,13 +1,15 @@
 // D16: update rollback — current↔previous with fixture stores.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, renameSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { backupStore, stageUpdate, applyStaged } from "../lib/update/apply.mjs";
+import { applySignedLocalArtifactUpdate, backupStore, stageUpdate, applyStaged, recoverInterruptedSwap, recoverPendingUpdate } from "../lib/update/apply.mjs";
 import { rollback } from "../lib/update/rollback.mjs";
 import * as manifestModule from "../lib/update/manifest.mjs";
 
@@ -18,7 +20,9 @@ function fixtureRoot() {
   mkdirSync(join(root, ".agent", "graph"), { recursive: true });
   writeFileSync(join(root, "app", "version.txt"), "v1");
   writeFileSync(join(root, "app-v2", "version.txt"), "v2");
-  writeFileSync(join(root, ".agent", "graph", "graph.db"), "sqlite-v1");
+  const db = new DatabaseSync(join(root, ".agent", "graph", "graph.db"));
+  db.exec("CREATE TABLE state (value TEXT); INSERT INTO state VALUES ('sqlite-v1')");
+  db.close();
   return root;
 }
 
@@ -46,10 +50,11 @@ test("rollback with a store backup restores the database", () => {
   try {
     const backup = backupStore(root);
     assert.equal(backup.backedUp, true);
-    writeFileSync(join(root, ".agent", "graph", "graph.db"), "sqlite-v2");
+    const db = new DatabaseSync(join(root, ".agent", "graph", "graph.db")); db.exec("UPDATE state SET value = 'sqlite-v2'"); db.close();
     const result = rollback({ appDir: join(root, "app"), priorDir: join(root, "app"), storeBackup: backup.path, root });
     assert.equal(result.ok, true);
-    assert.equal(readFileSync(join(root, ".agent", "graph", "graph.db"), "utf8"), "sqlite-v1");
+    const restored = new DatabaseSync(join(root, ".agent", "graph", "graph.db"));
+    assert.equal(restored.prepare("SELECT value FROM state").get().value, "sqlite-v1"); restored.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -82,24 +87,120 @@ test("one prior version is retained after apply", () => {
   }
 });
 
-test("local signed artifact update applies then CLI rollback restores", () => {
+test("apply recovery restores a journaled last working app", () => {
+  const root = fixtureRoot();
+  try {
+    const appDir = join(root, "app"), priorDir = join(root, "app-prior");
+    mkdirSync(priorDir); writeFileSync(join(priorDir, "version.txt"), "v1");
+    rmSync(appDir, { recursive: true });
+    writeFileSync(join(root, ".cortex-swap-journal.json"), JSON.stringify({ appDir, priorDir }));
+    assert.equal(recoverInterruptedSwap({ appDir, priorDir }).recovered, true);
+    assert.equal(readFileSync(join(appDir, "version.txt"), "utf8"), "v1");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("local signed update fails closed without shipped trust root", () => {
   const root = fixtureRoot();
   try {
     assert.equal(typeof manifestModule.treeDigest, "function");
     const artifact = join(root, "artifact");
     mkdirSync(artifact); writeFileSync(join(artifact, "version.txt"), "v2");
     const keys = generateKeyPairSync("ed25519");
-    const publicKey = join(root, "trusted.pem");
-    writeFileSync(publicKey, keys.publicKey.export({ type: "spki", format: "pem" }));
-    const manifest = { schemaVersion: 1, channel: "stable", version: "0.3.0", commit: "a".repeat(40), publishedAt: "2026-08-08T00:00:00Z", artifacts: [{ name: "local", sha256: typeof manifestModule.treeDigest === "function" ? manifestModule.treeDigest(artifact) : "missing" }], signature: "" };
+    const manifest = { schemaVersion: 1, channel: "stable", version: "0.3.0", commit: "a".repeat(40), publishedAt: "2026-08-08T00:00:00Z", artifacts: [{ name: "local", platform: process.platform, arch: process.arch, sha256: typeof manifestModule.treeDigest === "function" ? manifestModule.treeDigest(artifact) : "missing" }], signatureAlgorithm: "Ed25519", keyId: "ephemeral", signature: "" };
     if (typeof manifestModule.canonicalManifestPayload !== "function") return;
     manifest.signature = sign(null, Buffer.from(manifestModule.canonicalManifestPayload(manifest)), keys.privateKey).toString("base64");
     const manifestPath = join(root, "manifest.json"); writeFileSync(manifestPath, JSON.stringify(manifest));
     const cli = join(import.meta.dirname, "..", "scripts", "cortex.mjs");
-    const apply = spawnSync(process.execPath, [cli, "update", "apply", "--manifest", manifestPath, "--public-key", publicKey, "--artifact", artifact, "--artifact-name", "local", "--app-dir", join(root, "app"), "--prior-dir", join(root, "prior"), "--repo-root", root, "--current-version", "0.2.0", "--json"], { encoding: "utf8" });
-    assert.equal(apply.status, 0, apply.stderr); assert.equal(JSON.parse(apply.stdout).ok, true);
-    const rollbackCli = spawnSync(process.execPath, [cli, "update", "rollback", "--app-dir", join(root, "app"), "--prior-dir", join(root, "prior"), "--repo-root", root, "--json"], { encoding: "utf8" });
-    assert.equal(rollbackCli.status, 0, rollbackCli.stderr); assert.equal(JSON.parse(rollbackCli.stdout).ok, true);
+    const apply = spawnSync(process.execPath, [cli, "update", "apply", "--manifest", manifestPath, "--artifact", artifact, "--artifact-name", "local", "--app-dir", join(root, "app"), "--prior-dir", join(root, "prior"), "--repo-root", root, "--json"], { encoding: "utf8" });
+    assert.notEqual(apply.status, 0, apply.stderr); assert.equal(JSON.parse(apply.stdout).reason, "update_trust_root_missing");
     assert.equal(readFileSync(join(root, "app", "version.txt"), "utf8"), "v1");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("local update rejects a symlinked app target before trust lookup", () => {
+  const root = fixtureRoot(), outside = mkdtempSync(join(tmpdir(), "cortex-outside-"));
+  try {
+    rmSync(join(root, "app"), { recursive: true });
+    try { symlinkSync(outside, join(root, "app"), "junction"); } catch { return; }
+    const result = applySignedLocalArtifactUpdate({ manifestPath: "missing", artifactDir: outside, artifactName: "local", appDir: join(root, "app"), priorDir: join(root, "prior"), repoRoot: root });
+    assert.equal(result.reason, "update_validation_failed");
+    assert.match(result.error, /unsafe update target/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("update receipt integrity uses a separate external key namespace", async () => {
+  const root = fixtureRoot(), keyDir = mkdtempSync(join(tmpdir(), "cortex-update-keys-"));
+  try {
+    const integrity = await import("../lib/init/state-integrity.mjs");
+    const receipt = integrity.sealLocalState(root, { version: "0.3.0", commit: "a".repeat(40) }, { namespace: "update", stateKeyDir: keyDir });
+    assert.doesNotThrow(() => integrity.verifyLocalState(root, receipt, { namespace: "update", stateKeyDir: keyDir }));
+    receipt.version = "9.9.9";
+    assert.throws(() => integrity.verifyLocalState(root, receipt, { namespace: "update", stateKeyDir: keyDir }), /state_integrity_invalid/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(keyDir, { recursive: true, force: true }); }
+});
+
+test("pending rollback transaction restores both failed app and database", async () => {
+  const root = fixtureRoot();
+  try {
+    const integrity = await import("../lib/init/state-integrity.mjs"), appDir = join(root, "app"), priorDir = join(root, "app-prior"), failedApp = join(root, "app.failed"), dbPath = join(root, ".agent", "graph", "graph.db"), failedDb = `${dbPath}.failed`;
+    mkdirSync(failedApp); writeFileSync(join(failedApp, "version.txt"), "v2");
+    const db = new DatabaseSync(dbPath); db.exec("UPDATE state SET value = 'sqlite-v2'"); db.close(); copyFileSync(dbPath, failedDb);
+    const reset = new DatabaseSync(dbPath); reset.exec("UPDATE state SET value = 'sqlite-v1'"); reset.close();
+    mkdirSync(join(root, ".agent", "update"), { recursive: true });
+    writeFileSync(join(root, ".agent", "update", "transaction.json"), JSON.stringify(integrity.sealLocalState(root, { operation: "rollback", phase: "rollback-prepared", appDir, priorDir, dbPath, failedApp, failedDb, hadDb: true, preAppDigest: manifestModule.treeDigest(failedApp), preDbDigest: createHash("sha256").update(readFileSync(failedDb)).digest("hex") }, { namespace: "update" })));
+    assert.equal(recoverPendingUpdate(root).recovered, true);
+    assert.equal(readFileSync(join(appDir, "version.txt"), "utf8"), "v2");
+    const restored = new DatabaseSync(dbPath); assert.equal(restored.prepare("SELECT value FROM state").get().value, "sqlite-v2"); restored.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("direct rollback recovers a pending apply journal before receipt handling", async () => {
+  const root = fixtureRoot();
+  try {
+    const integrity = await import("../lib/init/state-integrity.mjs"), appDir = join(root, "app"), priorDir = join(root, "app-prior"), journalPath = join(root, ".agent", "update", "transaction.json");
+    const backup = backupStore(root); renameSync(appDir, priorDir); mkdirSync(appDir); writeFileSync(join(appDir, "version.txt"), "v2");
+    const receipt = { channel: "stable", version: "0.2.0", commit: "a".repeat(40), storeBackup: backup.path, storeBackupDigest: createHash("sha256").update(readFileSync(backup.path)).digest("hex") };
+    mkdirSync(join(root, ".agent", "update"), { recursive: true });
+    writeFileSync(journalPath, JSON.stringify(integrity.sealLocalState(root, { phase: "app-swapped", appDir, priorDir, artifactDigest: manifestModule.treeDigest(appDir), receipt }, { namespace: "update" })));
+    assert.equal(rollback({ appDir, priorDir, root }).ok, true);
+    assert.equal(existsSync(journalPath), false);
+    assert.equal(readFileSync(join(appDir, "version.txt"), "utf8"), "v1");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("rollback rejects a retained app outside its repository root", () => {
+  const root = fixtureRoot(), outside = mkdtempSync(join(tmpdir(), "cortex-outside-prior-"));
+  try {
+    writeFileSync(join(outside, "version.txt"), "outside");
+    const result = rollback({ appDir: join(root, "app"), priorDir: outside, root });
+    assert.equal(result.ok, false);
+    assert.match(result.problems.join(" "), /unsafe rollback target/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("apply recovery restores a retired prior before receipt commit", async () => {
+  const root = fixtureRoot();
+  try {
+    const integrity = await import("../lib/init/state-integrity.mjs"), appDir = join(root, "app"), priorDir = join(root, "app-prior"), retiredPrior = `${priorDir}.retired`;
+    mkdirSync(priorDir); writeFileSync(join(priorDir, "version.txt"), "v0"); renameSync(priorDir, retiredPrior); renameSync(appDir, priorDir);
+    mkdirSync(join(root, ".agent", "update"), { recursive: true });
+    writeFileSync(join(root, ".agent", "update", "transaction.json"), JSON.stringify(integrity.sealLocalState(root, { operation: "apply", phase: "prepared", appDir, priorDir, retiredPrior, preAppDigest: manifestModule.treeDigest(priorDir), prePriorDigest: manifestModule.treeDigest(retiredPrior), artifactDigest: "a".repeat(64) }, { namespace: "update" })));
+    assert.equal(recoverPendingUpdate(root).recovered, true);
+    assert.equal(readFileSync(join(appDir, "version.txt"), "utf8"), "v1");
+    assert.equal(readFileSync(join(priorDir, "version.txt"), "utf8"), "v0");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("prepared apply recovery keeps pre-state before retiring prior", async () => {
+  const root = fixtureRoot();
+  try {
+    const integrity = await import("../lib/init/state-integrity.mjs"), appDir = join(root, "app"), priorDir = join(root, "app-prior"), next = `${appDir}.next`;
+    mkdirSync(priorDir); writeFileSync(join(priorDir, "version.txt"), "v0"); mkdirSync(next); writeFileSync(join(next, "version.txt"), "v2");
+    mkdirSync(join(root, ".agent", "update"), { recursive: true });
+    writeFileSync(join(root, ".agent", "update", "transaction.json"), JSON.stringify(integrity.sealLocalState(root, { operation: "apply", phase: "prepared", appDir, priorDir, next, retiredPrior: `${priorDir}.retired`, preAppDigest: manifestModule.treeDigest(appDir), prePriorDigest: manifestModule.treeDigest(priorDir), artifactDigest: manifestModule.treeDigest(next) }, { namespace: "update" })));
+    assert.equal(recoverPendingUpdate(root).recovered, true);
+    assert.equal(existsSync(next), false); assert.equal(readFileSync(join(appDir, "version.txt"), "utf8"), "v1"); assert.equal(readFileSync(join(priorDir, "version.txt"), "utf8"), "v0");
+    const staged = stageUpdate({ fromDir: join(root, "app-v2"), toDir: appDir }); applyStaged({ stagingDir: staged, appDir, priorDir });
+    assert.equal(rollback({ appDir, priorDir, root }).ok, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

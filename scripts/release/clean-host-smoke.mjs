@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 
 import { verifyCandidate } from "./check-release.mjs";
 import { npmCliArgs } from "./npm-cli.mjs";
@@ -19,9 +21,19 @@ function runNode(script, args, options = {}) {
 }
 
 export function validateQueryEvidence(payload, needle = "releaseProof") {
-  const matches = (Array.isArray(payload?.results) ? payload.results : []).filter((result) => JSON.stringify(result).includes(needle));
-  if (!matches.length) throw new Error(`query returned no evidence for ${needle}`);
-  return { matchCount: matches.length, refs: matches.map((result) => result.path ?? result.id ?? result.name ?? "result") };
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  const file = `file:${needle}.mjs`, symbol = `symbol:${needle}.mjs::${needle}`;
+  const refs = results.map((result) => result?.id).filter((id) => id === file || id === symbol);
+  if (!refs.includes(file) || !refs.includes(symbol)) throw new Error(`query returned no exact evidence for ${needle}`);
+  return { matchCount: refs.length, refs };
+}
+
+export function parseInitializeResponse(output) {
+  let responses;
+  try { responses = String(output).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)); } catch { throw new Error("invalid MCP initialize response"); }
+  const response = responses.find((entry) => entry?.jsonrpc === "2.0" && entry.id === 1 && entry.result?.serverInfo);
+  if (!response) throw new Error("MCP initialize response missing JSON-RPC 2.0 id 1 serverInfo");
+  return response.result;
 }
 
 export async function runCleanHostSmoke({ candidate } = {}) {
@@ -31,12 +43,12 @@ export async function runCleanHostSmoke({ candidate } = {}) {
   const tarballs = verified.compatibility.artifacts.filter((artifact) => artifact.name.endsWith(".tgz"));
   if (tarballs.length !== 1) throw new Error("candidate must contain one npm tarball");
   const temp = mkdtempSync(join(tmpdir(), "cortex-clean-host-"));
-  const stages = { verify: true, init: false, query: false, mcp: false, updateCheck: false, updateApply: false, rollback: false, uninstall: false };
+  const stages = { verify: true, init: false, query: false, mcp: false, updateCheck: false, updateTrustMissing: false, updateApply: false, rollback: false, uninstall: false };
   try {
     const prefix = join(temp, "prefix");
     const tarball = join(candidateDir, tarballs[0].name);
     run(process.execPath, npmCliArgs(["install", "--prefix", prefix, "--omit=dev", "--no-audit", "--no-fund", tarball]));
-    const packageRoot = join(prefix, "node_modules", "@orthic-labs", "cortex");
+    const packageRoot = join(prefix, "node_modules", ...verified.compatibility.packageName.split("/"));
     if (!existsSync(packageRoot)) throw new Error("local tarball was not installed");
     const repo = join(temp, "repo");
     mkdirSync(repo);
@@ -52,27 +64,42 @@ export async function runCleanHostSmoke({ candidate } = {}) {
     const queryEvidence = validateQueryEvidence(query);
     stages.query = true;
     const request = `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "clean-host", version: "1" } } })}\n`;
-    const handshake = runNode(mcp, ["--root", repo], { cwd: repo, input: request });
-    if (!/serverInfo/.test(handshake)) throw new Error("installed MCP initialize handshake failed");
+    parseInitializeResponse(runNode(mcp, ["--root", repo], { cwd: repo, input: request }));
     stages.mcp = true;
     JSON.parse(runNode(cortex, ["update", "check", "--offline", "--json"], { cwd: repo }));
     stages.updateCheck = true;
-    const { stageUpdate, applyStaged } = await import(pathToFileURL(join(packageRoot, "lib", "update", "apply.mjs")));
-    const { rollback } = await import(pathToFileURL(join(packageRoot, "lib", "update", "rollback.mjs")));
-    const app = join(temp, "app");
+    const { canonicalManifestPayload, treeDigest } = await import(pathToFileURL(join(packageRoot, "lib", "update", "manifest.mjs")));
+    const app = join(repo, "app"), prior = join(repo, "app.prior");
     const update = join(temp, "update");
     mkdirSync(app); mkdirSync(update);
     writeFileSync(join(app, "version.txt"), "before\n");
     writeFileSync(join(update, "version.txt"), "after\n");
-    applyStaged({ stagingDir: stageUpdate({ fromDir: update, toDir: app }), appDir: app, priorDir: `${app}.prior` });
+    writeFileSync(join(app, "package.json"), JSON.stringify({ name: "@orthic-labs/cortex-target", version: "0.2.0" }));
+    writeFileSync(join(update, "package.json"), JSON.stringify({ name: "@orthic-labs/cortex-target", version: "0.3.0" }));
+    const keys = generateKeyPairSync("ed25519"), manifestPath = join(temp, "manifest.json");
+    const manifest = { schemaVersion: 1, channel: "stable", version: "0.3.0", commit: "a".repeat(40), publishedAt: "2026-08-08T00:00:00Z", artifacts: [{ name: "local", packageName: "@orthic-labs/cortex-target", platform: process.platform, arch: process.arch, sha256: treeDigest(update) }], signatureAlgorithm: "Ed25519", keyId: "ephemeral", signature: "" };
+    manifest.signature = sign(null, Buffer.from(canonicalManifestPayload(manifest)), keys.privateKey).toString("base64");
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const graph = join(repo, ".agent", "graph", "graph.db");
+    let db = new DatabaseSync(graph); db.exec("CREATE TABLE IF NOT EXISTS clean_host_update_proof (value TEXT); DELETE FROM clean_host_update_proof; INSERT INTO clean_host_update_proof VALUES ('before')"); db.close();
+    const missingTrust = spawnSync(process.execPath, [cortex, "update", "apply", "--manifest", manifestPath, "--artifact", update, "--artifact-name", "local", "--app-dir", app, "--prior-dir", prior, "--repo-root", repo, "--json"], { cwd: repo, encoding: "utf8" });
+    if (missingTrust.status === 0 || JSON.parse(missingTrust.stdout).reason !== "update_trust_root_missing") throw new Error("installed update trusted an absent root");
+    stages.updateTrustMissing = true;
+    writeFileSync(join(packageRoot, "lib", "update", "trusted-update-keys.json"), JSON.stringify({ schemaVersion: 1, keys: [{ keyId: "ephemeral", algorithm: "Ed25519", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }) }] }));
+    const apply = JSON.parse(runNode(cortex, ["update", "apply", "--manifest", manifestPath, "--artifact", update, "--artifact-name", "local", "--app-dir", app, "--prior-dir", prior, "--repo-root", repo, "--json"], { cwd: repo }));
+    if (!apply.ok) throw new Error(`installed update apply failed: ${apply.reason}`);
     if (readFileSync(join(app, "version.txt"), "utf8") !== "after\n") throw new Error("staged update did not apply");
+    db = new DatabaseSync(graph); db.exec("UPDATE clean_host_update_proof SET value = 'after'"); db.close();
     stages.updateApply = true;
-    if (!rollback({ appDir: app, priorDir: `${app}.prior`, root: repo }).ok || readFileSync(join(app, "version.txt"), "utf8") !== "before\n") throw new Error("packaged rollback did not restore prior app");
+    const rolled = JSON.parse(runNode(cortex, ["update", "rollback", "--app-dir", app, "--prior-dir", prior, "--repo-root", repo, "--json"], { cwd: repo }));
+    if (!rolled.ok || readFileSync(join(app, "version.txt"), "utf8") !== "before\n") throw new Error("packaged rollback did not restore prior app");
+    db = new DatabaseSync(graph); const restored = db.prepare("SELECT value FROM clean_host_update_proof").get().value; db.close();
+    if (restored !== "before") throw new Error("packaged rollback did not restore store");
     stages.rollback = true;
     const uninstalled = JSON.parse(runNode(cortex, ["uninstall", "--root", repo, "--json"], { cwd: repo }));
     if (!uninstalled.ok || readFileSync(join(repo, "CORTEX-AGENT.md"), "utf8") !== "# original\n") throw new Error("uninstall did not restore host file");
     stages.uninstall = true;
-    return { schemaVersion: 1, ok: true, stages, queryEvidence };
+    return { schemaVersion: 1, ok: true, stages, queryEvidence, storeEvidence: { before: "before", after: "after", restored } };
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

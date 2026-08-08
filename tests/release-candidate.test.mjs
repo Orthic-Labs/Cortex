@@ -2,7 +2,9 @@
 // inventoried, and SBOM-backed; no publishing.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -68,6 +70,48 @@ test("candidate verification rejects an unlisted extra file", () => {
   } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
+test("candidate build rejects a nonempty output directory", () => {
+  const out = mkdtempSync(join(tmpdir(), "cortex-rc-nonempty-"));
+  try {
+    writeFileSync(join(out, "leftover.txt"), "leftover");
+    assert.throws(() => buildCandidate({ out, allowDirty: true }), /empty output/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+test("candidate build rejects any repository output outside release candidates", () => {
+  const out = join(import.meta.dirname, "candidate-output");
+  try {
+    rmSync(out, { recursive: true, force: true });
+    assert.throws(() => buildCandidate({ out, allowDirty: true }), /release\/candidates/);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+test("candidate verification rejects duplicate checksum names", () => {
+  const out = mkdtempSync(join(tmpdir(), "cortex-rc-duplicate-"));
+  try {
+    buildCandidate({ out, allowDirty: true });
+    const checksums = join(out, "checksums.txt");
+    writeFileSync(checksums, `${readFileSync(checksums, "utf8")}${readFileSync(checksums, "utf8").split("\n")[0]}\n`);
+    assert.equal(verifyCandidate(out).ok, false);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
+test("candidate verification rejects a tarball symlink entry", (t) => {
+  const out = mkdtempSync(join(tmpdir(), "cortex-rc-tar-symlink-"));
+  try {
+    const candidate = buildCandidate({ out, allowDirty: true }), tarball = candidate.compatibility.artifacts.find((artifact) => artifact.name.endsWith(".tgz")).name;
+    const stage = join(out, "tar-stage"); mkdirSync(join(stage, "package"), { recursive: true });
+    writeFileSync(join(stage, "package", "package.json"), JSON.stringify({ name: candidate.compatibility.packageName, version: candidate.compatibility.version }));
+    try { symlinkSync("elsewhere", join(stage, "package", "escape")); } catch { t.skip("symlink privilege unavailable"); return; }
+    execFileSync("tar", ["-czf", join(out, tarball), "-C", stage, "package"]); rmSync(stage, { recursive: true, force: true });
+    const hash = createHash("sha256").update(readFileSync(join(out, tarball))).digest("hex"), compatibility = JSON.parse(readFileSync(join(out, "compatibility.json"), "utf8"));
+    compatibility.artifacts.find((artifact) => artifact.name === tarball).sha256 = hash;
+    writeFileSync(join(out, "compatibility.json"), JSON.stringify(compatibility));
+    writeFileSync(join(out, "checksums.txt"), readFileSync(join(out, "checksums.txt"), "utf8").replace(/^([a-f0-9]{64})(  .*\.tgz)$/m, `${hash}$2`));
+    assert.equal(verifyCandidate(out).ok, false);
+  } finally { rmSync(out, { recursive: true, force: true }); }
+});
+
 test("candidate verification passes for a fresh build", () => {
   const out = mkdtempSync(join(tmpdir(), "cortex-rc-verify-"));
   try {
@@ -98,4 +142,14 @@ test("candidate verification fails on a tampered checksum", () => {
 test("candidate build rejects a dirty tree", () => {
   // The worktree is dirty by design during dispatch; assert the guard fires.
   assert.throws(() => buildCandidate({ out: "/tmp/should-not-run" }), /clean working tree/);
+});
+
+test("candidate CLI accepts omitted optional version", () => {
+  const out = mkdtempSync(join(tmpdir(), "cortex-rc-cli-"));
+  try {
+    const script = join(import.meta.dirname, "..", "scripts", "release", "build-candidate.mjs");
+    const result = spawnSync(process.execPath, [script, "--allow-dirty", "--platform", "current", "--out", out], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(verifyCandidate(out).ok, true);
+  } finally { rmSync(out, { recursive: true, force: true }); }
 });

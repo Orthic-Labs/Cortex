@@ -157,6 +157,26 @@ async function runFacadeCommand(command, args, { root, outDir }) {
         return EXIT.OK;
       }
       if (subcommand === "apply") {
+        if (args["public-key"] !== undefined) {
+          printResult({ schemaVersion: 1, owner, action: "apply-local-artifact", ok: false, reason: "public_key_argument_forbidden" }, args);
+          return EXIT.INTERNAL;
+        }
+        if (args["current-version"] !== undefined) {
+          printResult({ schemaVersion: 1, owner, action: "apply-local-artifact", ok: false, reason: "current_version_argument_forbidden" }, args);
+          return EXIT.INTERNAL;
+        }
+        const local = ["manifest", "artifact", "artifact-name", "app-dir", "prior-dir", "repo-root"];
+        const supplied = local.filter((key) => args[key] !== undefined);
+        if (supplied.length) {
+          const { applySignedLocalArtifactUpdate } = await import("../../lib/update/apply.mjs");
+          const result = applySignedLocalArtifactUpdate({
+            manifestPath: args.manifest, artifactDir: args.artifact,
+            artifactName: args["artifact-name"], appDir: args["app-dir"], priorDir: args["prior-dir"],
+            repoRoot: args["repo-root"],
+          });
+          printResult({ schemaVersion: 1, owner, action: "apply-local-artifact", ...result }, args);
+          return result.ok ? EXIT.OK : EXIT.INTERNAL;
+        }
         // Portable/native apply requires a signed manifest; package-manager
         // channels print the owning-manager command and never self-replace.
         if (owner.owner === "npm" || owner.owner === "homebrew" || owner.owner === "winget") {
@@ -167,6 +187,12 @@ async function runFacadeCommand(command, args, { root, outDir }) {
         return EXIT.OK;
       }
       if (subcommand === "rollback") {
+        if (args["app-dir"] || args["prior-dir"] || args["repo-root"]) {
+          const { rollback } = await import("../../lib/update/rollback.mjs");
+          const result = rollback({ appDir: args["app-dir"], priorDir: args["prior-dir"], root: args["repo-root"], receiptPath: join(args["repo-root"] ?? root, ".agent", "update", "accepted-manifest.json") });
+          printResult({ schemaVersion: 1, owner, action: "rollback", ...result }, args);
+          return result.ok ? EXIT.OK : EXIT.INTERNAL;
+        }
         printResult({ schemaVersion: 1, owner, action: "rollback", note: "rollback restores the prior app version and compatible store backup" }, args);
         return EXIT.OK;
       }
@@ -216,6 +242,8 @@ export async function dispatchFacade(argv, { root, outDir }) {
   const { command, rest } = { command: argv[0], rest: argv.slice(1) };
   const args = parseArgs(rest);
   if (!command) return null;
+  try { (await import("../../lib/update/apply.mjs")).recoverPendingUpdate(root); }
+  catch (error) { printResult(machineError("update_recovery_failed", String(error.message ?? error)), args, { stderr: true }); return { handled: true, exitCode: EXIT.INTERNAL }; }
   const facade = ["status", "search", "show", "expand", "impact", "docs", "rules", "mcp", "service", "languages", "update", "init", "uninstall"];
   if (!facade.includes(command)) return null;
   const exitCode = await runFacadeCommand(command, args, { root, outDir });
