@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -105,4 +106,23 @@ test("cortex update apply for source owner requires a signed manifest path", () 
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.ok(payload.action === "delegate" || payload.action === "require-signed-manifest");
+});
+
+test("Ed25519 manifest verification trusts only an explicit public key", async () => {
+  const module = await import("../lib/update/manifest.mjs");
+  assert.equal(typeof module.canonicalManifestPayload, "function");
+  assert.equal(typeof module.verifySignedManifest, "function");
+  if (typeof module.canonicalManifestPayload !== "function" || typeof module.verifySignedManifest !== "function") return;
+  const dir = mkdtempSync(join(tmpdir(), "cortex-update-key-"));
+  try {
+    const keys = generateKeyPairSync("ed25519");
+    const manifest = { schemaVersion: 1, channel: "stable", version: "0.3.0", commit: "a".repeat(40), publishedAt: "2026-08-08T00:00:00Z", artifacts: [], publicKey: "attacker-controlled", signature: "" };
+    manifest.signature = sign(null, Buffer.from(module.canonicalManifestPayload(manifest)), keys.privateKey).toString("base64");
+    const trusted = join(dir, "trusted.pem");
+    writeFileSync(trusted, keys.publicKey.export({ type: "spki", format: "pem" }));
+    assert.equal(module.verifySignedManifest(manifest, { publicKeyPath: trusted }).ok, true);
+    manifest.version = "9.9.9";
+    assert.equal(module.verifySignedManifest(manifest, { publicKeyPath: trusted }).ok, false);
+    assert.equal(module.verifySignedManifest(manifest, {}).reason, "missing_public_key");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

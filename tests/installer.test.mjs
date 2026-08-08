@@ -69,3 +69,15 @@ test("installer uninstall restores non-UTF8 host bytes", () => {
     assert.deepEqual(readFileSync(file), original);
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
+
+test("installer state validator rejects corrupt and escaping restore plans", async () => {
+  const module = await import("../scripts/cortex-install.mjs");
+  assert.equal(typeof module.validateInstallState, "function");
+  if (typeof module.validateInstallState !== "function") return;
+  const root = mkdtempSync(join(tmpdir(), "cortex-installer-state-"));
+  try {
+    assert.throws(() => module.validateInstallState(root, { files: { [join(root, "..", "escape")]: { exists: false } } }), /state_invalid/);
+    assert.throws(() => module.validateInstallState(root, { files: { [root]: { exists: false } } }), /state_invalid/);
+    assert.doesNotThrow(() => module.validateInstallState(root, { files: { [join(root, "empty")]: { exists: true, bytes: "", content: "" } } }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

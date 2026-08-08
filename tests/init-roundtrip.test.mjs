@@ -95,3 +95,15 @@ test("CLI uninstall restores non-UTF8 host bytes", () => {
     assert.equal(uninstall(root).idempotent, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("init state validator rejects corrupt and escaping restore plans", async () => {
+  const module = await import("../lib/init/apply.mjs");
+  assert.equal(typeof module.validateInstallState, "function");
+  if (typeof module.validateInstallState !== "function") return;
+  const root = makeRepo("generic");
+  try {
+    assert.throws(() => module.validateInstallState(root, { files: { [join(root, "..", "escape")]: { exists: false } } }), /state_invalid/);
+    assert.throws(() => module.validateInstallState(root, { files: { [root]: { exists: false } } }), /state_invalid/);
+    assert.doesNotThrow(() => module.validateInstallState(root, { files: { [join(root, "empty")]: { exists: true, bytes: "", content: "" } } }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

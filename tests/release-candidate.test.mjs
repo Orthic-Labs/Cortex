@@ -50,11 +50,22 @@ test("candidate inventories one installable npm tarball", () => {
     const result = buildCandidate({ out, allowDirty: true });
     const tarballs = result.compatibility.artifacts.filter((artifact) => artifact.name.endsWith(".tgz"));
     assert.equal(tarballs.length, 1);
+    assert.equal(result.compatibility.packageName, "@orthic-labs/cortex");
+    assert.equal(result.compatibility.platform, `${process.platform}-${process.arch}`);
     assert.ok(existsSync(join(out, tarballs[0].name)));
     assert.equal(verifyCandidate(out).ok, true);
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
+});
+
+test("candidate verification rejects an unlisted extra file", () => {
+  const out = mkdtempSync(join(tmpdir(), "cortex-rc-extra-"));
+  try {
+    buildCandidate({ out, allowDirty: true });
+    writeFileSync(join(out, "extra.bin"), "unexpected");
+    assert.equal(verifyCandidate(out).ok, false);
+  } finally { rmSync(out, { recursive: true, force: true }); }
 });
 
 test("candidate verification passes for a fresh build", () => {
