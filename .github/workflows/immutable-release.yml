@@ -210,7 +210,7 @@ jobs:
           cache: pnpm
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cortex-candidate
           path: release/candidates/ubuntu
@@ -238,20 +238,20 @@ jobs:
           cache: pnpm
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cortex-candidate
           path: release/candidates/ubuntu
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cortex-sbom
           path: ${{ runner.temp }}/cortex-sbom
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: ${{ inputs.dry_run != 'true' }}
         with:
           name: cortex-macos-signed
           path: release/macos
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: ${{ inputs.dry_run != 'true' }}
         with:
           name: cortex-windows-signed
@@ -281,7 +281,7 @@ jobs:
           cache: pnpm
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cortex-candidate
           path: release/candidates/ubuntu
@@ -316,7 +316,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cortex-candidate
           path: release/candidates/ubuntu
