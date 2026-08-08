@@ -22,7 +22,7 @@ jobs:
       - run: node -e "JSON.parse(require('fs').readFileSync('server.json','utf8'))"
       # Downstream PRs only — never rewrites an existing release.
       - name: Open Homebrew tap PR
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           repository: Orthic-Labs/homebrew-tap
