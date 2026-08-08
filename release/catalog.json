@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "product": "Orthic Cortex",
+  "product": "Cortex",
   "version": "__VERSION__",
   "commit": "__COMMIT__",
   "artifacts": [

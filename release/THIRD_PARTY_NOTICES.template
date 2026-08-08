@@ -1,4 +1,4 @@
-Orthic Cortex includes third-party components under their own licenses.
+Cortex includes third-party components under their own licenses.
 
 Runtime dependencies (from package.json):
 - @modelcontextprotocol/sdk — MIT

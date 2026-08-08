@@ -30,6 +30,16 @@ test("exports include schemas, contracts, and service", () => {
   assert.equal(pkg.exports["./service"], "./lib/application/service.mjs");
 });
 
+test("exports include the sdk entry point with types", () => {
+  assert.equal(pkg.exports["./sdk"].types, "./sdk/types.d.ts");
+  assert.equal(pkg.exports["./sdk"].default, "./sdk/index.mjs");
+});
+
+test("files allowlist ships sdk and service directories", () => {
+  assert.ok(pkg.files.includes("sdk/"), "files must include sdk/");
+  assert.ok(pkg.files.includes("service/"), "files must include service/");
+});
+
 test("publish config is public and sideEffects false", () => {
   assert.equal(pkg.publishConfig?.access, "public");
   assert.equal(pkg.sideEffects, false);

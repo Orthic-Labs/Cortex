@@ -36,7 +36,7 @@ test("candidate build emits compatibility, checksums, SBOM, and catalog", () => 
     const result = buildCandidate({ out, allowDirty: true });
     assert.ok(result.compatibility);
     assert.equal(result.compatibility.schemaVersion, 1);
-    assert.equal(result.compatibility.product, "Orthic Cortex");
+    assert.equal(result.compatibility.product, "Cortex");
     assert.ok(result.compatibility.commit.length === 40);
     for (const file of ["compatibility.json", "checksums.txt", "SBOM.spdx.json", "artifact-catalog.json", "THIRD_PARTY_NOTICES"]) {
       assert.ok(existsSync(join(out, file)), `missing ${file}`);

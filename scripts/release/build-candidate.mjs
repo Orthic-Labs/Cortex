@@ -126,7 +126,7 @@ export function buildCandidate({ out = null, platform = null, version = null, al
 
   const compatibility = {
     schemaVersion: 1,
-    product: "Orthic Cortex",
+    product: "Cortex",
     packageName: pkg.name,
     platform: targetPlatform,
     version: pkg.version,
@@ -144,7 +144,7 @@ export function buildCandidate({ out = null, platform = null, version = null, al
 
   const catalog = {
     schemaVersion: 1,
-    product: "Orthic Cortex",
+    product: "Cortex",
     version: pkg.version,
     commit,
     platform: targetPlatform,

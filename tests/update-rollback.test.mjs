@@ -168,6 +168,22 @@ test("direct rollback recovers a pending apply journal before receipt handling",
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("rollback returns a structured failure for missing path arguments instead of throwing", () => {
+  const root = fixtureRoot();
+  try {
+    assert.doesNotThrow(() => rollback({ root }));
+    const missingBoth = rollback({ root });
+    assert.equal(missingBoth.ok, false);
+    assert.match(missingBoth.problems.join(" "), /rollback_missing_argument: appDir/);
+
+    const missingPrior = rollback({ appDir: join(root, "app"), root });
+    assert.equal(missingPrior.ok, false);
+    assert.match(missingPrior.problems.join(" "), /rollback_missing_argument: priorDir/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rollback rejects a retained app outside its repository root", () => {
   const root = fixtureRoot(), outside = mkdtempSync(join(tmpdir(), "cortex-outside-prior-"));
   try {

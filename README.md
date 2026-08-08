@@ -96,13 +96,17 @@ Bins: `cortex`, `cortex-watch`, `cortex-mcp` (MCP server), `cortex-install`.
 
 Parser depth varies by language (lexical fallback is broader than AST coverage). Dynamic runtime registration can stay unresolved without executable or compiler evidence. SCIP precision requires a repository-supplied export. Embeddings and semantic vector search are not active. No interactive visual graph explorer ships. Raw graph data is not copied into durable memory.
 
-## License
-
-Source-available proprietary license for internal use and evaluation; redistribution, repackaging, and competing use are prohibited. See [LICENSE](LICENSE).
-
 ## Repository truth docs
 - [Product overview](docs/product.md) — what this is and does (generated, code-grounded)
 - [Architecture](docs/architecture.md) — components, flows, interfaces (generated, code-grounded)
+
+## License
+
+Cortex is **source-available**, not open source: the repository is covered by the
+[Orthic Labs Source Use License v1.0](LICENSE), which permits internal and
+evaluation use. The SDK (`sdk/`), schemas (`schemas/`), and examples
+(`examples/`) are licensed under [Apache-2.0](LICENSES/README.md) for
+integration use. Trademarks: see [TRADEMARKS.md](TRADEMARKS.md).
 
 ---
 

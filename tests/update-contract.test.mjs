@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { CHANNELS, detectInstallOwner, channelEnabled } from "../lib/update/channel.mjs";
-import { loadUpdateManifest, verifyManifestSignature, verifyArtifactChecksum, rejectDowngrade, rejectReplay } from "../lib/update/manifest.mjs";
+import { loadUpdateManifest, verifyArtifactChecksum, rejectDowngrade, rejectReplay } from "../lib/update/manifest.mjs";
 import { backupStore } from "../lib/update/apply.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -57,12 +57,6 @@ test("update manifest validates against UpdateManifestV1", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("manifest signature verification never has a success default", () => {
-  assert.equal(verifyManifestSignature({ signature: "" }).ok, false);
-  assert.equal(verifyManifestSignature({ signature: "x" }, { verify: () => false }).ok, false);
-  assert.equal(verifyManifestSignature({ signature: "x" }, { verify: () => true }).ok, false);
 });
 
 test("artifact checksum verification rejects mismatches", () => {

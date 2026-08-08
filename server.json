@@ -1,5 +1,5 @@
 {
-  "name": "cortex",
+  "name": "io.github.Orthic-Labs/cortex",
   "version": "0.2.0",
   "description": "Local evidence-backed repository map — MCP server",
   "command": "npx",

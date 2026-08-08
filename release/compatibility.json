@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "product": "Orthic Cortex",
+  "product": "Cortex",
   "version": "0.2.0",
   "commit": "FULL_GIT_SHA",
   "sourceDateEpoch": 0,
@@ -20,6 +20,7 @@
     "tier_a": ["javascript", "typescript", "tsx", "python", "rust", "go", "java", "kotlin", "csharp", "c", "cpp", "objective-c"],
     "tier_b": ["php", "ruby", "swift", "dart", "scala", "elixir", "lua", "ocaml", "elm", "rescript", "solidity", "zig"],
     "tier_c": ["bash", "elisp", "erb", "html", "css", "json", "ql", "systemrdl", "tlaplus", "toml", "vue", "yaml"],
+    "tierNote": "Tiers reflect grammar and fixture depth; compiler-backed exact references currently cover JS/TS plus imported SCIP indexes.",
     "fixtureBacked": true
   },
   "supportPolicy": {

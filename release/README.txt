@@ -1,4 +1,4 @@
-Orthic Cortex — portable runtime bundle
+Cortex — portable runtime bundle
 
 This directory contains a self-contained Cortex installation:
 
