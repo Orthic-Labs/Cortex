@@ -97,7 +97,7 @@ jobs:
           test -f "$TARBALL"
           echo "path=$TARBALL" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$TARBALL" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cortex-candidate
           path: release/candidates/ubuntu
@@ -149,7 +149,7 @@ jobs:
         run: |
           cd release/macos
           bash ../../scripts/release/macos/sign-and-package.sh "${{ runner.temp }}/cortex-runtime"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cortex-macos-signed
           path: release/macos/Cortex-*.pkg
@@ -188,7 +188,7 @@ jobs:
           timestamp-digest: SHA256
       - run: pwsh -File scripts/release/windows/build-installer.ps1 -Staging "${{ runner.temp }}\cortex-runtime" -OutDir "${{ runner.temp }}"
       - run: pwsh -File scripts/release/windows/verify-signatures.ps1 -Root "${{ runner.temp }}\cortex-runtime"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cortex-windows-signed
           path: ${{ runner.temp }}\Cortex-*.exe
@@ -217,7 +217,7 @@ jobs:
       - run: node scripts/release/check-release.mjs release/candidates/ubuntu
       - run: test "$(sha256sum "${{ needs.package.outputs.tarball }}" | cut -d' ' -f1)" = "${{ needs.package.outputs.tarball_sha256 }}"
       - run: node scripts/release/sbom.mjs release/candidates/ubuntu > "$RUNNER_TEMP/SBOM.spdx.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cortex-sbom
           path: ${{ runner.temp }}/SBOM.spdx.json
@@ -295,7 +295,7 @@ jobs:
           TARBALL_SHA256: ${{ needs.package.outputs.tarball_sha256 }}
         run: |
           node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/clean-host-report.json")); const c=require("./release/candidates/ubuntu/compatibility.json"); if(!r.ok||!r.stages.rollback) process.exit(1); fs.writeFileSync(process.env.RUNNER_TEMP+"/receipt.json",JSON.stringify({schemaVersion:1,dryRun:process.env.DRY_RUN==="true",rollbackPassed:true,version:c.version,commit:c.commit,tarballSha256:process.env.TARBALL_SHA256})+"\n")'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cortex-clean-host-receipt
           path: ${{ runner.temp }}/receipt.json
