@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "product": "Orthic Cortex",
+  "version": "0.2.0",
+  "commit": "FULL_GIT_SHA",
+  "sourceDateEpoch": 0,
+  "contracts": { "public": 1, "store": 17, "ipc": 1 },
+  "storeMigration": {
+    "currentSchemaVersion": 17,
+    "minImportableSchemaVersion": 12,
+    "backupBeforeMigration": true,
+    "repairPath": "repairInterruptedMigration(dbPath, fromVersion)"
+  },
+  "platformCompatibility": {
+    "macos": { "arch": ["arm64", "x64"], "filesystem": "case-insensitive-by-default" },
+    "linux": { "arch": ["x64", "arm64"], "filesystem": "case-sensitive" },
+    "windows": { "arch": ["x64", "arm64"], "filesystem": "case-insensitive", "paths": ["UNC", "junctions"] }
+  },
+  "grammarManifestDigest": "sha256:...",
+  "artifacts": [
+    {
+      "name": "cortex-linux-x64.tar.gz",
+      "platform": "linux",
+      "arch": "x64",
+      "sha256": "...",
+      "size": 0,
+      "signed": false,
+      "sbom": "SBOM.spdx.json"
+    }
+  ]
+}

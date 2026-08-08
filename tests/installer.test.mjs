@@ -56,3 +56,16 @@ test("installer is idempotent and uninstall restores project files byte-for-byte
     assertSnapshot(tracked, original);
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
+
+test("installer uninstall restores non-UTF8 host bytes", () => {
+  const repo = mkdtempSync(join(tmpdir(), "cortex-installer-bytes-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q"], { cwd: repo }).status, 0);
+    const file = join(repo, "CORTEX-AGENT.md");
+    const original = Buffer.from([0, 255, 10, 128, 65]);
+    writeFileSync(file, original);
+    assert.equal(run(repo, ["--host", "generic", "--project"]).status, 0);
+    assert.equal(run(repo, ["--host", "generic", "--project", "--uninstall"]).status, 0);
+    assert.deepEqual(readFileSync(file), original);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});

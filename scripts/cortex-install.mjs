@@ -45,7 +45,8 @@ function saveState(root, state) {
 }
 function remember(state, path) {
   if (Object.hasOwn(state.files, path)) return;
-  state.files[path] = { exists: existsSync(path), content: existsSync(path) ? readFileSync(path, "utf8") : null };
+  const bytes = existsSync(path) ? readFileSync(path) : null;
+  state.files[path] = { exists: Boolean(bytes), content: bytes?.toString("utf8") ?? null, bytes: bytes?.toString("base64") ?? null };
 }
 function writeManaged(state, path, content) {
   remember(state, path);
@@ -123,7 +124,7 @@ function restore(root, state) {
   for (const [path, original] of Object.entries(state.files ?? {})) {
     if (original.exists) {
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, original.content ?? "", "utf8");
+      writeFileSync(path, original.bytes ? Buffer.from(original.bytes, "base64") : (original.content ?? ""), "utf8");
     } else rmSync(path, { force: true });
   }
   const markerDir = join(root, ".agent", "graph");
